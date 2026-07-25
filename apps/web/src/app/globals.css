@@ -1,26 +1,31 @@
 @import "tailwindcss";
 
+/* Color system for LichenDR */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --ld-background: #F4F7F5; /* fondo general */
+  --ld-sidebar: #173D35; /* sidebar primary */
+  --ld-sidebar-2: #225447; /* sidebar secondary */
+  --ld-green: #4F7C5B; /* verde principal */
+  --ld-text: #17231F; /* texto principal */
+  --ld-text-secondary: #56645E; /* texto secundario */
+  --ld-sand: #D9BD67; /* arena */
+  --ld-card: #FFFFFF; /* tarjetas */
+  --ld-border: #DCE5E0; /* bordes */
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Force light color scheme and remove automatic dark-mode switching */
+html {
+  color-scheme: light;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--ld-background);
+  color: var(--ld-text);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Utility focus outline */
+.ld-focus:focus {
+  outline: 2px solid var(--ld-green);
+  outline-offset: 2px;
 }

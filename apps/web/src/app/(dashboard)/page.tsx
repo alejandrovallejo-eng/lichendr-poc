@@ -7,7 +7,7 @@ export default function DashboardPage() {
     <div>
       <PageHeader title="LichenDR" subtitle="Biomonitoreo de líquenes para la República Dominicana" />
 
-      <p className="text-sm text-zinc-600 mb-4">
+      <p className="text-sm mb-4" style={{ color: "var(--ld-text-secondary)" }}>
         Organiza sitios, jornadas de muestreo, árboles e imágenes para generar una señal ambiental basada en líquenes.
       </p>
 
@@ -19,17 +19,24 @@ export default function DashboardPage() {
       </div>
 
       <div className="mb-6">
-        <button className="px-4 py-2 rounded bg-yellow-200 border">Crear primer proyecto (pendiente)</button>
+        <button
+          className="px-4 py-2 rounded border"
+          style={{ background: "var(--ld-sand)", color: "var(--ld-text)", borderColor: "var(--ld-border)" }}
+        >
+          Crear primer proyecto (pendiente)
+        </button>
       </div>
 
       <section className="mb-6">
-        <h3 className="font-semibold">Flujo</h3>
-        <p className="text-sm text-zinc-600">Proyecto → Sitio → Jornada → Árbol → Imagen</p>
+        <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Flujo</h3>
+        <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>Proyecto → Sitio → Jornada → Árbol → Imagen</p>
       </section>
 
       <section className="mb-6">
-        <h3 className="font-semibold">Aviso científico</h3>
-        <p className="text-sm text-zinc-600">No existen datos suficientes para una estimación ambiental.</p>
+        <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Aviso científico</h3>
+        <div style={{ background: "#EAF3EA", borderRadius: 8, padding: 12, border: "1px solid var(--ld-border)" }}>
+          <p className="text-sm" style={{ color: "var(--ld-text)" }}>No existen datos suficientes para una estimación ambiental.</p>
+        </div>
       </section>
 
       <ModulePlaceholder title="Vista rápida de módulos" />

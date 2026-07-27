@@ -19,12 +19,13 @@ export default function DashboardPage() {
       </div>
 
       <div className="mb-6">
-        <button
-          className="px-4 py-2 rounded border"
+        <a
+          href="/projects"
+          className="inline-block px-4 py-2 rounded border"
           style={{ background: "var(--ld-sand)", color: "var(--ld-text)", borderColor: "var(--ld-border)" }}
         >
-          Crear primer proyecto (pendiente)
-        </button>
+          Crear primer proyecto
+        </a>
       </div>
 
       <section className="mb-6">

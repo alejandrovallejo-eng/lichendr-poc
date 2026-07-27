@@ -22,20 +22,11 @@ create index if not exists idx_sampling_events_site_id on public.sampling_events
 create index if not exists idx_sampling_events_site_id_sampled_at_desc on public.sampling_events(site_id, sampled_at desc);
 create unique index if not exists idx_sampling_events_site_id_name_lower on public.sampling_events(site_id, lower(name));
 
-create or replace function public.set_updated_at()
-returns trigger as $$
-declare
-  row_ref alias for new;
-begin
-  row_ref.updated_at = now();
-  return row_ref;
-end;
-$$ language plpgsql;
-
 drop trigger if exists set_updated_at on public.sampling_events;
 create trigger set_updated_at
 before update on public.sampling_events
-for each row execute function public.set_updated_at();
+for each row
+execute function public.set_updated_at();
 
 alter table public.sampling_events enable row level security;
 

@@ -142,6 +142,13 @@ export default function ProjectsPage() {
                     {project.description ? (
                       <p className="text-sm mt-1" style={{ color: "var(--ld-text-secondary)" }}>{project.description}</p>
                     ) : null}
+                    <a
+                      href={`/sites?projectId=${project.id}`}
+                      className="inline-block mt-3 text-sm font-medium"
+                      style={{ color: "var(--ld-primary)" }}
+                    >
+                      Gestionar sitios
+                    </a>
                   </div>
                   <span className="text-xs uppercase" style={{ color: "var(--ld-text-secondary)" }}>
                     {new Date(project.createdAt).toLocaleDateString("es-DO", {

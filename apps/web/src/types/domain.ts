@@ -13,10 +13,17 @@ export interface Site {
   id: UUID;
   projectId: UUID;
   name: string;
-  latitude: number;
-  longitude: number;
-  altitude?: number;
+  description?: string;
+  province?: string;
+  municipality?: string;
+  latitude?: number;
+  longitude?: number;
+  gpsAccuracyM?: number;
+  locationSource: "unknown" | "manual" | "exif" | "gps";
+  radiusM: number;
+  notes?: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface SamplingEvent {

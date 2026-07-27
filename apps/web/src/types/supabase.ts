@@ -91,6 +91,53 @@ export type Database = {
           }
         ];
       };
+      sampling_events: {
+        Row: {
+          id: string;
+          site_id: string;
+          name: string;
+          sampled_at: string;
+          observer_names: string | null;
+          weather_notes: string | null;
+          protocol_version: string;
+          status: string;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          site_id: string;
+          name: string;
+          sampled_at?: string;
+          observer_names?: string | null;
+          weather_notes?: string | null;
+          protocol_version?: string;
+          status?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          site_id?: string;
+          name?: string;
+          sampled_at?: string;
+          observer_names?: string | null;
+          weather_notes?: string | null;
+          protocol_version?: string;
+          status?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "sampling_events_site_id_fkey";
+            columns: ["site_id"];
+            referencedRelation: "sites";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

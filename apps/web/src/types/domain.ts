@@ -29,9 +29,15 @@ export interface Site {
 export interface SamplingEvent {
   id: UUID;
   siteId: UUID;
-  date: string; // ISO date
-  observer?: string;
+  name: string;
+  sampledAt: string; // ISO datetime
+  observerNames?: string;
+  weatherNotes?: string;
+  protocolVersion: string;
+  status: "draft" | "completed";
   notes?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Tree {

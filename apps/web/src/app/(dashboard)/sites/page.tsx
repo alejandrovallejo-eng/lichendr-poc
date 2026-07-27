@@ -451,6 +451,13 @@ export default function SitesPage() {
                     <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>
                       Radio: {site.radiusM} m
                     </p>
+                    <a
+                      href={`/sampling-events?projectId=${selectedProject.id}&siteId=${site.id}`}
+                      className="text-sm font-medium"
+                      style={{ color: "var(--ld-primary)" }}
+                    >
+                      Gestionar jornadas
+                    </a>
                   </div>
                 </article>
               ))}

@@ -27,7 +27,22 @@ create table if not exists public.trees (
 
 create index if not exists idx_trees_site_id on public.trees(site_id);
 create unique index if not exists idx_trees_site_id_code_lower on public.trees(site_id, lower(code));
-create unique index if not exists idx_trees_id_site_id on public.trees(id, site_id);
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'trees_id_site_id_unique'
+      and conrelid = 'public.trees'::regclass
+      and contype = 'u'
+  ) then
+    alter table public.trees
+      add constraint trees_id_site_id_unique
+      unique (id, site_id);
+  end if;
+end
+$$;
 
 drop trigger if exists set_updated_at on public.trees;
 create trigger set_updated_at
@@ -100,6 +115,22 @@ create policy trees_delete_authenticated on public.trees
 grant select, insert, update, delete on public.trees to authenticated;
 
 grant execute on function public.set_updated_at() to authenticated;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'sampling_events_id_site_id_unique'
+      and conrelid = 'public.sampling_events'::regclass
+      and contype = 'u'
+  ) then
+    alter table public.sampling_events
+      add constraint sampling_events_id_site_id_unique
+      unique (id, site_id);
+  end if;
+end
+$$;
 
 create table if not exists public.tree_samples (
   id uuid primary key default gen_random_uuid(),

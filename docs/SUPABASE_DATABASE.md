@@ -70,6 +70,45 @@ La migración de jornadas de muestreo también crea:
 - Row Level Security (RLS) activado en la tabla,
 - políticas de acceso que permiten SELECT, INSERT, UPDATE y DELETE solo cuando el sitio y el proyecto relacionados pertenecen al usuario autenticado.
 
+## Qué crea la migración de árboles y muestras de árbol
+
+La migración crea la tabla `public.trees` con los campos:
+
+- `id`: uuid, clave primaria, generado por `gen_random_uuid()`.
+- `site_id`: uuid obligatorio, referencia `public.sites(id)` con `on delete cascade`.
+- `code`: texto obligatorio.
+- `species_name`: texto opcional.
+- `species_confidence`: texto obligatorio con valor por defecto `unknown`.
+- `latitude`: double precision opcional.
+- `longitude`: double precision opcional.
+- `gps_accuracy_m`: double precision opcional.
+- `location_source`: texto obligatorio con valor por defecto `unknown`.
+- `notes`: texto opcional.
+- `created_at`: timestamptz obligatorio con valor por defecto `now()`.
+- `updated_at`: timestamptz obligatorio con valor por defecto `now()`.
+
+La migración crea también la tabla `public.tree_samples` con los campos:
+
+- `id`: uuid, clave primaria, generado por `gen_random_uuid()`.
+- `site_id`: uuid obligatorio, referencia `public.sites(id)` con `on delete cascade`.
+- `sampling_event_id`: uuid obligatorio.
+- `tree_id`: uuid obligatorio.
+- `substrate_type`: texto obligatorio con valor por defecto `tree_bark`.
+- `trunk_orientation`: texto obligatorio con valor por defecto `unknown`.
+- `sampling_height_m`: double precision opcional.
+- `shade_level`: texto obligatorio con valor por defecto `unknown`.
+- `confidence_level`: texto obligatorio con valor por defecto `unknown`.
+- `notes`: texto opcional.
+- `created_at`: timestamptz obligatorio con valor por defecto `now()`.
+- `updated_at`: timestamptz obligatorio con valor por defecto `now()`.
+
+La migración de árboles y muestras de árbol también crea:
+
+- índices y restricciones de unicidad sobre códigos y relaciones compuestas,
+- triggers `set_updated_at` para actualizar `updated_at` en ambas tablas,
+- Row Level Security (RLS) activado en ambas tablas,
+- políticas de acceso que permiten SELECT, INSERT, UPDATE y DELETE solo cuando el sitio y el proyecto relacionados pertenecen al usuario autenticado.
+
 ## Restricciones importantes en `public.sites`
 
 - `name` no puede estar vacío.

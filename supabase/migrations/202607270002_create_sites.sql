@@ -66,7 +66,7 @@ create policy sites_insert_authenticated on public.sites
   with check (
     exists (
       select 1 from public.projects p
-      where p.id = new.project_id
+      where p.id = project_id
         and p.owner_id = auth.uid()
     )
   );
@@ -85,7 +85,7 @@ create policy sites_update_authenticated on public.sites
   with check (
     exists (
       select 1 from public.projects p
-      where p.id = new.project_id
+      where p.id = project_id
         and p.owner_id = auth.uid()
     )
   );

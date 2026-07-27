@@ -32,23 +32,27 @@ for each row execute function public.set_updated_at();
 
 alter table public.projects enable row level security;
 
-create policy if not exists projects_select_owner on public.projects
+drop policy if exists projects_select_owner on public.projects;
+create policy projects_select_owner on public.projects
   for select
   to authenticated
   using (owner_id = auth.uid());
 
-create policy if not exists projects_insert_owner on public.projects
+drop policy if exists projects_insert_owner on public.projects;
+create policy projects_insert_owner on public.projects
   for insert
   to authenticated
   with check (owner_id = auth.uid());
 
-create policy if not exists projects_update_owner on public.projects
+drop policy if exists projects_update_owner on public.projects;
+create policy projects_update_owner on public.projects
   for update
   to authenticated
   using (owner_id = auth.uid())
   with check (owner_id = auth.uid());
 
-create policy if not exists projects_delete_owner on public.projects
+drop policy if exists projects_delete_owner on public.projects;
+create policy projects_delete_owner on public.projects
   for delete
   to authenticated
   using (owner_id = auth.uid());

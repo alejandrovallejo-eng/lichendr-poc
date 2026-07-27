@@ -49,6 +49,27 @@ La migración de sitios también crea:
 - Row Level Security (RLS) activado en la tabla,
 - políticas de acceso que permiten SELECT, INSERT, UPDATE y DELETE solo cuando el proyecto relacionado pertenece al usuario autenticado.
 
+## Qué crea la migración de jornadas de muestreo
+
+La migración crea la tabla `public.sampling_events` con los campos:
+
+- `id`: uuid, clave primaria, generado por `gen_random_uuid()`.
+- `site_id`: uuid obligatorio, referencia `public.sites(id)` con `on delete cascade`.
+- `sampled_at`: timestamptz obligatorio.
+- `observer_names`: texto obligatorio, no vacío.
+- `weather_notes`: texto opcional.
+- `protocol_version`: texto obligatorio, no vacío, valor por defecto `1.0`.
+- `status`: texto obligatorio con valor por defecto `draft`.
+- `created_at`: timestamptz obligatorio con valor por defecto `now()`.
+- `updated_at`: timestamptz obligatorio con valor por defecto `now()`.
+
+La migración de jornadas de muestreo también crea:
+
+- una función y trigger para actualizar `updated_at` en cada modificación,
+- índices sobre `site_id` y `site_id` + `sampled_at`,
+- Row Level Security (RLS) activado en la tabla,
+- políticas de acceso que permiten SELECT, INSERT, UPDATE y DELETE solo cuando el sitio y el proyecto relacionados pertenecen al usuario autenticado.
+
 ## Restricciones importantes en `public.sites`
 
 - `name` no puede estar vacío.

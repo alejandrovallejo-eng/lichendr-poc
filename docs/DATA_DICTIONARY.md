@@ -2,7 +2,7 @@ Diccionario de datos (inicial)
 
 - `Project`: id(uuid), name, description, createdAt
 - `Site`: id, projectId, name, description, country_code, province, municipality, latitude, longitude, gps_accuracy_m, location_source, radius_m, notes, createdAt, updatedAt
-- `SamplingEvent`: id, siteId, date, observer
+- `SamplingEvent`: id, siteId, sampled_at, observer_names, weather_notes, protocol_version, status, createdAt, updatedAt
 - `Tree`: id, siteId, tag, species, createdAt
 - `TreeSample`: id, treeId, samplingEventId, notes
 - `ImageRecord`: id, treeSampleId, image metadata, uri

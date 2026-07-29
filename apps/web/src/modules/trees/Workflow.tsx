@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
 import type { Project, Site, SamplingEvent, Tree, TreeSample } from "@/types/domain";
@@ -935,6 +936,16 @@ export default function TreeWorkflow() {
                   {sampleWithTree.notes ? (
                     <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}><strong>Notas:</strong> {sampleWithTree.notes}</p>
                   ) : null}
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Link
+                    href={`/images?projectId=${selectedProjectId ?? ""}&siteId=${selectedSiteId ?? ""}&eventId=${selectedEventId ?? ""}&treeSampleId=${sampleWithTree.id}`}
+                    className="inline-flex items-center rounded border px-3 py-2 text-sm"
+                    style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}
+                  >
+                    Gestionar imágenes
+                  </Link>
                 </div>
               </article>
             ))}

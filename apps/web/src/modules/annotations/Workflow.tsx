@@ -15,6 +15,7 @@ import {
   upsertAnnotationPoint,
   upsertAnnotationSet,
   upsertMorphotype,
+  isValidAnnotationRoi,
   type AnnotationPointClassification,
   type AnnotationPointConfidenceLevel,
   type AnnotationPointDraft,
@@ -38,6 +39,12 @@ interface LocalPointState {
 interface PendingRoiPoint {
   x: number;
   y: number;
+}
+
+interface SelectedPointState {
+  pointIndex: number;
+  xNormalized: number;
+  yNormalized: number;
 }
 
 interface ActionRecord {
@@ -84,12 +91,16 @@ function getCategoryColor(classification: AnnotationPointClassification | null, 
   return match?.color ?? "#6b7280";
 }
 
+function isFullImageRoi(roi: { x: number | null; y: number | null; width: number | null; height: number | null }) {
+  return roi.x === 0 && roi.y === 0 && roi.width === 1 && roi.height === 1;
+}
+
 function getRoiSummary(roi: { x: number | null; y: number | null; width: number | null; height: number | null }) {
-  if (roi.x == null || roi.y == null || roi.width == null || roi.height == null) {
+  if (!isValidAnnotationRoi(roi)) {
     return "Imagen completa";
   }
 
-  return `ROI ${roi.x.toFixed(2)}, ${roi.y.toFixed(2)}, ${roi.width.toFixed(2)} × ${roi.height.toFixed(2)}`;
+  return isFullImageRoi(roi) ? "Imagen completa" : "Área de corteza";
 }
 
 export default function AnnotationsWorkflow() {
@@ -109,9 +120,10 @@ export default function AnnotationsWorkflow() {
   const [pointStates, setPointStates] = useState<Record<number, LocalPointState>>({});
   const [gridRows, setGridRows] = useState(10);
   const [gridColumns, setGridColumns] = useState(10);
-  const [roi, setRoi] = useState<{ x: number | null; y: number | null; width: number | null; height: number | null }>({ x: null, y: null, width: null, height: null });
+  const [roi, setRoi] = useState<{ x: number | null; y: number | null; width: number | null; height: number | null }>({ x: 0, y: 0, width: 1, height: 1 });
   const [selectionMode, setSelectionMode] = useState<"full" | "roi">("full");
   const [pendingRoiPoint, setPendingRoiPoint] = useState<PendingRoiPoint | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<SelectedPointState | null>(null);
   const [selectedClassification, setSelectedClassification] = useState<AnnotationPointClassification>("lichen");
   const [selectedMorphotypeId, setSelectedMorphotypeId] = useState<string | null>(null);
   const [morphotypeForm, setMorphotypeForm] = useState<{ label: string; growthForm: MorphotypeDraft["growthForm"]; colorHex: string; notes: string }>({ label: "", growthForm: "unknown", colorHex: "", notes: "" });
@@ -130,9 +142,10 @@ export default function AnnotationsWorkflow() {
     setPointStates({});
     setGridRows(10);
     setGridColumns(10);
-    setRoi({ x: null, y: null, width: null, height: null });
+    setRoi({ x: 0, y: 0, width: 1, height: 1 });
     setSelectionMode("full");
     setPendingRoiPoint(null);
+    setSelectedPoint(null);
     setImageLoadError(false);
     setIsLoadingImages(true);
 
@@ -173,10 +186,10 @@ export default function AnnotationsWorkflow() {
       setGridRows(state.annotationSet?.grid_rows ?? 10);
       setGridColumns(state.annotationSet?.grid_columns ?? 10);
       setRoi({
-        x: state.annotationSet?.roi_x ?? null,
-        y: state.annotationSet?.roi_y ?? null,
-        width: state.annotationSet?.roi_width ?? null,
-        height: state.annotationSet?.roi_height ?? null,
+        x: state.annotationSet?.roi_x ?? 0,
+        y: state.annotationSet?.roi_y ?? 0,
+        width: state.annotationSet?.roi_width ?? 1,
+        height: state.annotationSet?.roi_height ?? 1,
       });
 
       const nextPointStates: Record<number, LocalPointState> = {};
@@ -194,6 +207,7 @@ export default function AnnotationsWorkflow() {
 
       setPointStates(nextPointStates);
       setLastActionStack([]);
+      setSelectedPoint(null);
     } catch {
       setSaveStatus({ type: "error", text: "No se pudo cargar la anotación de esta imagen." });
     } finally {
@@ -282,7 +296,7 @@ export default function AnnotationsWorkflow() {
       return;
     }
 
-    setRoi({ x: null, y: null, width: null, height: null });
+    setRoi({ x: 0, y: 0, width: 1, height: 1 });
     setPendingRoiPoint(null);
     setPointStates({});
     setLastActionStack([]);
@@ -329,6 +343,7 @@ export default function AnnotationsWorkflow() {
     }
 
     const existing = pointStates[point.pointIndex];
+    setSelectedPoint(point);
     const nextClassification = selectedClassification === "unknown" ? "unknown" : selectedClassification;
 
     if (selectedClassification === "lichen" && !selectedMorphotypeId) {
@@ -458,6 +473,47 @@ export default function AnnotationsWorkflow() {
     }
   };
 
+  const handleClearSelectedPointClassification = async () => {
+    if (!selectedImageId || !selectedPoint) {
+      setSaveStatus({ type: "error", text: "Selecciona un punto antes de limpiar su clasificación." });
+      return;
+    }
+
+    const existing = pointStates[selectedPoint.pointIndex];
+    if (!existing || existing.classification == null) {
+      setSaveStatus({ type: "info", text: "El punto seleccionado ya está sin clasificar." });
+      return;
+    }
+
+    setPointStates((current) => {
+      const next = { ...current };
+      delete next[selectedPoint.pointIndex];
+      return next;
+    });
+    setLastActionStack((current) => [
+      {
+        pointIndex: selectedPoint.pointIndex,
+        previousClassification: existing.classification,
+        nextClassification: null,
+        previousMorphotypeId: existing.morphotypeId,
+        nextMorphotypeId: null,
+        previousId: existing.id ?? null,
+        nextId: null,
+      },
+      ...current,
+    ].slice(0, 20));
+
+    try {
+      if (existing.id) {
+        await deleteAnnotationPoint(existing.id);
+      }
+      setSelectedPoint(null);
+      setSaveStatus({ type: "success", text: "Clasificación limpiada correctamente." });
+    } catch {
+      setSaveStatus({ type: "error", text: "No se pudo limpiar la clasificación del punto." });
+    }
+  };
+
   const persistAnnotationSet = async (status: "draft" | "completed") => {
     if (!selectedImageId) {
       return;
@@ -495,7 +551,7 @@ export default function AnnotationsWorkflow() {
       return;
     }
 
-    if (roi.x == null || roi.y == null || roi.width == null || roi.height == null) {
+    if (!isValidAnnotationRoi(roi)) {
       setSaveStatus({ type: "error", text: "Define un ROI antes de guardar el borrador." });
       return;
     }
@@ -509,7 +565,7 @@ export default function AnnotationsWorkflow() {
       return;
     }
 
-    if (roi.x == null || roi.y == null || roi.width == null || roi.height == null) {
+    if (!isValidAnnotationRoi(roi)) {
       setSaveStatus({ type: "error", text: "Define un ROI antes de completar la anotación." });
       return;
     }
@@ -644,10 +700,10 @@ export default function AnnotationsWorkflow() {
 
             <div className="mt-4 rounded border p-3" style={{ borderColor: "var(--ld-border)", background: "#fff" }}>
               <div className="mb-3 flex flex-wrap gap-2">
-                <button type="button" onClick={handleToggleFullImage} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                <button type="button" onClick={handleToggleFullImage} className="rounded border px-3 py-2 text-sm" style={{ borderColor: isValidAnnotationRoi(roi) && isFullImageRoi(roi) ? "var(--ld-text)" : "var(--ld-border)", background: isValidAnnotationRoi(roi) && isFullImageRoi(roi) ? "var(--ld-sand)" : "#fff", color: "var(--ld-text)" }}>
                   Usar imagen completa
                 </button>
-                <button type="button" onClick={handleStartRoiSelection} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                <button type="button" onClick={handleStartRoiSelection} className="rounded border px-3 py-2 text-sm" style={{ borderColor: selectionMode === "roi" || (isValidAnnotationRoi(roi) && !isFullImageRoi(roi)) ? "var(--ld-text)" : "var(--ld-border)", background: selectionMode === "roi" || (isValidAnnotationRoi(roi) && !isFullImageRoi(roi)) ? "var(--ld-sand)" : "#fff", color: "var(--ld-text)" }}>
                   Definir área de corteza
                 </button>
                 <button type="button" onClick={handleResetRoi} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
@@ -708,7 +764,9 @@ export default function AnnotationsWorkflow() {
                     {option.label}
                   </button>
                 ))}
-                <button type="button" onClick={() => setSelectedClassification("lichen")} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Liquen</button>
+                <button type="button" onClick={() => void handleClearSelectedPointClassification()} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                  Limpiar clasificación
+                </button>
               </div>
               <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Los puntos sin registro quedan como sin clasificar; unknown significa que sí se revisó y se eligió esa categoría.</p>
             </div>

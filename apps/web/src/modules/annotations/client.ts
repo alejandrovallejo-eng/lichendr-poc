@@ -61,6 +61,25 @@ export interface AnnotationStateBundle {
   points: AnnotationPointRow[];
 }
 
+export interface AnnotationRoiState {
+  x: number | null;
+  y: number | null;
+  width: number | null;
+  height: number | null;
+}
+
+export function isValidAnnotationRoi(roi: AnnotationRoiState): boolean {
+  if (roi.x == null || roi.y == null || roi.width == null || roi.height == null) {
+    return false;
+  }
+
+  if (![roi.x, roi.y, roi.width, roi.height].every((value) => typeof value === "number" && Number.isFinite(value))) {
+    return false;
+  }
+
+  return roi.x >= 0 && roi.x <= 1 && roi.y >= 0 && roi.y <= 1 && roi.width > 0 && roi.height > 0 && roi.x + roi.width <= 1 && roi.y + roi.height <= 1;
+}
+
 async function ensureSession() {
   const sessionResult = await ensureAnonymousSession();
   if (sessionResult.error || !sessionResult.session) {
@@ -160,10 +179,10 @@ export async function upsertAnnotationSet(payload: AnnotationSetDraft): Promise<
     version: payload.version ?? 1,
     grid_rows: payload.gridRows,
     grid_columns: payload.gridColumns,
-    roi_x: payload.roiX,
-    roi_y: payload.roiY,
-    roi_width: payload.roiWidth,
-    roi_height: payload.roiHeight,
+    roi_x: payload.roiX ?? null,
+    roi_y: payload.roiY ?? null,
+    roi_width: payload.roiWidth ?? null,
+    roi_height: payload.roiHeight ?? null,
     notes: payload.notes ?? null,
     completed_at: payload.completedAt ?? null,
   };

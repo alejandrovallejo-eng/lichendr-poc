@@ -5,6 +5,8 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
 import { extractExifMetadata, type ExtractedImageMetadata } from "@/modules/images/exif";
+import { createSignedImageUrl, getImagesForTreeSample, persistImageWithMetadata, type ImageRecordRow, type ImageUploadProgress } from "@/modules/images/client";
+import { ensureAnonymousSession } from "@/modules/auth/client";
 
 interface ReviewImage {
   id: string;
@@ -18,6 +20,11 @@ interface ReviewImage {
     notes: string;
     locationSource: "exif" | "gps" | "manual" | "unknown";
   };
+  saveState: "idle" | "validating" | "uploading" | "saving-metadata" | "saved" | "error";
+  saveError?: string;
+  progress?: number;
+  savedRecord?: ImageRecordRow;
+  signedUrl?: string;
 }
 
 function formatMetadataState(metadata: ExtractedImageMetadata) {
@@ -78,17 +85,36 @@ export default function ImagesWorkflow() {
   const treeSampleId = searchParams.get("treeSampleId") ?? undefined;
 
   const [images, setImages] = useState<ReviewImage[]>([]);
+  const [savedImages, setSavedImages] = useState<ImageRecordRow[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [isSavingBatch, setIsSavingBatch] = useState(false);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
   const previewUrlsRef = useRef<string[]>([]);
 
   useEffect(() => {
+    const loadSavedImages = async () => {
+      if (!treeSampleId) {
+        setSavedImages([]);
+        return;
+      }
+
+      try {
+        const records = await getImagesForTreeSample(treeSampleId);
+        setSavedImages(records);
+      } catch {
+        setSavedImages([]);
+      }
+    };
+
+    void loadSavedImages();
+
     return () => {
       previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       previewUrlsRef.current = [];
     };
-  }, []);
+  }, [treeSampleId]);
 
   const handleFileSelection = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -132,7 +158,8 @@ export default function ImagesWorkflow() {
             notes: "",
             locationSource: metadata.locationSource,
           },
-        } satisfies ReviewImage;
+          saveState: "idle",
+        } as ReviewImage;
       })
     );
 
@@ -234,6 +261,101 @@ export default function ImagesWorkflow() {
     });
   };
 
+  const handlePersistImages = async (targetImageId?: string) => {
+    if (!treeSampleId) {
+      setSelectionNotice("Selecciona un tree_sample antes de guardar imágenes.");
+      return;
+    }
+
+    const pendingImages = images.filter((image) => targetImageId ? image.id === targetImageId : image.saveState !== "saved");
+    if (pendingImages.length === 0) {
+      setSelectionNotice("No hay imágenes pendientes por guardar.");
+      return;
+    }
+
+    setIsSavingBatch(true);
+    setSaveSuccessMessage(null);
+
+    for (const [index, image] of pendingImages.entries()) {
+      const latitude = Number(image.review.latitude);
+      const longitude = Number(image.review.longitude);
+      const gpsAccuracyM = image.review.gpsAccuracyM.trim() === "" ? undefined : Number(image.review.gpsAccuracyM);
+      const hasValidCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+      const numericValuesValid = image.review.gpsAccuracyM.trim() === "" || Number.isFinite(gpsAccuracyM);
+
+      if (!hasValidCoordinates || !numericValuesValid) {
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "error", saveError: "Latitud/longitud o precisión GPS inválidos." } : entry));
+        continue;
+      }
+
+      setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "validating", saveError: undefined } : entry));
+      const sessionResult = await ensureAnonymousSession();
+      if (sessionResult.error || !sessionResult.session) {
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "error", saveError: sessionResult.error ?? "No se pudo obtener una sesión." } : entry));
+        continue;
+      }
+
+      try {
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "uploading", progress: 0 } : entry));
+        const nextLocationSource: ExtractedImageMetadata["locationSource"] = image.review.locationSource === "manual"
+          ? "manual"
+          : image.review.locationSource === "gps"
+            ? "gps"
+            : hasValidCoordinates
+              ? "exif"
+              : "unknown";
+        const nextMetadata: ExtractedImageMetadata = {
+          ...image.metadata,
+          latitude,
+          longitude,
+          gpsAccuracyM: gpsAccuracyM ?? undefined,
+          locationSource: nextLocationSource,
+        };
+
+        const persistedRecord = await persistImageWithMetadata(
+          image.file,
+          {
+            projectId: projectId ?? "",
+            siteId: siteId ?? "",
+            eventId: eventId ?? "",
+            treeSampleId,
+          },
+          nextMetadata,
+          image.review.notes || "",
+          index + 1,
+          (progress: ImageUploadProgress) => {
+            setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "uploading", progress: progress.percent } : entry));
+          }
+        );
+
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saving-metadata", progress: 100 } : entry));
+        const signedUrl = await createSignedImageUrl(persistedRecord.storage_path);
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saved", progress: 100, savedRecord: persistedRecord, signedUrl } : entry));
+        setSavedImages((current) => [persistedRecord, ...current]);
+      } catch (error) {
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "error", saveError: error instanceof Error ? error.message : "No se pudo guardar la imagen." } : entry));
+      }
+    }
+
+    setIsSavingBatch(false);
+    if (pendingImages.length > 0) {
+      const savedCount = pendingImages.filter((image) => image.saveState === "saved").length;
+      if (savedCount > 0) {
+        setSaveSuccessMessage("La imagen y su metadata fueron guardadas correctamente.");
+      }
+    }
+  };
+
+  const retryImageSave = async (imageId: string) => {
+    const targetImage = images.find((image) => image.id === imageId);
+    if (!targetImage) {
+      return;
+    }
+
+    setImages((current) => current.map((entry) => entry.id === imageId ? { ...entry, saveState: "validating", saveError: undefined, progress: 0 } : entry));
+    await handlePersistImages(imageId);
+  };
+
   return (
     <div>
       <PageHeader title="Imágenes" subtitle="Revisa y corrige metadatos EXIF de forma local antes de cualquier carga o persistencia." />
@@ -260,15 +382,32 @@ export default function ImagesWorkflow() {
             <h2 className="font-semibold" style={{ color: "var(--ld-text)" }}>Seleccionar imágenes locales</h2>
             <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>Acepta múltiples archivos .jpg/.jpeg/.png para previsualizarlos y revisar sus metadatos.</p>
           </div>
-          <label className="inline-flex cursor-pointer items-center justify-center rounded border px-4 py-2" style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}>
-            <span>{loadingFiles ? "Leyendo archivos..." : "Elegir imágenes"}</span>
-            <input type="file" accept="image/*" multiple className="hidden" onChange={handleFileSelection} />
-          </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void handlePersistImages()}
+              disabled={isSavingBatch || images.filter((image) => image.saveState !== "saved").length === 0 || !treeSampleId}
+              className="rounded border px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}
+            >
+              {isSavingBatch ? "Guardando..." : "Guardar imágenes en Supabase"}
+            </button>
+            <label className="inline-flex cursor-pointer items-center justify-center rounded border px-4 py-2" style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}>
+              <span>{loadingFiles ? "Leyendo archivos..." : "Elegir imágenes"}</span>
+              <input type="file" accept="image/*" multiple className="hidden" onChange={handleFileSelection} />
+            </label>
+          </div>
         </div>
 
         {selectionNotice ? (
           <div className="mt-4 rounded border px-4 py-3 text-sm" style={{ background: "#f8f9fa", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
             {selectionNotice}
+          </div>
+        ) : null}
+
+        {saveSuccessMessage ? (
+          <div className="mt-4 rounded border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm" style={{ color: "#166534" }}>
+            {saveSuccessMessage}
           </div>
         ) : null}
       </section>
@@ -320,6 +459,13 @@ export default function ImagesWorkflow() {
                     <div className="rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
                       <p className="mb-1 text-sm font-medium" style={{ color: "var(--ld-text)" }}>Cámara / modelo</p>
                       <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>{image.metadata.camera ?? "No disponible"}</p>
+                    </div>
+
+                    <div className="rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
+                      <p className="mb-1 text-sm font-medium" style={{ color: "var(--ld-text)" }}>Estado de guardado</p>
+                      <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>{image.saveState === "saved" ? "Guardada" : image.saveState === "uploading" ? "Subiendo" : image.saveState === "saving-metadata" ? "Guardando metadata" : image.saveState === "validating" ? "Validando" : image.saveState === "error" ? "Error" : "Pendiente"}</p>
+                      {image.progress != null ? <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>{image.progress}%</p> : null}
+                      {image.saveError ? <p className="mt-2 text-xs" style={{ color: "#b91c1c" }}>{image.saveError}</p> : null}
                     </div>
 
                     <div>
@@ -392,6 +538,12 @@ export default function ImagesWorkflow() {
                     />
                   </div>
 
+                  {image.saveState === "error" ? (
+                    <button type="button" onClick={() => void retryImageSave(image.id)} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                      Reintentar
+                    </button>
+                  ) : null}
+
                   {process.env.NODE_ENV === "development" ? (
                     <div className="rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
                       <button type="button" onClick={() => setShowDiagnostics((current) => !current)} className="text-sm font-medium" style={{ color: "var(--ld-text)" }}>
@@ -418,11 +570,29 @@ export default function ImagesWorkflow() {
       )}
 
       <section className="mt-6 rounded border p-4" style={{ background: "#f8f9fa", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
+        <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Imágenes guardadas</h3>
+        {savedImages.length === 0 ? (
+          <p className="mt-2 text-sm">Aún no hay imágenes guardadas para este tree_sample.</p>
+        ) : (
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            {savedImages.map((savedImage) => (
+              <div key={savedImage.id} className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+                <p className="text-sm font-medium" style={{ color: "var(--ld-text)" }}>{savedImage.original_filename}</p>
+                <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>{savedImage.caption ?? "Sin caption"}</p>
+                <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Orden: {savedImage.image_order}</p>
+                <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Creada: {new Date(savedImage.created_at).toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="mt-6 rounded border p-4" style={{ background: "#f8f9fa", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
         <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Notas de privacidad y método</h3>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
-          <li>Las coordenadas EXIF se muestran solo para revisión local y no se cargan aún.</li>
-          <li>Si la geolocalización es sensible, puedes corregirla manualmente antes de cualquier persistencia futura.</li>
-          <li>El flujo está preparado para integrarse con el guardado en Supabase cuando se solicite.</li>
+          <li>Las coordenadas EXIF se usan solo para revisión local y luego para persistir en Supabase con el mismo contexto de la imagen.</li>
+          <li>Las URLs de visualización se generan con signed URLs privadas y el bucket sigue sin ser público.</li>
+          <li>El flujo guarda imágenes y metadata en Supabase, pero no realiza análisis visual ni mapas.</li>
         </ul>
       </section>
     </div>

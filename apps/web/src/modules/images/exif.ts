@@ -5,7 +5,17 @@ export interface ExtractedImageMetadata {
   source: "exif" | "manual" | "none";
   capturedAt?: string;
   capturedAtLocal?: string;
+  timezoneOffset?: string;
   camera?: string;
+  cameraMake?: string;
+  cameraModel?: string;
+  lensModel?: string;
+  orientation?: number;
+  focalLengthMm?: number;
+  apertureFNumber?: number;
+  exposureTimeSeconds?: number;
+  isoSpeed?: number;
+  software?: string;
   latitude?: number;
   longitude?: number;
   gpsAccuracyM?: number;
@@ -13,6 +23,7 @@ export interface ExtractedImageMetadata {
   height?: number;
   warning?: string;
   locationSource: "exif" | "gps" | "manual" | "unknown";
+  rawExif?: Record<string, unknown>;
   diagnostics?: {
     dateTimeOriginalFound: boolean;
     createDateFound: boolean;
@@ -113,13 +124,95 @@ function parseExifDateTime(value: unknown, offsetValue?: unknown): { capturedAt?
   };
 }
 
-function normalizeCamera(make: unknown, model: unknown): string | undefined {
+function normalizeCamera(make: unknown, model: unknown): { camera?: string; cameraMake?: string; cameraModel?: string } {
   const parts = [make, model].filter((value): value is string => typeof value === "string" && value.trim() !== "");
   if (parts.length === 0) {
-    return undefined;
+    return {};
   }
 
-  return parts.join(" ");
+  const cameraMake = typeof make === "string" && make.trim() !== "" ? make.trim() : undefined;
+  const cameraModel = typeof model === "string" && model.trim() !== "" ? model.trim() : undefined;
+
+  return {
+    camera: parts.join(" "),
+    cameraMake,
+    cameraModel,
+  };
+}
+
+function sanitizeRawExifValue(value: unknown): unknown {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeRawExifValue(item));
+  }
+
+  if (typeof value === "object") {
+    const candidate = value as Record<string, unknown>;
+    const sanitizedEntries = Object.entries(candidate).reduce<Record<string, unknown>>((accumulator, [key, entryValue]) => {
+      if (key === "MakerNote" || key === "UserComment" || key === "SerialNumber" || key === "OwnerName" || key === "Artist" || key === "XPAuthor" || key === "XPTitle" || key === "XPComment") {
+        return accumulator;
+      }
+
+      const normalizedKey = key.trim();
+      if (!normalizedKey) {
+        return accumulator;
+      }
+
+      accumulator[normalizedKey] = sanitizeRawExifValue(entryValue);
+      return accumulator;
+    }, {});
+
+    return sanitizedEntries;
+  }
+
+  return String(value);
+}
+
+function sanitizeRawExif(rawMetadata: ParsedMetadataRecord): Record<string, unknown> | undefined {
+  const allowedKeys = new Set([
+    "DateTimeOriginal",
+    "CreateDate",
+    "DateTimeDigitized",
+    "ModifyDate",
+    "OffsetTimeOriginal",
+    "OffsetTimeDigitized",
+    "OffsetTime",
+    "Make",
+    "Model",
+    "LensModel",
+    "Orientation",
+    "FocalLength",
+    "FocalLengthIn35mmFormat",
+    "ApertureValue",
+    "ExposureTime",
+    "ISOSpeedRatings",
+    "Software",
+    "GPSLatitude",
+    "GPSLongitude",
+    "GPSLatitudeRef",
+    "GPSLongitudeRef",
+    "GPSHPositioningError",
+    "ImageWidth",
+    "ImageHeight",
+  ]);
+
+  const sanitizedEntries = Object.entries(rawMetadata).reduce<Record<string, unknown>>((accumulator, [key, value]) => {
+    if (!allowedKeys.has(key)) {
+      return accumulator;
+    }
+
+    accumulator[key] = sanitizeRawExifValue(value);
+    return accumulator;
+  }, {});
+
+  return Object.keys(sanitizedEntries).length > 0 ? sanitizedEntries : undefined;
 }
 
 function normalizeGpsValue(value: unknown): number | undefined {
@@ -190,8 +283,15 @@ export async function extractExifMetadata(file: File): Promise<ExtractedImageMet
 
     const capturedAt = parsedDate?.capturedAt;
     const capturedAtLocal = parsedDate?.capturedAtLocal;
-    const camera = normalizeCamera(rawMetadata?.Make, rawMetadata?.Model);
-
+    const cameraInfo = normalizeCamera(rawMetadata?.Make, rawMetadata?.Model);
+    const timezoneOffset = typeof offsetValue === "string" && offsetValue.trim() !== "" ? offsetValue.trim() : undefined;
+    const lensModel = typeof rawMetadata?.LensModel === "string" && rawMetadata.LensModel.trim() !== "" ? rawMetadata.LensModel.trim() : undefined;
+    const orientation = typeof rawMetadata?.Orientation === "number" ? rawMetadata.Orientation : undefined;
+    const focalLengthMm = typeof rawMetadata?.FocalLength === "number" ? rawMetadata.FocalLength : typeof rawMetadata?.FocalLengthIn35mmFormat === "number" ? rawMetadata.FocalLengthIn35mmFormat : undefined;
+    const apertureFNumber = typeof rawMetadata?.ApertureValue === "number" ? rawMetadata.ApertureValue : undefined;
+    const exposureTimeSeconds = typeof rawMetadata?.ExposureTime === "number" ? rawMetadata.ExposureTime : undefined;
+    const isoSpeed = typeof rawMetadata?.ISOSpeedRatings === "number" ? rawMetadata.ISOSpeedRatings : undefined;
+    const software = typeof rawMetadata?.Software === "string" && rawMetadata.Software.trim() !== "" ? rawMetadata.Software.trim() : undefined;
     const gpsLatitude = normalizeGpsCoordinate(gpsMetadata?.latitude, "N");
     const gpsLongitude = normalizeGpsCoordinate(gpsMetadata?.longitude, "E");
     const parsedLatitude = normalizeGpsCoordinate(
@@ -209,6 +309,7 @@ export async function extractExifMetadata(file: File): Promise<ExtractedImageMet
     const width = typeof rawMetadata?.ImageWidth === "number" ? rawMetadata.ImageWidth : undefined;
     const height = typeof rawMetadata?.ImageHeight === "number" ? rawMetadata.ImageHeight : undefined;
     const locationSource = isValidLatitude(latitude) && isValidLongitude(longitude) ? "exif" : "unknown";
+    const rawExif = sanitizeRawExif(rawMetadata ?? {});
 
     const diagnostics = {
       dateTimeOriginalFound: rawMetadata?.DateTimeOriginal != null,
@@ -219,19 +320,30 @@ export async function extractExifMetadata(file: File): Promise<ExtractedImageMet
       gpsResultValid: gpsLatitude != null && gpsLongitude != null,
     };
 
-    if (capturedAt || capturedAtLocal || camera || isValidLatitude(latitude) || isValidLongitude(longitude) || gpsAccuracyM != null || width != null || height != null) {
+    if (capturedAt || capturedAtLocal || cameraInfo.camera || cameraInfo.cameraMake || cameraInfo.cameraModel || isValidLatitude(latitude) || isValidLongitude(longitude) || gpsAccuracyM != null || width != null || height != null) {
       return {
         hasExif: true,
         source: "exif",
         capturedAt,
         capturedAtLocal,
-        camera,
+        timezoneOffset,
+        camera: cameraInfo.camera,
+        cameraMake: cameraInfo.cameraMake,
+        cameraModel: cameraInfo.cameraModel,
+        lensModel,
+        orientation,
+        focalLengthMm,
+        apertureFNumber,
+        exposureTimeSeconds,
+        isoSpeed,
+        software,
         latitude,
         longitude,
         gpsAccuracyM,
         width,
         height,
         locationSource,
+        rawExif,
         diagnostics,
       };
     }

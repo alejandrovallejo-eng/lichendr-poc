@@ -89,17 +89,46 @@ export interface ImageRecord {
 export interface AnnotationSet {
   id: UUID;
   imageId: UUID;
+  method: "systematic_point_count";
+  status: "draft" | "completed";
+  version: number;
+  gridRows: number;
+  gridColumns: number;
+  roiX: number | null;
+  roiY: number | null;
+  roiWidth: number | null;
+  roiHeight: number | null;
+  notes?: string | null;
+  completedAt?: string | null;
   createdAt: string;
+  updatedAt: string;
   annotator?: string;
-  // simple structure for now
   morphotypes: Morphotype[];
 }
 
 export interface Morphotype {
   id: UUID;
+  annotationSetId: UUID;
   label: string;
-  confidence?: number; // 0..1
-  bbox?: { x: number; y: number; w: number; h: number };
+  growthForm: "crustose" | "foliose" | "fruticose" | "squamulose" | "unknown";
+  colorHex?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnnotationPoint {
+  id: UUID;
+  annotationSetId: UUID;
+  morphotypeId?: UUID | null;
+  pointIndex: number;
+  xNormalized: number;
+  yNormalized: number;
+  classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+  confidenceLevel: "low" | "medium" | "high";
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AnalysisRun {

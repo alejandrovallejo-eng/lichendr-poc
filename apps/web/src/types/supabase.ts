@@ -383,6 +383,156 @@ export type Database = {
           }
         ];
       };
+      annotation_sets: {
+        Row: {
+          id: string;
+          image_id: string;
+          method: string;
+          status: string;
+          version: number;
+          grid_rows: number;
+          grid_columns: number;
+          roi_x: number | null;
+          roi_y: number | null;
+          roi_width: number | null;
+          roi_height: number | null;
+          notes: string | null;
+          completed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          image_id: string;
+          method?: string;
+          status?: string;
+          version?: number;
+          grid_rows: number;
+          grid_columns: number;
+          roi_x?: number | null;
+          roi_y?: number | null;
+          roi_width?: number | null;
+          roi_height?: number | null;
+          notes?: string | null;
+          completed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          image_id?: string;
+          method?: string;
+          status?: string;
+          version?: number;
+          grid_rows?: number;
+          grid_columns?: number;
+          roi_x?: number | null;
+          roi_y?: number | null;
+          roi_width?: number | null;
+          roi_height?: number | null;
+          notes?: string | null;
+          completed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "annotation_sets_image_id_fkey";
+            columns: ["image_id"];
+            referencedRelation: "images";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      morphotypes: {
+        Row: {
+          id: string;
+          annotation_set_id: string;
+          label: string;
+          growth_form: string;
+          color_hex: string | null;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          annotation_set_id: string;
+          label: string;
+          growth_form?: string;
+          color_hex?: string | null;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          annotation_set_id?: string;
+          label?: string;
+          growth_form?: string;
+          color_hex?: string | null;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "morphotypes_annotation_set_id_fkey";
+            columns: ["annotation_set_id"];
+            referencedRelation: "annotation_sets";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      annotation_points: {
+        Row: {
+          id: string;
+          annotation_set_id: string;
+          morphotype_id: string | null;
+          point_index: number;
+          x_normalized: number;
+          y_normalized: number;
+          classification: string;
+          confidence_level: string;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          annotation_set_id: string;
+          morphotype_id?: string | null;
+          point_index: number;
+          x_normalized: number;
+          y_normalized: number;
+          classification: string;
+          confidence_level?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          annotation_set_id?: string;
+          morphotype_id?: string | null;
+          point_index?: number;
+          x_normalized?: number;
+          y_normalized?: number;
+          classification?: string;
+          confidence_level?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "annotation_points_annotation_set_id_fkey";
+            columns: ["annotation_set_id"];
+            referencedRelation: "annotation_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "annotation_points_morphotype_id_fkey";
+            columns: ["morphotype_id"];
+            referencedRelation: "morphotypes";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
@@ -617,6 +618,9 @@ export default function ImagesWorkflow() {
                 <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>{savedImage.caption ?? "Sin caption"}</p>
                 <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Orden: {savedImage.image_order}</p>
                 <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Creada: {new Date(savedImage.created_at).toLocaleString()}</p>
+                <Link href={`/annotations?imageId=${savedImage.id}`} className="mt-3 inline-flex rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                  Anotar imagen
+                </Link>
               </div>
             ))}
           </div>

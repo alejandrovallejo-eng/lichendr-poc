@@ -80,6 +80,7 @@ export default function ImagesWorkflow() {
   const [images, setImages] = useState<ReviewImage[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const previewUrlsRef = useRef<string[]>([]);
 
   useEffect(() => {
@@ -390,6 +391,25 @@ export default function ImagesWorkflow() {
                       style={{ borderColor: "var(--ld-border)", background: "#fff", color: "var(--ld-text)" }}
                     />
                   </div>
+
+                  {process.env.NODE_ENV === "development" ? (
+                    <div className="rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
+                      <button type="button" onClick={() => setShowDiagnostics((current) => !current)} className="text-sm font-medium" style={{ color: "var(--ld-text)" }}>
+                        {showDiagnostics ? "Ocultar" : "Mostrar"} Diagnóstico EXIF
+                      </button>
+                      {showDiagnostics ? (
+                        <div className="mt-3 grid gap-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
+                          <p><strong>DateTimeOriginal encontrado:</strong> {image.metadata.diagnostics?.dateTimeOriginalFound ? "sí" : "no"}</p>
+                          <p><strong>CreateDate encontrado:</strong> {image.metadata.diagnostics?.createDateFound ? "sí" : "no"}</p>
+                          <p><strong>OffsetTimeOriginal encontrado:</strong> {image.metadata.diagnostics?.offsetTimeOriginalFound ? "sí" : "no"}</p>
+                          <p><strong>GPSLatitude encontrado:</strong> {image.metadata.diagnostics?.gpsLatitudeFound ? "sí" : "no"}</p>
+                          <p><strong>GPSLongitude encontrado:</strong> {image.metadata.diagnostics?.gpsLongitudeFound ? "sí" : "no"}</p>
+                          <p><strong>resultado exifr.gps válido:</strong> {image.metadata.diagnostics?.gpsResultValid ? "sí" : "no"}</p>
+                          {image.metadata.diagnostics?.parserError ? <p><strong>Errores del parser:</strong> {image.metadata.diagnostics.parserError}</p> : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </section>

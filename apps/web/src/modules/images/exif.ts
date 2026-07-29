@@ -13,9 +13,43 @@ export interface ExtractedImageMetadata {
   height?: number;
   warning?: string;
   locationSource: "exif" | "gps" | "manual" | "unknown";
+  diagnostics?: {
+    dateTimeOriginalFound: boolean;
+    createDateFound: boolean;
+    offsetTimeOriginalFound: boolean;
+    gpsLatitudeFound: boolean;
+    gpsLongitudeFound: boolean;
+    gpsResultValid: boolean;
+    parserError?: string;
+  };
 }
 
-function parseExifDateTime(value: unknown): { capturedAt?: string; capturedAtLocal?: string } | undefined {
+interface ParsedMetadataRecord {
+  [key: string]: unknown;
+}
+
+interface GpsCoordinateResult {
+  latitude?: unknown;
+  longitude?: unknown;
+}
+
+type DateSource = "DateTimeOriginal" | "CreateDate" | "DateTimeDigitized" | "ModifyDate" | "none";
+
+function parseExifDateTime(value: unknown, offsetValue?: unknown): { capturedAt?: string; capturedAtLocal?: string; dateSource: DateSource } | undefined {
+  if (value instanceof Date) {
+    return {
+      capturedAtLocal: value.toISOString(),
+      dateSource: "none",
+    };
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return {
+      capturedAtLocal: new Date(value).toISOString(),
+      dateSource: "none",
+    };
+  }
+
   if (typeof value !== "string") {
     return undefined;
   }
@@ -41,14 +75,27 @@ function parseExifDateTime(value: unknown): { capturedAt?: string; capturedAtLoc
 
   const localDateTime = `${yearNumber.toString().padStart(4, "0")}-${monthNumber.toString().padStart(2, "0")}-${dayNumber.toString().padStart(2, "0")}T${hourNumber.toString().padStart(2, "0")}:${minuteNumber.toString().padStart(2, "0")}:${secondNumber.toString().padStart(2, "0")}`;
 
-  if (!offsetSign) {
+  const offsetValueText = offsetSign ? `${offsetSign}${offsetHours}:${offsetMinutes}` : undefined;
+  if (!offsetSign && offsetValue == null) {
     return {
-      capturedAtLocal: localDateTime,
+      capturedAtLocal: `${localDateTime}`,
+      dateSource: "none",
     };
   }
 
-  const offsetValue = Number(offsetHours) * 60 + Number(offsetMinutes);
-  const offsetMinutesTotal = offsetSign === "-" ? -offsetValue : offsetValue;
+  const offsetMatch = String(offsetValue ?? offsetValueText ?? "").trim().match(/^([+-])(\d{2}):?(\d{2})$/);
+  const offsetMinutesValue = offsetMatch
+    ? Number(offsetMatch[2]) * 60 + Number(offsetMatch[3])
+    : undefined;
+
+  if (offsetMatch == null || offsetMinutesValue == null) {
+    return {
+      capturedAtLocal: `${localDateTime}`,
+      dateSource: "none",
+    };
+  }
+
+  const offsetMinutesTotal = offsetMatch[1] === "-" ? -offsetMinutesValue : offsetMinutesValue;
   const utcTimestamp = Date.UTC(
     yearNumber,
     monthNumber - 1,
@@ -61,7 +108,8 @@ function parseExifDateTime(value: unknown): { capturedAt?: string; capturedAtLoc
 
   return {
     capturedAt: new Date(utcTimestamp).toISOString(),
-    capturedAtLocal: `${localDateTime}${offsetSign}${offsetHours}:${offsetMinutes}`,
+    capturedAtLocal: `${localDateTime}${offsetMatch[1]}${offsetMatch[2]}:${offsetMatch[3]}`,
+    dateSource: "none",
   };
 }
 
@@ -74,34 +122,104 @@ function normalizeCamera(make: unknown, model: unknown): string | undefined {
   return parts.join(" ");
 }
 
+function normalizeGpsValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsedValue = Number(value);
+    return Number.isFinite(parsedValue) ? parsedValue : undefined;
+  }
+
+  if (Array.isArray(value) && value.length === 3) {
+    const [degrees, minutes, seconds] = value.map((item) => (typeof item === "number" ? item : Number(item)));
+    if ([degrees, minutes, seconds].every((item) => Number.isFinite(item))) {
+      return degrees + minutes / 60 + seconds / 3600;
+    }
+  }
+
+  if (typeof value === "object" && value !== null) {
+    const candidate = value as { degrees?: unknown; minutes?: unknown; seconds?: unknown; decimal?: unknown };
+    if (typeof candidate.decimal === "number" && Number.isFinite(candidate.decimal)) {
+      return candidate.decimal;
+    }
+
+    const degrees = typeof candidate.degrees === "number" ? candidate.degrees : Number(candidate.degrees);
+    const minutes = typeof candidate.minutes === "number" ? candidate.minutes : Number(candidate.minutes);
+    const seconds = typeof candidate.seconds === "number" ? candidate.seconds : Number(candidate.seconds);
+
+    if ([degrees, minutes, seconds].every((item) => Number.isFinite(item))) {
+      return degrees + minutes / 60 + seconds / 3600;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeGpsCoordinate(value: unknown, reference: unknown): number | undefined {
+  const normalizedValue = normalizeGpsValue(value);
+  if (normalizedValue == null) {
+    return undefined;
+  }
+
+  const normalizedReference = typeof reference === "string" ? reference.trim().toUpperCase() : undefined;
+  if (normalizedReference === "S" || normalizedReference === "W") {
+    return -normalizedValue;
+  }
+
+  return normalizedValue;
+}
+
+function isValidLatitude(value: number | undefined): value is number {
+  return value != null && value >= -90 && value <= 90;
+}
+
+function isValidLongitude(value: number | undefined): value is number {
+  return value != null && value >= -180 && value <= 180;
+}
+
 export async function extractExifMetadata(file: File): Promise<ExtractedImageMetadata> {
   try {
-    const rawMetadata = await exifr.parse(file, {
-      pick: [
-        "DateTimeOriginal",
-        "CreateDate",
-        "Model",
-        "Make",
-        "GPSLatitude",
-        "GPSLongitude",
-        "GPSHPositioningError",
-        "ImageWidth",
-        "ImageHeight",
-      ],
-    });
+    const rawMetadata = (await exifr.parse(file)) as ParsedMetadataRecord | undefined;
+    const gpsMetadata = (await exifr.gps(file)) as GpsCoordinateResult | undefined;
 
-    const parsedDate = parseExifDateTime(rawMetadata?.DateTimeOriginal ?? rawMetadata?.CreateDate);
+    const dateValue = rawMetadata?.DateTimeOriginal ?? rawMetadata?.CreateDate ?? rawMetadata?.DateTimeDigitized ?? rawMetadata?.ModifyDate;
+    const offsetValue = rawMetadata?.OffsetTimeOriginal ?? rawMetadata?.OffsetTimeDigitized ?? rawMetadata?.OffsetTime;
+    const parsedDate = parseExifDateTime(dateValue, offsetValue);
+
     const capturedAt = parsedDate?.capturedAt;
     const capturedAtLocal = parsedDate?.capturedAtLocal;
     const camera = normalizeCamera(rawMetadata?.Make, rawMetadata?.Model);
-    const latitude = typeof rawMetadata?.GPSLatitude === "number" ? rawMetadata.GPSLatitude : undefined;
-    const longitude = typeof rawMetadata?.GPSLongitude === "number" ? rawMetadata.GPSLongitude : undefined;
+
+    const gpsLatitude = normalizeGpsCoordinate(gpsMetadata?.latitude, "N");
+    const gpsLongitude = normalizeGpsCoordinate(gpsMetadata?.longitude, "E");
+    const parsedLatitude = normalizeGpsCoordinate(
+      rawMetadata?.GPSLatitude ?? rawMetadata?.latitude,
+      rawMetadata?.GPSLatitudeRef ?? rawMetadata?.latitudeRef
+    );
+    const parsedLongitude = normalizeGpsCoordinate(
+      rawMetadata?.GPSLongitude ?? rawMetadata?.longitude,
+      rawMetadata?.GPSLongitudeRef ?? rawMetadata?.longitudeRef
+    );
+
+    const latitude = gpsLatitude ?? parsedLatitude;
+    const longitude = gpsLongitude ?? parsedLongitude;
     const gpsAccuracyM = typeof rawMetadata?.GPSHPositioningError === "number" ? rawMetadata.GPSHPositioningError : undefined;
     const width = typeof rawMetadata?.ImageWidth === "number" ? rawMetadata.ImageWidth : undefined;
     const height = typeof rawMetadata?.ImageHeight === "number" ? rawMetadata.ImageHeight : undefined;
-    const locationSource = latitude != null && longitude != null ? "exif" : "unknown";
+    const locationSource = isValidLatitude(latitude) && isValidLongitude(longitude) ? "exif" : "unknown";
 
-    if (capturedAt || capturedAtLocal || camera || latitude != null || longitude != null || gpsAccuracyM != null || width != null || height != null) {
+    const diagnostics = {
+      dateTimeOriginalFound: rawMetadata?.DateTimeOriginal != null,
+      createDateFound: rawMetadata?.CreateDate != null,
+      offsetTimeOriginalFound: rawMetadata?.OffsetTimeOriginal != null,
+      gpsLatitudeFound: gpsLatitude != null || parsedLatitude != null || rawMetadata?.GPSLatitude != null || rawMetadata?.latitude != null,
+      gpsLongitudeFound: gpsLongitude != null || parsedLongitude != null || rawMetadata?.GPSLongitude != null || rawMetadata?.longitude != null,
+      gpsResultValid: gpsLatitude != null && gpsLongitude != null,
+    };
+
+    if (capturedAt || capturedAtLocal || camera || isValidLatitude(latitude) || isValidLongitude(longitude) || gpsAccuracyM != null || width != null || height != null) {
       return {
         hasExif: true,
         source: "exif",
@@ -114,6 +232,7 @@ export async function extractExifMetadata(file: File): Promise<ExtractedImageMet
         width,
         height,
         locationSource,
+        diagnostics,
       };
     }
 
@@ -122,6 +241,7 @@ export async function extractExifMetadata(file: File): Promise<ExtractedImageMet
       source: "none",
       warning: "No se encontraron metadatos EXIF útiles en esta imagen.",
       locationSource: "unknown",
+      diagnostics,
     };
   } catch (error) {
     return {
@@ -129,6 +249,15 @@ export async function extractExifMetadata(file: File): Promise<ExtractedImageMet
       source: "none",
       warning: error instanceof Error ? error.message : "No se pudo extraer EXIF desde el archivo.",
       locationSource: "unknown",
+      diagnostics: {
+        dateTimeOriginalFound: false,
+        createDateFound: false,
+        offsetTimeOriginalFound: false,
+        gpsLatitudeFound: false,
+        gpsLongitudeFound: false,
+        gpsResultValid: false,
+        parserError: error instanceof Error ? error.message : "Error desconocido del parser",
+      },
     };
   }
 }

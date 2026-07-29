@@ -1,5 +1,7 @@
-import ModulePlaceholder from "@/components/ModulePlaceholder";
+import TreeWorkflow from "@/modules/trees/Workflow";
+
+export const dynamic = "force-dynamic";
 
 export default function TreesPage() {
-  return <ModulePlaceholder title="Árboles" />;
+  return <TreeWorkflow />;
 }

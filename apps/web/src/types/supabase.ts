@@ -138,6 +138,112 @@ export type Database = {
           }
         ];
       };
+      trees: {
+        Row: {
+          id: string;
+          site_id: string;
+          code: string;
+          species_name: string | null;
+          species_confidence: string;
+          latitude: number | null;
+          longitude: number | null;
+          gps_accuracy_m: number | null;
+          location_source: string;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          site_id: string;
+          code: string;
+          species_name?: string | null;
+          species_confidence?: string;
+          latitude?: number | null;
+          longitude?: number | null;
+          gps_accuracy_m?: number | null;
+          location_source?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          site_id?: string;
+          code?: string;
+          species_name?: string | null;
+          species_confidence?: string;
+          latitude?: number | null;
+          longitude?: number | null;
+          gps_accuracy_m?: number | null;
+          location_source?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "trees_site_id_fkey";
+            columns: ["site_id"];
+            referencedRelation: "sites";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      tree_samples: {
+        Row: {
+          id: string;
+          site_id: string;
+          sampling_event_id: string;
+          tree_id: string;
+          substrate_type: string;
+          trunk_orientation: string;
+          sampling_height_m: number | null;
+          shade_level: string;
+          confidence_level: string;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          site_id: string;
+          sampling_event_id: string;
+          tree_id: string;
+          substrate_type?: string;
+          trunk_orientation?: string;
+          sampling_height_m?: number | null;
+          shade_level?: string;
+          confidence_level?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          site_id?: string;
+          sampling_event_id?: string;
+          tree_id?: string;
+          substrate_type?: string;
+          trunk_orientation?: string;
+          sampling_height_m?: number | null;
+          shade_level?: string;
+          confidence_level?: string;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "tree_samples_tree_site_fk";
+            columns: ["tree_id", "site_id"];
+            referencedRelation: "trees";
+            referencedColumns: ["id", "site_id"];
+          },
+          {
+            foreignKeyName: "tree_samples_event_site_fk";
+            columns: ["sampling_event_id", "site_id"];
+            referencedRelation: "sampling_events";
+            referencedColumns: ["id", "site_id"];
+          }
+        ];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

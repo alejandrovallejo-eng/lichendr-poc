@@ -43,19 +43,31 @@ export interface SamplingEvent {
 export interface Tree {
   id: UUID;
   siteId: UUID;
-  tag?: string; // physical tag on tree
-  species?: string;
+  code: string;
+  speciesName?: string;
+  speciesConfidence: "unknown" | "low" | "medium" | "high";
   latitude?: number;
   longitude?: number;
+  gpsAccuracyM?: number;
+  locationSource: "unknown" | "manual" | "exif" | "gps";
+  notes?: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface TreeSample {
   id: UUID;
-  treeId: UUID;
+  siteId: UUID;
   samplingEventId: UUID;
-  sampleNumber?: number;
+  treeId: UUID;
+  substrateType: "tree_bark" | "dead_wood" | "rock" | "soil" | "concrete" | "other" | "unknown";
+  trunkOrientation: "N" | "NE" | "E" | "SE" | "S" | "SW" | "W" | "NW" | "multiple" | "unknown";
+  samplingHeightM?: number;
+  shadeLevel: "unknown" | "low" | "medium" | "high";
+  confidenceLevel: "unknown" | "low" | "medium" | "high";
   notes?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ImageMetadata {

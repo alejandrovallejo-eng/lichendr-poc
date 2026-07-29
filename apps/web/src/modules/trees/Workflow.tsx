@@ -78,9 +78,15 @@ function formatLocalDateTime(value: string) {
   }
 }
 
-function parseNumber(value: string) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
+function parseOptionalNumber(value: string) {
+  const normalizedValue = value.trim();
+
+  if (normalizedValue === "") {
+    return undefined;
+  }
+
+  const parsedValue = Number(normalizedValue);
+  return Number.isFinite(parsedValue) ? parsedValue : undefined;
 }
 
 export default function TreeWorkflow() {
@@ -334,9 +340,9 @@ export default function TreeWorkflow() {
         return "Latitud y longitud deben ingresarse juntas.";
       }
 
-      const parsedLatitude = parseNumber(latitude);
-      const parsedLongitude = parseNumber(longitude);
-      const parsedGpsAccuracy = parseNumber(gpsAccuracyM);
+      const parsedLatitude = parseOptionalNumber(latitude);
+      const parsedLongitude = parseOptionalNumber(longitude);
+      const parsedGpsAccuracy = parseOptionalNumber(gpsAccuracyM);
 
       if (hasLatitude && parsedLatitude == null) {
         return "La latitud debe ser un número válido.";
@@ -359,7 +365,7 @@ export default function TreeWorkflow() {
       return "Selecciona un árbol existente.";
     }
 
-    const parsedSamplingHeight = parseNumber(samplingHeightM);
+    const parsedSamplingHeight = parseOptionalNumber(samplingHeightM);
     if (samplingHeightM !== "" && parsedSamplingHeight != null && parsedSamplingHeight < 0) {
       return "La altura de muestreo no puede ser negativa.";
     }
@@ -412,9 +418,9 @@ export default function TreeWorkflow() {
     if (mode === "existing") {
       treeId = selectedExistingTreeId ?? null;
     } else {
-      const parsedLatitude = parseNumber(latitude);
-      const parsedLongitude = parseNumber(longitude);
-      const parsedGpsAccuracy = parseNumber(gpsAccuracyM);
+      const parsedLatitude = parseOptionalNumber(latitude);
+      const parsedLongitude = parseOptionalNumber(longitude);
+      const parsedGpsAccuracy = parseOptionalNumber(gpsAccuracyM);
       const locationSource = parsedLatitude != null && parsedLongitude != null ? "manual" : "unknown";
 
       const { tree, error: createTreeError } = await createTree({
@@ -456,7 +462,7 @@ export default function TreeWorkflow() {
       treeId,
       substrateType,
       trunkOrientation,
-      samplingHeightM: parseNumber(samplingHeightM),
+      samplingHeightM: parseOptionalNumber(samplingHeightM),
       shadeLevel,
       confidenceLevel,
       notes: sampleNotes.trim() || undefined,

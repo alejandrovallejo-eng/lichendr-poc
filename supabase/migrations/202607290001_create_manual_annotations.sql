@@ -48,9 +48,11 @@ create table if not exists public.morphotypes (
   constraint morphotypes_label_max_length check (char_length(label) <= 80),
   constraint morphotypes_growth_form_allowed check (growth_form in ('crustose', 'foliose', 'fruticose', 'squamulose', 'unknown')),
   constraint morphotypes_color_hex_format check (color_hex is null or color_hex ~ '^#[0-9A-Fa-f]{6}$'),
-  constraint morphotypes_annotation_set_id_label_lower_unique unique (annotation_set_id, lower(label)),
   constraint morphotypes_id_annotation_set_id_unique unique (id, annotation_set_id)
 );
+
+create unique index if not exists idx_morphotypes_annotation_set_label_lower
+on public.morphotypes(annotation_set_id, lower(label));
 
 create table if not exists public.annotation_points (
   id uuid primary key default gen_random_uuid(),
@@ -73,7 +75,7 @@ create table if not exists public.annotation_points (
   constraint annotation_points_annotation_set_id_point_index_unique unique (annotation_set_id, point_index),
   constraint annotation_points_morphotype_fk foreign key (morphotype_id, annotation_set_id)
     references public.morphotypes(id, annotation_set_id)
-    on delete set null
+    on delete restrict
 );
 
 create index if not exists idx_annotation_sets_image_id on public.annotation_sets(image_id);

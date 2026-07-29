@@ -196,6 +196,29 @@ La ruta de almacenamiento futura sigue la estructura `owner_id/project_id/site_i
 - `captured_at_local` conserva la fecha original sin asumir una zona horaria inexistente.
 - `raw_exif` puede contener información sensible y no debe incluirse automáticamente en exportaciones CSV.
 
+## Qué crea la migración de anotación manual por puntos
+
+La migración crea tres tablas en `public` para soportar la anotación manual por puntos sobre imágenes:
+
+- `public.annotation_sets`: almacena el conjunto de anotación de una imagen, la versión del método, la configuración de la cuadrícula, la ROI y el estado del trabajo.
+- `public.morphotypes`: almacena los morfotipos asociados a un conjunto de anotación, con validación de etiqueta, forma de crecimiento y formato de color.
+- `public.annotation_points`: almacena cada punto de la cuadrícula, su coordenada normalizada, clasificación y confianza.
+
+### Reglas del método de la versión 1
+
+- La versión 1 utilizará una cuadrícula sistemática.
+- El usuario clasificará todos los puntos.
+- Los puntos evaluables serán `lichen`, `bark`, `moss` y `algae`.
+- `shadow`, `glare` y `unknown` se excluirán del denominador.
+- `lichen cover percentage = lichen points / evaluable points × 100`.
+- Un morfotipo visible no equivale necesariamente a una especie.
+
+### Restricciones y seguridad
+
+- Se agregan restricciones de dominio y unicidad para cada tabla.
+- Se crean índices para `image_id`, `annotation_set_id`, `morphotype_id` y `classification`.
+- Se habilita RLS en las tres tablas y se crean políticas `SELECT`, `INSERT`, `UPDATE` y `DELETE` para `authenticated` siguiendo la relación de propiedad desde el proyecto del usuario.
+
 ## Limitación actual
 
 Todavía no es posible crear sitios desde la interfaz web porque la funcionalidad de Sitios aún no se ha implementado. La migración prepara solo la base de datos y las restricciones.

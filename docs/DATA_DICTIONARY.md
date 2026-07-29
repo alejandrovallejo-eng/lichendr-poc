@@ -42,3 +42,18 @@ Relaciones:
 - `lichen-images` es un bucket privado con límite de 20 MB por archivo.
 - Los tipos MIME permitidos son JPEG, PNG, WebP, HEIC, HEIF y TIFF.
 - El acceso está restringido a usuarios autenticados y la ruta debe comenzar con el UID del usuario.
+
+## Anotación manual por puntos
+
+- `AnnotationSet`: representa un conjunto de anotación asociado a una imagen y a una versión del método; incluye `method`, `status`, `version`, `grid_rows`, `grid_columns`, `roi_*`, `notes`, `completed_at` y marcas de auditoría.
+- `Morphotype`: representa un morfotipo visible asociado a un `AnnotationSet`; guarda `label`, `growth_form`, `color_hex` y notas de contexto.
+- `AnnotationPoint`: representa un punto de la cuadrícula sistemática con `point_index`, coordenadas normalizadas, `classification`, `confidence_level` y `notes`.
+
+### Regla de cobertura de la versión 1
+
+- La versión 1 utilizará una cuadrícula sistemática.
+- El usuario clasificará todos los puntos.
+- Los puntos evaluables serán `lichen`, `bark`, `moss` y `algae`.
+- `shadow`, `glare` y `unknown` se excluirán del denominador.
+- `lichen cover percentage = lichen points / evaluable points × 100`.
+- Un morfotipo visible no equivale necesariamente a una especie.

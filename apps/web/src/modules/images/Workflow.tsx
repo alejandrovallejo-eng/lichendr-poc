@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
 import { extractExifMetadata, type ExtractedImageMetadata } from "@/modules/images/exif";
-import { createSignedImageUrl, getImagesForTreeSample, persistImageWithMetadata, type ImageRecordRow, type ImageUploadProgress } from "@/modules/images/client";
+import { createSignedImageUrl, getImagesForTreeSample, ImagePersistenceError, persistImageWithMetadata, type ImageRecordRow, type ImageUploadProgress } from "@/modules/images/client";
 import { ensureAnonymousSession } from "@/modules/auth/client";
 
 interface ReviewImage {
@@ -20,9 +20,10 @@ interface ReviewImage {
     notes: string;
     locationSource: "exif" | "gps" | "manual" | "unknown";
   };
-  saveState: "idle" | "validating" | "uploading" | "saving-metadata" | "saved" | "error";
+  saveState: "idle" | "validating" | "uploading" | "saving-metadata" | "saved" | "error" | "cleanup-in-progress" | "cleanup-completed" | "cleanup-pending";
   saveError?: string;
   progress?: number;
+  canRetry?: boolean;
   savedRecord?: ImageRecordRow;
   signedUrl?: string;
 }
@@ -74,6 +75,28 @@ function getLocationSourceLabel(locationSource: ReviewImage["review"]["locationS
       return "Manual";
     default:
       return "Sin fuente";
+  }
+}
+
+function getSaveStateLabel(saveState: ReviewImage["saveState"]) {
+  switch (saveState) {
+    case "saved":
+      return "Guardada";
+    case "uploading":
+      return "Subiendo";
+    case "saving-metadata":
+      return "Guardando metadata";
+    case "validating":
+      return "Validando";
+    case "cleanup-in-progress":
+      return "Limpieza en curso";
+    case "cleanup-completed":
+      return "Limpieza completada";
+    case "cleanup-pending":
+      return "Limpieza pendiente";
+    case "error":
+    default:
+      return "Error";
   }
 }
 
@@ -267,7 +290,7 @@ export default function ImagesWorkflow() {
       return;
     }
 
-    const pendingImages = images.filter((image) => targetImageId ? image.id === targetImageId : image.saveState !== "saved");
+    const pendingImages = images.filter((image) => targetImageId ? image.id === targetImageId : image.saveState !== "saved" && image.saveState !== "cleanup-pending");
     if (pendingImages.length === 0) {
       setSelectionNotice("No hay imágenes pendientes por guardar.");
       return;
@@ -296,7 +319,7 @@ export default function ImagesWorkflow() {
       }
 
       try {
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "uploading", progress: 0 } : entry));
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "uploading", progress: 0, canRetry: false } : entry));
         const nextLocationSource: ExtractedImageMetadata["locationSource"] = image.review.locationSource === "manual"
           ? "manual"
           : image.review.locationSource === "gps"
@@ -312,6 +335,7 @@ export default function ImagesWorkflow() {
           locationSource: nextLocationSource,
         };
 
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "cleanup-in-progress", progress: 0, canRetry: false } : entry));
         const persistedRecord = await persistImageWithMetadata(
           image.file,
           {
@@ -328,12 +352,24 @@ export default function ImagesWorkflow() {
           }
         );
 
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saving-metadata", progress: 100 } : entry));
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saving-metadata", progress: 100, canRetry: false } : entry));
         const signedUrl = await createSignedImageUrl(persistedRecord.storage_path);
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saved", progress: 100, savedRecord: persistedRecord, signedUrl } : entry));
+        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saved", progress: 100, savedRecord: persistedRecord, signedUrl, canRetry: false } : entry));
         setSavedImages((current) => [persistedRecord, ...current]);
       } catch (error) {
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "error", saveError: error instanceof Error ? error.message : "No se pudo guardar la imagen." } : entry));
+        const cleanupError = error instanceof ImagePersistenceError ? error : null;
+        const nextState = cleanupError?.phase === "upload"
+          ? "error"
+          : cleanupError?.cleanup.canRetry
+            ? "cleanup-completed"
+            : "cleanup-pending";
+        setImages((current) => current.map((entry) => entry.id === image.id ? {
+          ...entry,
+          saveState: cleanupError ? nextState : "error",
+          saveError: cleanupError ? cleanupError.cleanup.userMessage : error instanceof Error ? error.message : "No se pudo guardar la imagen.",
+          canRetry: cleanupError ? cleanupError.cleanup.canRetry : true,
+          progress: 100,
+        } : entry));
       }
     }
 
@@ -352,7 +388,7 @@ export default function ImagesWorkflow() {
       return;
     }
 
-    setImages((current) => current.map((entry) => entry.id === imageId ? { ...entry, saveState: "validating", saveError: undefined, progress: 0 } : entry));
+    setImages((current) => current.map((entry) => entry.id === imageId ? { ...entry, saveState: "validating", saveError: undefined, progress: 0, canRetry: false } : entry));
     await handlePersistImages(imageId);
   };
 
@@ -463,7 +499,7 @@ export default function ImagesWorkflow() {
 
                     <div className="rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
                       <p className="mb-1 text-sm font-medium" style={{ color: "var(--ld-text)" }}>Estado de guardado</p>
-                      <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>{image.saveState === "saved" ? "Guardada" : image.saveState === "uploading" ? "Subiendo" : image.saveState === "saving-metadata" ? "Guardando metadata" : image.saveState === "validating" ? "Validando" : image.saveState === "error" ? "Error" : "Pendiente"}</p>
+                      <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>{getSaveStateLabel(image.saveState)}</p>
                       {image.progress != null ? <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>{image.progress}%</p> : null}
                       {image.saveError ? <p className="mt-2 text-xs" style={{ color: "#b91c1c" }}>{image.saveError}</p> : null}
                     </div>
@@ -538,8 +574,8 @@ export default function ImagesWorkflow() {
                     />
                   </div>
 
-                  {image.saveState === "error" ? (
-                    <button type="button" onClick={() => void retryImageSave(image.id)} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                  {(image.saveState === "error" || image.saveState === "cleanup-completed" || image.saveState === "cleanup-pending") ? (
+                    <button type="button" onClick={() => void retryImageSave(image.id)} disabled={!image.canRetry} className="rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
                       Reintentar
                     </button>
                   ) : null}

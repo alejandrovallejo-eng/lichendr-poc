@@ -54,6 +54,32 @@ export interface ImageSavePayload {
 
 export interface ImageUploadProgress { bytesSent: number; bytesTotal: number; percent: number; }
 
+export interface ImageCleanupOperationResult {
+  succeeded: boolean;
+  errorMessage: string | null;
+}
+
+export interface ImagePersistenceCleanupResult {
+  imageId: string | null;
+  storagePath: string | null;
+  databaseCleanupSucceeded: boolean;
+  storageCleanupSucceeded: boolean;
+  canRetry: boolean;
+  userMessage: string;
+}
+
+export class ImagePersistenceError extends Error {
+  public readonly cleanup: ImagePersistenceCleanupResult;
+  public readonly phase: "upload" | "images" | "metadata";
+
+  constructor(message: string, phase: "upload" | "images" | "metadata", cleanup: ImagePersistenceCleanupResult) {
+    super(message);
+    this.name = "ImagePersistenceError";
+    this.cleanup = cleanup;
+    this.phase = phase;
+  }
+}
+
 interface UploadContext {
   projectId: string;
   siteId: string;
@@ -255,20 +281,24 @@ export async function createSignedImageUrl(storagePath: string): Promise<string>
   return data.signedUrl;
 }
 
-export async function removeStorageObject(storagePath: string): Promise<void> {
+export async function removeStorageObject(storagePath: string): Promise<ImageCleanupOperationResult> {
   const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
 
   if (error) {
-    throw error;
+    return { succeeded: false, errorMessage: "No se pudo limpiar el objeto de almacenamiento." };
   }
+
+  return { succeeded: true, errorMessage: null };
 }
 
-export async function deleteImageRecord(imageId: string): Promise<void> {
+export async function deleteImageRecord(imageId: string): Promise<ImageCleanupOperationResult> {
   const { error } = await supabase.from("images").delete().eq("id", imageId);
 
   if (error) {
-    throw error;
+    return { succeeded: false, errorMessage: "No se pudo limpiar el registro de imagen." };
   }
+
+  return { succeeded: true, errorMessage: null };
 }
 
 export async function uploadImageToStorage(file: File, storagePath: string, onProgress?: (progress: ImageUploadProgress) => void): Promise<void> {
@@ -347,6 +377,7 @@ export async function persistImageWithMetadata(
   }
 
   const normalizedMimeType = normalizeMimeType(file);
+  const metadataPayload = normalizeMetadataForSave(metadata);
   const storagePath = normalizeStoragePath(
     (await supabase.auth.getSession()).data.session?.user.id ?? "anonymous",
     context.projectId,
@@ -356,22 +387,66 @@ export async function persistImageWithMetadata(
     file
   );
 
-  await uploadImageToStorage(file, storagePath, onProgress);
+  try {
+    await uploadImageToStorage(file, storagePath, onProgress);
+  } catch {
+    throw new ImagePersistenceError("No se pudo completar la subida. Puedes volver a intentarlo.", "upload", {
+      imageId: null,
+      storagePath,
+      databaseCleanupSucceeded: true,
+      storageCleanupSucceeded: true,
+      canRetry: true,
+      userMessage: "No se pudo completar la subida. Puedes volver a intentarlo.",
+    });
+  }
 
-  const imageRecord = await createImageRecord({
-    treeSampleId: context.treeSampleId,
-    storagePath,
-    originalFilename: file.name,
-    mimeType: normalizedMimeType,
-    fileSizeBytes: file.size,
-    widthPx: metadata.width ?? null,
-    heightPx: metadata.height ?? null,
-    imageOrder,
-    caption,
-    metadata: normalizeMetadataForSave(metadata),
-  });
+  let imageRecord: ImageRecordRow | null = null;
 
-  await createImageMetadataRecord(imageRecord.id, normalizeMetadataForSave(metadata));
+  try {
+    imageRecord = await createImageRecord({
+      treeSampleId: context.treeSampleId,
+      storagePath,
+      originalFilename: file.name,
+      mimeType: normalizedMimeType,
+      fileSizeBytes: file.size,
+      widthPx: metadata.width ?? null,
+      heightPx: metadata.height ?? null,
+      imageOrder,
+      caption,
+      metadata: metadataPayload,
+    });
+  } catch {
+    const storageCleanup = await removeStorageObject(storagePath);
+    throw new ImagePersistenceError("No se pudo guardar la imagen en la base de datos. Se limpió el objeto subido.", "images", {
+      imageId: null,
+      storagePath,
+      databaseCleanupSucceeded: true,
+      storageCleanupSucceeded: storageCleanup.succeeded,
+      canRetry: storageCleanup.succeeded,
+      userMessage: storageCleanup.succeeded
+        ? "La imagen se limpió correctamente. Puedes volver a intentarlo."
+        : "Limpieza pendiente. No se pudo completar el guardado y la imagen quedó pendiente de limpieza.",
+    });
+  }
+
+  try {
+    await createImageMetadataRecord(imageRecord.id, metadataPayload);
+  } catch {
+    const databaseCleanup = await deleteImageRecord(imageRecord.id);
+    const storageCleanup = await removeStorageObject(storagePath);
+    const canRetry = databaseCleanup.succeeded && storageCleanup.succeeded;
+
+    throw new ImagePersistenceError("No se pudo guardar la metadata de la imagen. Se intentó limpiar la imagen y el objeto almacenado.", "metadata", {
+      imageId: imageRecord.id,
+      storagePath,
+      databaseCleanupSucceeded: databaseCleanup.succeeded,
+      storageCleanupSucceeded: storageCleanup.succeeded,
+      canRetry,
+      userMessage: canRetry
+        ? "La imagen y su almacenamiento se limpiaron correctamente. Puedes volver a intentarlo."
+        : "Limpieza pendiente. La imagen quedó pendiente de limpieza y no se volverá a cargar automáticamente.",
+    });
+  }
 
   return imageRecord;
 }

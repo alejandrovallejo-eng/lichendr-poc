@@ -4,7 +4,7 @@ import ModulePlaceholder from "@/components/ModulePlaceholder";
 
 export default function DashboardPage() {
   return (
-    <div>
+    <div className="w-full">
       <PageHeader title="LichenDR" subtitle="Biomonitoreo de líquenes para la República Dominicana" />
 
       <p className="text-sm mb-4" style={{ color: "var(--ld-text-secondary)" }}>

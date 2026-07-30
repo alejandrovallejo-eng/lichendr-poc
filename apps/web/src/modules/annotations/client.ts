@@ -7,7 +7,7 @@ export type MorphotypeRow = Database["public"]["Tables"]["morphotypes"]["Row"];
 export type AnnotationPointRow = Database["public"]["Tables"]["annotation_points"]["Row"];
 
 export type AnnotationSetStatus = "draft" | "completed";
-export type AnnotationMethod = "systematic_point_count";
+export type AnnotationMethod = "systematic_point_count" | "manual_free_points";
 export type MorphotypeGrowthForm = "crustose" | "foliose" | "fruticose" | "squamulose" | "unknown";
 export type AnnotationPointClassification = "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
 export type AnnotationPointConfidenceLevel = "low" | "medium" | "high";

@@ -16,6 +16,7 @@ import {
   upsertAnnotationSet,
   upsertMorphotype,
   isValidAnnotationRoi,
+  type AnnotationMethod,
   type AnnotationPointClassification,
   type AnnotationPointConfidenceLevel,
   type AnnotationPointDraft,
@@ -49,17 +50,19 @@ interface SelectedPointState {
 
 interface ActionRecord {
   pointIndex: number;
-  previousClassification: AnnotationPointClassification | null;
-  nextClassification: AnnotationPointClassification | null;
-  previousMorphotypeId: string | null;
-  nextMorphotypeId: string | null;
-  previousId: string | null;
-  nextId: string | null;
+  kind: "create" | "move" | "classify" | "delete";
+  previousPoint: LocalPointState | null;
+  nextPoint: LocalPointState | null;
 }
 
 interface SaveStatus {
   type: "info" | "success" | "error";
   text: string;
+}
+
+interface DragState {
+  pointIndex: number;
+  pointerId: number;
 }
 
 const CATEGORY_OPTIONS: Array<{ value: AnnotationPointClassification; label: string; color: string }> = [
@@ -91,6 +94,17 @@ function getCategoryColor(classification: AnnotationPointClassification | null, 
   return match?.color ?? "#6b7280";
 }
 
+function getClassificationAbbreviation(classification: AnnotationPointClassification | null) {
+  if (classification === null) return "?";
+  if (classification === "lichen") return "L";
+  if (classification === "bark") return "C";
+  if (classification === "moss") return "M";
+  if (classification === "algae") return "A";
+  if (classification === "shadow") return "S";
+  if (classification === "glare") return "R";
+  return "U";
+}
+
 function isFullImageRoi(roi: { x: number | null; y: number | null; width: number | null; height: number | null }) {
   return roi.x === 0 && roi.y === 0 && roi.width === 1 && roi.height === 1;
 }
@@ -101,6 +115,18 @@ function getRoiSummary(roi: { x: number | null; y: number | null; width: number 
   }
 
   return isFullImageRoi(roi) ? "Imagen completa" : "Área de corteza";
+}
+
+function clampNormalized(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function getNextAvailablePointIndex(existingPoints: Record<number, LocalPointState>) {
+  let candidate = 1;
+  while (existingPoints[candidate]) {
+    candidate += 1;
+  }
+  return candidate;
 }
 
 export default function AnnotationsWorkflow() {
@@ -122,6 +148,7 @@ export default function AnnotationsWorkflow() {
   const [gridColumns, setGridColumns] = useState(10);
   const [roi, setRoi] = useState<{ x: number | null; y: number | null; width: number | null; height: number | null }>({ x: 0, y: 0, width: 1, height: 1 });
   const [selectionMode, setSelectionMode] = useState<"full" | "roi">("full");
+  const [annotationMode, setAnnotationMode] = useState<AnnotationMethod>("manual_free_points");
   const [pendingRoiPoint, setPendingRoiPoint] = useState<PendingRoiPoint | null>(null);
   const [selectedPoint, setSelectedPoint] = useState<SelectedPointState | null>(null);
   const [selectedClassification, setSelectedClassification] = useState<AnnotationPointClassification>("lichen");
@@ -131,6 +158,7 @@ export default function AnnotationsWorkflow() {
   const [isSaving, setIsSaving] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
   const [lastActionStack, setLastActionStack] = useState<ActionRecord[]>([]);
+  const [dragState, setDragState] = useState<DragState | null>(null);
   const imageHostRef = useRef<HTMLDivElement | null>(null);
 
   const loadAvailableImages = useCallback(async () => {
@@ -144,6 +172,7 @@ export default function AnnotationsWorkflow() {
     setGridColumns(10);
     setRoi({ x: 0, y: 0, width: 1, height: 1 });
     setSelectionMode("full");
+    setAnnotationMode("manual_free_points");
     setPendingRoiPoint(null);
     setSelectedPoint(null);
     setImageLoadError(false);
@@ -191,6 +220,7 @@ export default function AnnotationsWorkflow() {
         width: state.annotationSet?.roi_width ?? 1,
         height: state.annotationSet?.roi_height ?? 1,
       });
+      setAnnotationMode((state.annotationSet?.method as AnnotationMethod | undefined) ?? "manual_free_points");
 
       const nextPointStates: Record<number, LocalPointState> = {};
       for (const point of state.points) {
@@ -247,14 +277,16 @@ export default function AnnotationsWorkflow() {
     return points;
   }, [gridRows, gridColumns, roi]);
 
-  const stats = useMemo(() => {
-    const classifiedPoints = Object.values(pointStates).filter((point) => point.classification != null).length;
+  const pointEntries = useMemo(() => Object.values(pointStates), [pointStates]);
+
+  const systematicStats = useMemo(() => {
+    const classifiedPoints = pointEntries.filter((point) => point.classification != null).length;
     const totalPoints = generatedPoints.length;
     const unclassifiedPoints = totalPoints - classifiedPoints;
-    const evaluablePoints = Object.values(pointStates).filter((point) => point.classification === "lichen" || point.classification === "bark" || point.classification === "moss" || point.classification === "algae").length;
-    const excludedPoints = Object.values(pointStates).filter((point) => point.classification === "shadow" || point.classification === "glare" || point.classification === "unknown").length;
-    const lichenPoints = Object.values(pointStates).filter((point) => point.classification === "lichen").length;
-    const visibleMorphotypeIds = new Set(Object.values(pointStates).filter((point) => point.classification === "lichen" && point.morphotypeId).map((point) => point.morphotypeId));
+    const evaluablePoints = pointEntries.filter((point) => point.classification === "lichen" || point.classification === "bark" || point.classification === "moss" || point.classification === "algae").length;
+    const excludedPoints = pointEntries.filter((point) => point.classification === "shadow" || point.classification === "glare" || point.classification === "unknown").length;
+    const lichenPoints = pointEntries.filter((point) => point.classification === "lichen").length;
+    const visibleMorphotypeIds = new Set(pointEntries.filter((point) => point.classification === "lichen" && point.morphotypeId).map((point) => point.morphotypeId));
     const lichenCoverage = evaluablePoints > 0 ? (lichenPoints / evaluablePoints) * 100 : null;
 
     return {
@@ -267,14 +299,56 @@ export default function AnnotationsWorkflow() {
       visibleMorphotypes: visibleMorphotypeIds.size,
       lichenCoverage,
     };
-  }, [generatedPoints.length, pointStates]);
+  }, [generatedPoints.length, pointEntries]);
+
+  const freeStats = useMemo(() => {
+    const existingPointsCount = pointEntries.length;
+    const classifiedPoints = pointEntries.filter((point) => point.classification != null).length;
+    const unclassifiedPoints = pointEntries.filter((point) => point.classification == null).length;
+    const evaluablePoints = pointEntries.filter((point) => point.classification === "lichen" || point.classification === "bark" || point.classification === "moss" || point.classification === "algae").length;
+    const excludedPoints = pointEntries.filter((point) => point.classification === "shadow" || point.classification === "glare" || point.classification === "unknown").length;
+    const lichenPoints = pointEntries.filter((point) => point.classification === "lichen").length;
+    const visibleMorphotypeIds = new Set(pointEntries.filter((point) => point.classification === "lichen" && point.morphotypeId).map((point) => point.morphotypeId));
+
+    return {
+      totalPoints: existingPointsCount,
+      classifiedPoints,
+      unclassifiedPoints,
+      evaluablePoints,
+      excludedPoints,
+      lichenPoints,
+      visibleMorphotypes: visibleMorphotypeIds.size,
+    };
+  }, [pointEntries]);
+
+  const stats = annotationMode === "manual_free_points" ? freeStats : systematicStats;
+
+  const systematicCanComplete = generatedPoints.length > 0 && systematicStats.unclassifiedPoints === 0 && systematicStats.evaluablePoints > 0;
+  const freeCanComplete = freeStats.totalPoints > 0 && freeStats.unclassifiedPoints === 0 && pointEntries.every((point) => point.classification !== "lichen" || Boolean(point.morphotypeId));
+  const canComplete = annotationMode === "manual_free_points" ? freeCanComplete : systematicCanComplete;
+
+  const completionHint = annotationMode === "manual_free_points"
+    ? freeCanComplete
+      ? "Listo para completar."
+      : "Añade al menos un punto clasificado y asegúrate de que cada liquen tenga morfotipo."
+    : systematicCanComplete
+      ? "Listo para completar."
+      : "Completa todos los puntos del muestreo y deja al menos un punto evaluable.";
+
+  const confirmStateChange = useCallback((message: string) => {
+    if (pointEntries.length === 0) {
+      return true;
+    }
+
+    return window.confirm(message);
+  }, [pointEntries.length]);
 
   const handleSelectImage = (imageId: string) => {
     router.push(`/annotations?imageId=${imageId}`);
   };
 
   const handleToggleFullImage = () => {
-    if (Object.keys(pointStates).length > 0 && !window.confirm("Cambiar el ROI descartará las clasificaciones locales actuales. ¿Deseas continuar?")) {
+    if (!confirmStateChange("Cambiar el ROI descartará las clasificaciones locales actuales. ¿Deseas continuar?")) {
       return;
     }
 
@@ -283,16 +357,18 @@ export default function AnnotationsWorkflow() {
     setPendingRoiPoint(null);
     setPointStates({});
     setLastActionStack([]);
+    setSelectedPoint(null);
     setSaveStatus({ type: "info", text: "Se ha restaurado la imagen completa y se han descartado las clasificaciones locales." });
   };
 
   const handleStartRoiSelection = () => {
     setSelectionMode("roi");
     setPendingRoiPoint(null);
+    setSaveStatus(null);
   };
 
   const handleResetRoi = () => {
-    if (Object.keys(pointStates).length > 0 && !window.confirm("Reiniciar el ROI descartará las clasificaciones locales actuales. ¿Deseas continuar?")) {
+    if (!confirmStateChange("Reiniciar el ROI descartará las clasificaciones locales actuales. ¿Deseas continuar?")) {
       return;
     }
 
@@ -300,6 +376,7 @@ export default function AnnotationsWorkflow() {
     setPendingRoiPoint(null);
     setPointStates({});
     setLastActionStack([]);
+    setSelectedPoint(null);
     setSaveStatus({ type: "info", text: "Se ha reiniciado el área y se han descartado las clasificaciones locales." });
   };
 
@@ -337,81 +414,179 @@ export default function AnnotationsWorkflow() {
     applyRoiFromPoints(pendingRoiPoint, { x, y });
   };
 
+  const persistPoint = useCallback(async (pointState: LocalPointState) => {
+    if (!annotationSet?.id) {
+      return pointState;
+    }
+
+    const payload: AnnotationPointDraft = {
+      id: pointState.id ?? undefined,
+      annotationSetId: annotationSet.id,
+      pointIndex: pointState.pointIndex,
+      xNormalized: pointState.xNormalized,
+      yNormalized: pointState.yNormalized,
+      classification: pointState.classification ?? "unknown",
+      confidenceLevel: pointState.confidenceLevel,
+      morphotypeId: pointState.classification === "lichen" ? pointState.morphotypeId : null,
+      notes: null,
+    };
+
+    const savedPoint = await upsertAnnotationPoint(payload);
+    return { ...pointState, id: savedPoint.id };
+  }, [annotationSet]);
+
+  const handleSwitchMode = async (nextMode: AnnotationMethod) => {
+    if (annotationMode === nextMode) {
+      return;
+    }
+
+    if (!confirmStateChange("Cambiar de modo descartará los puntos y clasificaciones actuales. ¿Deseas continuar?")) {
+      return;
+    }
+
+    setAnnotationMode(nextMode);
+    setPointStates({});
+    setLastActionStack([]);
+    setSelectedPoint(null);
+    setSaveStatus({ type: "info", text: nextMode === "manual_free_points" ? "Modo cambiado a marcación libre." : "Modo cambiado a cuadrícula sistemática." });
+  };
+
+  const applyClassificationToPoint = useCallback(async (point: SelectedPointState | { pointIndex: number; xNormalized: number; yNormalized: number }, classification: AnnotationPointClassification) => {
+    if (!selectedImageId) {
+      return;
+    }
+
+    if (classification === "lichen" && !selectedMorphotypeId) {
+      setSaveStatus({ type: "error", text: "Selecciona un morfotipo antes de clasificar un punto como líquen." });
+      return;
+    }
+
+    const existing = pointStates[point.pointIndex];
+    const previousPoint = existing ? { ...existing } : null;
+    const nextMorphotypeId = classification === "lichen" ? selectedMorphotypeId : null;
+    const nextPoint: LocalPointState = {
+      pointIndex: point.pointIndex,
+      classification,
+      confidenceLevel: "medium",
+      morphotypeId: nextMorphotypeId,
+      id: existing?.id ?? null,
+      xNormalized: point.xNormalized,
+      yNormalized: point.yNormalized,
+    };
+
+    setPointStates((current) => ({ ...current, [point.pointIndex]: nextPoint }));
+    setLastActionStack((current) => {
+      const action: ActionRecord = { pointIndex: point.pointIndex, kind: "classify", previousPoint, nextPoint };
+      return [action, ...current].slice(0, 20);
+    });
+    setSelectedPoint({ pointIndex: point.pointIndex, xNormalized: point.xNormalized, yNormalized: point.yNormalized });
+    setSaveStatus({ type: "info", text: "Clasificación aplicada." });
+
+    try {
+      const savedPoint = await persistPoint(nextPoint);
+      setPointStates((current) => ({ ...current, [point.pointIndex]: { ...current[point.pointIndex], id: savedPoint.id } }));
+      setSaveStatus({ type: "success", text: "Clasificación actualizada correctamente." });
+    } catch {
+      setSaveStatus({ type: "error", text: "No se pudo persistir la clasificación. Puedes reintentar." });
+    }
+  }, [persistPoint, pointStates, selectedImageId, selectedMorphotypeId]);
+
   const handlePointSelection = async (point: { pointIndex: number; xNormalized: number; yNormalized: number }) => {
     if (!selectedImageId) {
       return;
     }
 
-    const existing = pointStates[point.pointIndex];
-    setSelectedPoint(point);
-    const nextClassification = selectedClassification === "unknown" ? "unknown" : selectedClassification;
-
-    if (selectedClassification === "lichen" && !selectedMorphotypeId) {
-      setSaveStatus({ type: "error", text: "Selecciona un morfotipo antes de clasificar un punto como líquen." });
+    if (annotationMode === "manual_free_points") {
+      setSelectedPoint(point);
+      setSaveStatus(null);
       return;
     }
 
-    const nextMorphotypeId = selectedClassification === "lichen" ? selectedMorphotypeId : null;
+    await applyClassificationToPoint(point, selectedClassification);
+  };
 
-    const previousState = existing
-      ? {
-          classification: existing.classification,
-          morphotypeId: existing.morphotypeId,
-          id: existing.id ?? null,
-        }
-      : { classification: null, morphotypeId: null, id: null };
+  const handleApplyClassificationToSelectedPoint = async (classification: AnnotationPointClassification) => {
+    if (!selectedPoint) {
+      setSelectedClassification(classification);
+      setSaveStatus({ type: "info", text: "Selecciona un punto para aplicar la clasificación." });
+      return;
+    }
 
-    const nextClassificationValue: AnnotationPointClassification | null = selectedClassification === "unknown" ? "unknown" : selectedClassification;
+    if (annotationMode === "manual_free_points") {
+      await applyClassificationToPoint(selectedPoint, classification);
+      return;
+    }
 
-    const nextState: LocalPointState = {
-      pointIndex: point.pointIndex,
-      classification: nextClassificationValue,
-      confidenceLevel: "medium",
-      morphotypeId: nextMorphotypeId,
-      xNormalized: point.xNormalized,
-      yNormalized: point.yNormalized,
-      id: existing?.id ?? null,
-    };
+    setSelectedClassification(classification);
+  };
 
-    setPointStates((current) => ({ ...current, [point.pointIndex]: nextState }));
-    setLastActionStack((current) => [
-      {
-        pointIndex: point.pointIndex,
-        previousClassification: previousState.classification,
-        nextClassification: nextClassificationValue,
-        previousMorphotypeId: previousState.morphotypeId,
-        nextMorphotypeId: nextMorphotypeId,
-        previousId: previousState.id,
-        nextId: existing?.id ?? null,
-      },
-      ...current,
-    ].slice(0, 20));
+  const handleDeleteSelectedPoint = async () => {
+    if (!selectedPoint || !selectedImageId) {
+      setSaveStatus({ type: "error", text: "Selecciona un punto antes de eliminarlo." });
+      return;
+    }
+
+    const existing = pointStates[selectedPoint.pointIndex];
+    if (!existing) {
+      setSaveStatus({ type: "info", text: "El punto ya no existe." });
+      return;
+    }
+
+    const previousPoint = { ...existing };
+    setPointStates((current) => {
+      const next = { ...current };
+      delete next[selectedPoint.pointIndex];
+      return next;
+    });
+    setLastActionStack((current) => {
+      const action: ActionRecord = { pointIndex: selectedPoint.pointIndex, kind: "delete", previousPoint, nextPoint: null };
+      return [action, ...current].slice(0, 20);
+    });
+    setSelectedPoint(null);
+    setSaveStatus({ type: "info", text: "Punto eliminado localmente." });
 
     try {
-      if (nextClassificationValue == null) {
-        if (existing?.id) {
-          await deleteAnnotationPoint(existing.id);
-        }
-      } else {
-        const payload: AnnotationPointDraft = {
-          id: existing?.id ?? undefined,
-          annotationSetId: annotationSet?.id ?? "",
-          pointIndex: point.pointIndex,
-          xNormalized: point.xNormalized,
-          yNormalized: point.yNormalized,
-          classification: nextClassificationValue,
-          confidenceLevel: "medium",
-          morphotypeId: nextMorphotypeId,
-          notes: null,
-        };
-
-        const savedPoint = await upsertAnnotationPoint(payload);
-        setPointStates((current) => ({ ...current, [point.pointIndex]: { ...current[point.pointIndex], id: savedPoint.id } }));
+      if (existing.id) {
+        await deleteAnnotationPoint(existing.id);
       }
-
-      setSaveStatus({ type: "success", text: "Clasificación actualizada correctamente." });
+      setSaveStatus({ type: "success", text: "Punto eliminado correctamente." });
     } catch {
-      setSaveStatus({ type: "error", text: "No se pudo persistir la clasificación. Puedes reintentar." });
+      setSaveStatus({ type: "error", text: "No se pudo eliminar el punto. Puedes reintentar." });
+    }
+  };
+
+  const handleClearSelectedPointClassification = async () => {
+    if (!selectedPoint || !selectedImageId) {
+      setSaveStatus({ type: "error", text: "Selecciona un punto antes de limpiar su clasificación." });
+      return;
+    }
+
+    const existing = pointStates[selectedPoint.pointIndex];
+    if (!existing) {
+      setSaveStatus({ type: "info", text: "El punto ya no existe." });
+      return;
+    }
+
+    if (annotationMode === "manual_free_points") {
+      await handleDeleteSelectedPoint();
+      return;
+    }
+
+    const previousPoint = { ...existing };
+    const clearedPoint: LocalPointState = { ...existing, classification: null, morphotypeId: null, id: existing.id ?? null };
+    setPointStates((current) => ({ ...current, [selectedPoint.pointIndex]: clearedPoint }));
+    setLastActionStack((current) => {
+      const action: ActionRecord = { pointIndex: selectedPoint.pointIndex, kind: "classify", previousPoint, nextPoint: clearedPoint };
+      return [action, ...current].slice(0, 20);
+    });
+    setSaveStatus({ type: "info", text: "Clasificación limpiada localmente." });
+
+    try {
+      const savedPoint = await persistPoint(clearedPoint);
+      setPointStates((current) => ({ ...current, [selectedPoint.pointIndex]: { ...current[selectedPoint.pointIndex], id: savedPoint.id } }));
+      setSaveStatus({ type: "success", text: "Clasificación limpiada correctamente." });
+    } catch {
+      setSaveStatus({ type: "error", text: "No se pudo limpiar la clasificación del punto." });
     }
   };
 
@@ -421,97 +596,166 @@ export default function AnnotationsWorkflow() {
     }
 
     const action = lastActionStack[0];
-    const previousPoint = pointStates[action.pointIndex];
-
-    const restoredState: LocalPointState | null = action.previousClassification == null
-      ? null
-      : {
-          pointIndex: action.pointIndex,
-          classification: action.previousClassification,
-          confidenceLevel: "medium",
-          morphotypeId: action.previousMorphotypeId,
-          id: action.previousId ?? null,
-          xNormalized: previousPoint?.xNormalized ?? 0,
-          yNormalized: previousPoint?.yNormalized ?? 0,
-        };
+    const restoredPoint = action.previousPoint ? { ...action.previousPoint } : null;
 
     setPointStates((current) => {
       const next = { ...current };
-      if (restoredState) {
-        next[action.pointIndex] = restoredState;
+      if (restoredPoint) {
+        next[action.pointIndex] = restoredPoint;
       } else {
         delete next[action.pointIndex];
       }
       return next;
     });
 
+    setLastActionStack((current) => current.slice(1));
+    setSaveStatus({ type: "info", text: "Se ha deshecho el último cambio local." });
+
     try {
-      if (action.previousClassification == null) {
-        if (action.previousId) {
-          await deleteAnnotationPoint(action.previousId);
-        }
-      } else {
+      if (action.kind === "delete" && restoredPoint?.id) {
         const payload: AnnotationPointDraft = {
-          id: action.previousId ?? undefined,
+          id: restoredPoint.id,
           annotationSetId: annotationSet?.id ?? "",
-          pointIndex: action.pointIndex,
-          xNormalized: previousPoint?.xNormalized ?? 0,
-          yNormalized: previousPoint?.yNormalized ?? 0,
-          classification: action.previousClassification,
-          confidenceLevel: "medium",
-          morphotypeId: action.previousMorphotypeId,
+          pointIndex: restoredPoint.pointIndex,
+          xNormalized: restoredPoint.xNormalized,
+          yNormalized: restoredPoint.yNormalized,
+          classification: restoredPoint.classification ?? "unknown",
+          confidenceLevel: restoredPoint.confidenceLevel,
+          morphotypeId: restoredPoint.classification === "lichen" ? restoredPoint.morphotypeId : null,
           notes: null,
         };
         const savedPoint = await upsertAnnotationPoint(payload);
         setPointStates((current) => ({ ...current, [action.pointIndex]: { ...current[action.pointIndex], id: savedPoint.id } }));
+      } else if (action.kind === "create" && action.nextPoint) {
+        if (action.nextPoint.id) {
+          await deleteAnnotationPoint(action.nextPoint.id);
+        }
+      } else if (action.kind === "classify" || action.kind === "move") {
+        if (restoredPoint) {
+          const savedPoint = await persistPoint(restoredPoint);
+          setPointStates((current) => ({ ...current, [action.pointIndex]: { ...current[action.pointIndex], id: savedPoint.id } }));
+        }
       }
-
-      setLastActionStack((current) => current.slice(1));
-      setSaveStatus({ type: "info", text: "Se ha deshecho el último cambio local." });
+      setSaveStatus({ type: "success", text: "Se ha deshecho el último cambio." });
     } catch {
       setSaveStatus({ type: "error", text: "No se pudo deshacer el último cambio." });
     }
   };
 
-  const handleClearSelectedPointClassification = async () => {
-    if (!selectedImageId || !selectedPoint) {
-      setSaveStatus({ type: "error", text: "Selecciona un punto antes de limpiar su clasificación." });
+  const handleCreateFreePoint = useCallback(async (xNormalized: number, yNormalized: number) => {
+    if (!selectedImageId) {
       return;
     }
 
-    const existing = pointStates[selectedPoint.pointIndex];
-    if (!existing || existing.classification == null) {
-      setSaveStatus({ type: "info", text: "El punto seleccionado ya está sin clasificar." });
+    if (selectedClassification === "lichen" && !selectedMorphotypeId) {
+      setSaveStatus({ type: "error", text: "Selecciona un morfotipo antes de crear un punto de líquen." });
       return;
     }
 
-    setPointStates((current) => {
-      const next = { ...current };
-      delete next[selectedPoint.pointIndex];
-      return next;
+    const pointIndex = getNextAvailablePointIndex(pointStates);
+    const nextPoint: LocalPointState = {
+      pointIndex,
+      classification: selectedClassification,
+      confidenceLevel: "medium",
+      morphotypeId: selectedClassification === "lichen" ? selectedMorphotypeId : null,
+      id: null,
+      xNormalized: clampNormalized(xNormalized),
+      yNormalized: clampNormalized(yNormalized),
+    };
+
+    setPointStates((current) => ({ ...current, [pointIndex]: nextPoint }));
+    setLastActionStack((current) => {
+      const action: ActionRecord = { pointIndex, kind: "create", previousPoint: null, nextPoint };
+      return [action, ...current].slice(0, 20);
     });
-    setLastActionStack((current) => [
-      {
-        pointIndex: selectedPoint.pointIndex,
-        previousClassification: existing.classification,
-        nextClassification: null,
-        previousMorphotypeId: existing.morphotypeId,
-        nextMorphotypeId: null,
-        previousId: existing.id ?? null,
-        nextId: null,
-      },
-      ...current,
-    ].slice(0, 20));
+    setSelectedPoint({ pointIndex, xNormalized: nextPoint.xNormalized, yNormalized: nextPoint.yNormalized });
+    setSaveStatus({ type: "info", text: "Punto creado localmente." });
 
     try {
-      if (existing.id) {
-        await deleteAnnotationPoint(existing.id);
-      }
-      setSelectedPoint(null);
-      setSaveStatus({ type: "success", text: "Clasificación limpiada correctamente." });
+      const savedPoint = await persistPoint(nextPoint);
+      setPointStates((current) => ({ ...current, [pointIndex]: { ...current[pointIndex], id: savedPoint.id } }));
+      setSaveStatus({ type: "success", text: "Punto creado correctamente." });
     } catch {
-      setSaveStatus({ type: "error", text: "No se pudo limpiar la clasificación del punto." });
+      setSaveStatus({ type: "error", text: "No se pudo crear el punto. Puedes reintentar." });
     }
+  }, [persistPoint, pointStates, selectedClassification, selectedImageId, selectedMorphotypeId]);
+
+  const handleCanvasPointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!imageHostRef.current || selectionMode === "roi") {
+      return;
+    }
+
+    if (annotationMode !== "manual_free_points") {
+      return;
+    }
+
+    const bounds = imageHostRef.current.getBoundingClientRect();
+    const xNormalized = clampNormalized((event.clientX - bounds.left) / bounds.width);
+    const yNormalized = clampNormalized((event.clientY - bounds.top) / bounds.height);
+    void handleCreateFreePoint(xNormalized, yNormalized);
+  };
+
+  const handlePointPointerDown = (event: React.PointerEvent<SVGCircleElement>, point: { pointIndex: number; xNormalized: number; yNormalized: number }) => {
+    event.stopPropagation();
+
+    if (annotationMode !== "manual_free_points") {
+      setSaveStatus({ type: "info", text: "Los puntos de la cuadrícula sistemática son fijos para evitar sesgo." });
+      return;
+    }
+
+    setSelectedPoint(point);
+    setDragState({ pointIndex: point.pointIndex, pointerId: event.pointerId });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleCanvasPointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragState || annotationMode !== "manual_free_points") {
+      return;
+    }
+
+    if (!imageHostRef.current) {
+      return;
+    }
+
+    const bounds = imageHostRef.current.getBoundingClientRect();
+    const xNormalized = clampNormalized((event.clientX - bounds.left) / bounds.width);
+    const yNormalized = clampNormalized((event.clientY - bounds.top) / bounds.height);
+
+    setPointStates((current) => {
+      const existing = current[dragState.pointIndex];
+      if (!existing) {
+        return current;
+      }
+      const nextPoint = { ...existing, xNormalized, yNormalized };
+      return { ...current, [dragState.pointIndex]: nextPoint };
+    });
+    setSelectedPoint({ pointIndex: dragState.pointIndex, xNormalized, yNormalized });
+  };
+
+  const handleCanvasPointerUp = async (event: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragState || annotationMode !== "manual_free_points") {
+      return;
+    }
+
+    const currentPoint = pointStates[dragState.pointIndex];
+    if (currentPoint) {
+      try {
+        const previousPoint = { ...currentPoint };
+        const nextPoint = { ...currentPoint, xNormalized: currentPoint.xNormalized, yNormalized: currentPoint.yNormalized };
+        setLastActionStack((current) => {
+          const action: ActionRecord = { pointIndex: currentPoint.pointIndex, kind: "move", previousPoint, nextPoint };
+          return [action, ...current].slice(0, 20);
+        });
+        const savedPoint = await persistPoint(nextPoint);
+        setPointStates((currentMap) => ({ ...currentMap, [dragState.pointIndex]: { ...currentMap[dragState.pointIndex], id: savedPoint.id } }));
+        setSaveStatus({ type: "success", text: "Punto movido correctamente." });
+      } catch {
+        setSaveStatus({ type: "error", text: "No se pudo guardar la nueva posición del punto." });
+      }
+    }
+
+    setDragState(null);
+    event.currentTarget.releasePointerCapture?.(dragState.pointerId);
   };
 
   const persistAnnotationSet = async (status: "draft" | "completed") => {
@@ -525,6 +769,7 @@ export default function AnnotationsWorkflow() {
     try {
       const annotationDraft: AnnotationSetDraft = {
         imageId: selectedImageId,
+        method: annotationMode,
         gridRows,
         gridColumns,
         roiX: roi.x,
@@ -532,7 +777,7 @@ export default function AnnotationsWorkflow() {
         roiWidth: roi.width,
         roiHeight: roi.height,
         status,
-        notes: status === "completed" ? "Estimación visual basada en el método de conteo sistemático de puntos." : null,
+        notes: status === "completed" ? (annotationMode === "manual_free_points" ? "Marcación libre para registrar ocurrencias y morfotipos." : "Estimación visual basada en el método de conteo sistemático de puntos.") : null,
       };
 
       const nextAnnotationSet = await upsertAnnotationSet(annotationDraft);
@@ -570,10 +815,8 @@ export default function AnnotationsWorkflow() {
       return;
     }
 
-    const classifiedPoints = Object.values(pointStates).filter((point) => point.classification != null).length;
-    const totalPoints = generatedPoints.length;
-    if (classifiedPoints === 0 || classifiedPoints === totalPoints) {
-      setSaveStatus({ type: "error", text: "Completa la anotación solo cuando todos los puntos estén clasificados y al menos uno sea evaluable." });
+    if (!canComplete) {
+      setSaveStatus({ type: "error", text: annotationMode === "manual_free_points" ? "Completa la anotación con al menos un punto clasificado y todos los líquenes con morfotipo." : "Completa la anotación solo cuando todos los puntos estén clasificados y al menos uno sea evaluable." });
       return;
     }
 
@@ -641,7 +884,7 @@ export default function AnnotationsWorkflow() {
   };
 
   const handleDeleteMorphotype = async (morphotypeId: string) => {
-    const isInUse = Object.values(pointStates).some((point) => point.morphotypeId === morphotypeId);
+    const isInUse = pointEntries.some((point) => point.morphotypeId === morphotypeId);
     if (isInUse) {
       setSaveStatus({ type: "error", text: "No se puede eliminar un morfotipo que ya está asociado a puntos." });
       return;
@@ -661,11 +904,18 @@ export default function AnnotationsWorkflow() {
 
   return (
     <div>
-      <PageHeader title="Anotaciones manuales" subtitle="Flujo inicial de conteo sistemático de puntos sobre imágenes guardadas." />
+      <PageHeader title="Anotaciones manuales" subtitle="Marcación libre y cuadrícula sistemática para imágenes guardadas." />
 
       <section className="mb-6 rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
-        <p className="text-sm">La versión 1 usa una cuadrícula sistemática, clasifica todos los puntos y estima cobertura de líquenes como lichen points / evaluable points × 100.</p>
-        <p className="mt-2 text-sm">Un morfotipo visible no equivale necesariamente a una especie.</p>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="rounded-full border px-3 py-1 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+            Modo activo: {annotationMode === "manual_free_points" ? "Marcación libre" : "Cuadrícula sistemática"}
+          </span>
+          <span className="rounded-full border px-3 py-1 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+            {annotationMode === "manual_free_points" ? "Puntos móviles y libres" : "Puntos fijos para evitar sesgo"}
+          </span>
+        </div>
+        <p className="mt-3 text-sm">{annotationMode === "manual_free_points" ? "La marcación libre sirve para registrar ocurrencias y morfotipos; no produce una estimación no sesgada de cobertura." : "La cuadrícula systemic usa puntos fijos dentro del ROI para producir una estimación de cobertura."}</p>
       </section>
 
       {!selectedImageId ? (
@@ -700,6 +950,12 @@ export default function AnnotationsWorkflow() {
 
             <div className="mt-4 rounded border p-3" style={{ borderColor: "var(--ld-border)", background: "#fff" }}>
               <div className="mb-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => void handleSwitchMode("manual_free_points")} className="rounded border px-3 py-2 text-sm" style={{ borderColor: annotationMode === "manual_free_points" ? "var(--ld-text)" : "var(--ld-border)", background: annotationMode === "manual_free_points" ? "var(--ld-sand)" : "#fff", color: "var(--ld-text)" }}>
+                  Marcación libre
+                </button>
+                <button type="button" onClick={() => void handleSwitchMode("systematic_point_count")} className="rounded border px-3 py-2 text-sm" style={{ borderColor: annotationMode === "systematic_point_count" ? "var(--ld-text)" : "var(--ld-border)", background: annotationMode === "systematic_point_count" ? "var(--ld-sand)" : "#fff", color: "var(--ld-text)" }}>
+                  Cuadrícula sistemática
+                </button>
                 <button type="button" onClick={handleToggleFullImage} className="rounded border px-3 py-2 text-sm" style={{ borderColor: isValidAnnotationRoi(roi) && isFullImageRoi(roi) ? "var(--ld-text)" : "var(--ld-border)", background: isValidAnnotationRoi(roi) && isFullImageRoi(roi) ? "var(--ld-sand)" : "#fff", color: "var(--ld-text)" }}>
                   Usar imagen completa
                 </button>
@@ -728,17 +984,57 @@ export default function AnnotationsWorkflow() {
                         <p>El navegador no pudo mostrar esta imagen. Usa una versión JPEG, PNG o WebP para la anotación si el archivo viene en HEIC/HEIF.</p>
                       </div>
                     ) : (
-                      <svg viewBox="0 0 1 1" className="absolute inset-0 h-full w-full" onClick={handleImageClick} style={{ cursor: selectionMode === "roi" ? "crosshair" : "default" }}>
+                      <svg
+                        viewBox="0 0 1 1"
+                        className="absolute inset-0 h-full w-full"
+                        onClick={handleImageClick}
+                        onPointerDown={handleCanvasPointerDown}
+                        onPointerMove={handleCanvasPointerMove}
+                        onPointerUp={handleCanvasPointerUp}
+                        style={{ cursor: selectionMode === "roi" ? "crosshair" : annotationMode === "manual_free_points" ? "crosshair" : "default" }}
+                      >
                         {roi.x != null && roi.y != null && roi.width != null && roi.height != null ? (
                           <rect x={roi.x} y={roi.y} width={roi.width} height={roi.height} fill="rgba(248, 113, 113, 0.1)" stroke="#ef4444" strokeWidth={0.003} />
                         ) : null}
-                        {generatedPoints.map((point) => {
-                          const localPoint = pointStates[point.pointIndex];
-                          const fill = getCategoryColor(localPoint?.classification ?? null, morphotypes.find((morphotype) => morphotype.id === localPoint?.morphotypeId)?.color_hex ?? null);
-                          return (
-                            <circle key={point.pointIndex} cx={point.xNormalized} cy={point.yNormalized} r={0.012} fill={fill} stroke={localPoint?.classification == null ? "#111827" : "#ffffff"} strokeWidth={0.0015} onClick={() => void handlePointSelection(point)} style={{ cursor: "pointer" }} />
-                          );
-                        })}
+                        {annotationMode === "manual_free_points"
+                          ? pointEntries.map((point) => {
+                              const isSelected = selectedPoint?.pointIndex === point.pointIndex;
+                              const fill = getCategoryColor(point.classification, morphotypes.find((morphotype) => morphotype.id === point.morphotypeId)?.color_hex ?? null);
+                              const radius = isSelected ? 0.014 : 0.011;
+                              return (
+                                <g key={point.pointIndex}>
+                                  <circle
+                                    cx={point.xNormalized}
+                                    cy={point.yNormalized}
+                                    r={radius}
+                                    fill={fill}
+                                    stroke={isSelected ? "#0f172a" : "#ffffff"}
+                                    strokeWidth={isSelected ? 0.0025 : 0.0015}
+                                    onPointerDown={(event) => handlePointPointerDown(event, point)}
+                                  />
+                                  <text x={point.xNormalized} y={point.yNormalized + 0.0015} textAnchor="middle" fontSize="0.0085" fill="#fff" fontWeight="700">
+                                    {getClassificationAbbreviation(point.classification)}
+                                  </text>
+                                </g>
+                              );
+                            })
+                          : generatedPoints.map((point) => {
+                              const localPoint = pointStates[point.pointIndex];
+                              const fill = getCategoryColor(localPoint?.classification ?? null, morphotypes.find((morphotype) => morphotype.id === localPoint?.morphotypeId)?.color_hex ?? null);
+                              return (
+                                <circle
+                                  key={point.pointIndex}
+                                  cx={point.xNormalized}
+                                  cy={point.yNormalized}
+                                  r={0.012}
+                                  fill={fill}
+                                  stroke={localPoint?.classification == null ? "#111827" : "#ffffff"}
+                                  strokeWidth={0.0015}
+                                  onClick={() => void handlePointSelection(point)}
+                                  style={{ cursor: "pointer" }}
+                                />
+                              );
+                            })}
                       </svg>
                     )}
                   </>
@@ -749,7 +1045,7 @@ export default function AnnotationsWorkflow() {
 
               <div className="mt-4 flex flex-wrap items-center gap-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
                 <span className="rounded border px-2 py-1">ROI: {getRoiSummary(roi)}</span>
-                <span className="rounded border px-2 py-1">Puntos: {generatedPoints.length}</span>
+                <span className="rounded border px-2 py-1">Puntos: {annotationMode === "manual_free_points" ? stats.totalPoints : generatedPoints.length}</span>
                 {pendingRoiPoint ? <span className="rounded border px-2 py-1">Primer punto fijado…</span> : null}
               </div>
             </div>
@@ -760,15 +1056,18 @@ export default function AnnotationsWorkflow() {
               <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Herramienta de clasificación</h3>
               <div className="mt-3 flex flex-wrap gap-2">
                 {CATEGORY_OPTIONS.map((option) => (
-                  <button key={option.value} type="button" onClick={() => setSelectedClassification(option.value)} className="rounded border px-3 py-2 text-sm" style={{ borderColor: selectedClassification === option.value ? "var(--ld-text)" : "var(--ld-border)", background: selectedClassification === option.value ? "var(--ld-sand)" : "#fff" }}>
+                  <button key={option.value} type="button" onClick={() => void handleApplyClassificationToSelectedPoint(option.value)} className="rounded border px-3 py-2 text-sm" style={{ borderColor: selectedClassification === option.value ? "var(--ld-text)" : "var(--ld-border)", background: selectedClassification === option.value ? "var(--ld-sand)" : "#fff" }}>
                     {option.label}
                   </button>
                 ))}
                 <button type="button" onClick={() => void handleClearSelectedPointClassification()} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
                   Limpiar clasificación
                 </button>
+                <button type="button" onClick={() => void handleDeleteSelectedPoint()} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "#b91c1c" }}>
+                  Eliminar punto
+                </button>
               </div>
-              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Los puntos sin registro quedan como sin clasificar; unknown significa que sí se revisó y se eligió esa categoría.</p>
+              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>{annotationMode === "manual_free_points" ? "En marcación libre, los puntos se crean y se mueven libremente. El punto seleccionado cambie de color para indicar que está activo." : "Los puntos de la cuadrícula sistemática son fijos; si intentas moverlos verás un aviso breve."}</p>
             </div>
 
             <div className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
@@ -827,14 +1126,17 @@ export default function AnnotationsWorkflow() {
             <div className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
               <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Resumen en tiempo real</h3>
               <div className="mt-3 grid gap-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
-                <p>Puntos totales: {stats.totalPoints}</p>
-                <p>Puntos clasificados: {stats.classifiedPoints}</p>
-                <p>Puntos sin clasificar: {stats.unclassifiedPoints}</p>
-                <p>Puntos evaluables: {stats.evaluablePoints}</p>
-                <p>Puntos excluidos: {stats.excludedPoints}</p>
-                <p>Puntos de liquen: {stats.lichenPoints}</p>
-                <p>Morfotipos visibles utilizados: {stats.visibleMorphotypes}</p>
-                <p>Cobertura estimada de líquenes: {stats.lichenCoverage == null ? "Datos insuficientes" : `${stats.lichenCoverage.toFixed(1)}%`}</p>
+                <p>Puntos: {stats.totalPoints}</p>
+                <p>Categorías visibles: {stats.classifiedPoints}</p>
+                <p>Morfotipos visibles: {stats.visibleMorphotypes}</p>
+                {annotationMode === "systematic_point_count" ? (
+                  <>
+                    <p>Puntos sin clasificar: {stats.unclassifiedPoints}</p>
+                    <p>Puntos evaluables: {stats.evaluablePoints}</p>
+                    <p>Puntos excluidos: {stats.excludedPoints}</p>
+                    <p>Cobertura estimada de líquenes: {systematicStats.lichenCoverage == null ? "Datos insuficientes" : `${systematicStats.lichenCoverage.toFixed(1)}%`}</p>
+                  </>
+                ) : null}
               </div>
             </div>
 
@@ -851,6 +1153,7 @@ export default function AnnotationsWorkflow() {
                   Deshacer último cambio
                 </button>
               </div>
+              <p className="mt-3 text-sm" style={{ color: "var(--ld-text-secondary)" }}>{completionHint}</p>
               {saveStatus ? <p className={`mt-3 text-sm ${saveStatus.type === "error" ? "text-red-700" : saveStatus.type === "success" ? "text-emerald-700" : "text-slate-700"}`}>{saveStatus.text}</p> : null}
             </div>
           </section>

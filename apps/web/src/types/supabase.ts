@@ -387,7 +387,7 @@ export type Database = {
         Row: {
           id: string;
           image_id: string;
-          method: string;
+          method: "systematic_point_count" | "manual_free_points";
           status: string;
           version: number;
           grid_rows: number;
@@ -403,7 +403,7 @@ export type Database = {
         };
         Insert: {
           image_id: string;
-          method?: string;
+          method?: "systematic_point_count" | "manual_free_points";
           status?: string;
           version?: number;
           grid_rows: number;
@@ -419,7 +419,7 @@ export type Database = {
         };
         Update: {
           image_id?: string;
-          method?: string;
+          method?: "systematic_point_count" | "manual_free_points";
           status?: string;
           version?: number;
           grid_rows?: number;

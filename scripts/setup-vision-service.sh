@@ -43,10 +43,22 @@ echo "Upgrading pip …"
 "${PYTHON_VENV}" -m pip install --quiet --upgrade pip
 
 # ── PyTorch CPU-only ─────────────────────────────────────────────────────────
-echo "Installing PyTorch (CPU-only) …"
-"${PIP}" install --quiet \
+echo "Installing PyTorch (CPU-only) from the official index …"
+if ! "${PIP}" install --quiet \
     torch torchvision \
-    --index-url https://download.pytorch.org/whl/cpu
+    --index-url https://download.pytorch.org/whl/cpu; then
+    echo "Official PyTorch CPU index unavailable; falling back to PyPI CPU packages …" >&2
+    "${PIP}" install --quiet torch torchvision
+fi
+
+"${PYTHON_VENV}" - <<'PYCHECK'
+import torch
+
+print(f"torch={torch.__version__}")
+if torch.cuda.is_available():
+    raise SystemExit("ERROR: expected a CPU-only PyTorch installation, but CUDA is available.")
+print("torch.cuda.is_available() == False")
+PYCHECK
 
 # ── MobileSAM ────────────────────────────────────────────────────────────────
 echo "Installing MobileSAM from official repository …"

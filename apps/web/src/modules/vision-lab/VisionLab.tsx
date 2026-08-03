@@ -371,7 +371,11 @@ export default function VisionLab() {
     const imagePoint = mapStagePointToImagePoint(pos, stageWidth, stageHeight, viewScale, viewX, viewY, asset.width, asset.height);
     const clamped = clampPointToImageBounds(imagePoint, asset.width, asset.height);
     const label: PointPrompt["label"] = promptMode === "include" ? 1 : 0;
-    const next: PointPrompt = { x: clamped.x, y: clamped.y, label };
+    const next: PointPrompt = {
+      x: clamped.x / Math.max(asset.width, 1),
+      y: clamped.y / Math.max(asset.height, 1),
+      label,
+    };
 
     setPoints((prev) => {
       const nextPoints = [...prev, next];
@@ -379,6 +383,23 @@ export default function VisionLab() {
       return nextPoints;
     });
   }, [asset, canPlacePoint, promptMode, scheduleSegment, stageHeight, stageWidth, viewScale, viewX, viewY]);
+
+  const handlePointDragStart = useCallback(() => {
+    if (segmentDebounceRef.current) clearTimeout(segmentDebounceRef.current);
+    latestRequestIdRef.current += 1;
+    abortActive();
+  }, [abortActive]);
+
+  const handlePointDragEnd = useCallback((index: number, event: { target: { x: () => number; y: () => number } }) => {
+    const x = Math.min(stageWidth, Math.max(0, event.target.x())) / Math.max(stageWidth, 1);
+    const y = Math.min(stageHeight, Math.max(0, event.target.y())) / Math.max(stageHeight, 1);
+
+    setPoints((previous) => {
+      const next = previous.map((point, pointIndex) => pointIndex === index ? { ...point, x, y } : point);
+      scheduleSegment(next);
+      return next;
+    });
+  }, [scheduleSegment, stageHeight, stageWidth]);
 
   const handleWheel = useCallback((event: { evt: { preventDefault: () => void; deltaY: number } }) => {
     event.evt.preventDefault();
@@ -569,13 +590,20 @@ export default function VisionLab() {
                         ) : null}
                         {points.map((point, index) => (
                           <Circle
-                            key={`${point.x}-${point.y}-${index}`}
-                            x={(point.x / Math.max(asset.width, 1)) * stageWidth}
-                            y={(point.y / Math.max(asset.height, 1)) * stageHeight}
+                            key={index}
+                            x={point.x * stageWidth}
+                            y={point.y * stageHeight}
                             radius={6}
                             fill={point.label === 1 ? "#4F7C5B" : "#C2410C"}
                             stroke="#FFFFFF"
                             strokeWidth={2}
+                            draggable={canPlacePoint}
+                            dragBoundFunc={(position) => ({
+                              x: Math.min(stageWidth, Math.max(0, position.x)),
+                              y: Math.min(stageHeight, Math.max(0, position.y)),
+                            })}
+                            onDragStart={handlePointDragStart}
+                            onDragEnd={(event) => handlePointDragEnd(index, event)}
                           />
                         ))}
                         {acceptedMasks.filter((m) => visibleMaskIds.includes(m.id)).map((mask) => {

@@ -185,6 +185,8 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
     setSelectedPoint(null);
     setImageLoadError(false);
     setIsLoadingState(false);
+    setIsSaving(false);
+    setIsCompleting(false);
     setIsLoadingImages(true);
 
     try {
@@ -209,6 +211,8 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
     setAnnotationSet(null);
     setMorphotypes([]);
     setPointStates({});
+    setIsSaving(false);
+    setIsCompleting(false);
 
     try {
       const image = await getImageRecord(imageId);
@@ -792,6 +796,7 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
       return;
     }
 
+    const requestId = imageLoadRequestIdRef.current;
     setIsSaving(true);
     setSaveStatus({ type: "info", text: "Guardando anotación..." });
 
@@ -810,12 +815,17 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
       };
 
       const nextAnnotationSet = await upsertAnnotationSet(annotationDraft);
+      if (requestId !== imageLoadRequestIdRef.current) return;
       setAnnotationSet(nextAnnotationSet);
       setSaveStatus({ type: "success", text: status === "completed" ? "Anotación completada correctamente." : "Borrador guardado correctamente." });
     } catch {
-      setSaveStatus({ type: "error", text: "No se pudo guardar la anotación. Puedes reintentar." });
+      if (requestId === imageLoadRequestIdRef.current) {
+        setSaveStatus({ type: "error", text: "No se pudo guardar la anotación. Puedes reintentar." });
+      }
     } finally {
-      setIsSaving(false);
+      if (requestId === imageLoadRequestIdRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 

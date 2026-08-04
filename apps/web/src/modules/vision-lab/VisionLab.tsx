@@ -357,7 +357,9 @@ export default function VisionLab({
         const objectUrl = URL.createObjectURL(file);
         setStoredImageId(imageId);
         setLocalAnnotationSetId(resolvedAnnotationSetId);
-        syncMorphotypes(state.morphotypes);
+        if (controlledMorphotypesRef.current === undefined) {
+          syncMorphotypes(state.morphotypes);
+        }
         setLayers(existingLayers);
         await prepare(file, objectUrl);
       } catch {

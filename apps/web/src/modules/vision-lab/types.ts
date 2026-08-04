@@ -92,7 +92,7 @@ export interface SegmentationCandidate {
 
 export interface AcceptedMask {
   id: string;
-  className: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+  className: "liquen" | "corteza" | "musgo" | "alga" | "sombra" | "reflejo" | "desconocido";
   morphotypeName?: string;
   pixels: number;
   score: number;

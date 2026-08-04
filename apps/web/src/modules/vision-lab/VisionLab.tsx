@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import {
@@ -136,6 +136,7 @@ export default function VisionLab({
 
   const annotationSetId = annotationSetIdProp ?? localAnnotationSetId;
   const morphotypes = morphotypesProp ?? localMorphotypes;
+  const activeAnnotationSetIdRef = useRef(annotationSetId);
   const activeCandidate = candidates[candidateIndex] ?? null;
   const isStoredImage = storedImageId !== null && annotationSetId !== null;
   const summary = useMemo(() => layers.reduce<Record<AnnotationRegionClassification, number>>((accumulator, layer) => {
@@ -158,9 +159,13 @@ export default function VisionLab({
     });
   }, [onMorphotypesChange]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     controlledMorphotypesRef.current = morphotypesProp;
   }, [morphotypesProp]);
+
+  useLayoutEffect(() => {
+    activeAnnotationSetIdRef.current = annotationSetId;
+  }, [annotationSetId]);
 
   const clearVisionSession = useCallback(() => {
     const sessionId = sessionIdRef.current;
@@ -193,6 +198,7 @@ export default function VisionLab({
     setClassification("");
     setMorphotypeId(null);
     setNotes("");
+    setBusy(null);
   }, [cancelActiveRequest, clearVisionSession]);
 
   useEffect(() => {
@@ -435,14 +441,19 @@ export default function VisionLab({
       setNewMorphotype({ label: "", growthForm: "unknown", colorHex: "", notes: "" });
       return;
     }
+    const requestId = requestIdRef.current;
+    const targetAnnotationSetId = annotationSetId;
     try {
-      const created = await createMorphotypeForAnnotationSet(annotationSetId, newMorphotype.label, newMorphotype.growthForm, newMorphotype.colorHex || null, newMorphotype.notes.trim() || null);
+      const created = await createMorphotypeForAnnotationSet(targetAnnotationSetId, newMorphotype.label, newMorphotype.growthForm, newMorphotype.colorHex || null, newMorphotype.notes.trim() || null);
+      if (requestId !== requestIdRef.current || targetAnnotationSetId !== activeAnnotationSetIdRef.current) return;
       syncMorphotypes((current) => [...current, created]);
       setMorphotypeId(created.id);
       setNewMorphotype({ label: "", growthForm: "unknown", colorHex: "", notes: "" });
       setStatus("Morfotipo creado.");
     } catch (reason) {
-      setError(sanitize(reason instanceof Error ? reason.message : "No se pudo crear el morfotipo."));
+      if (requestId === requestIdRef.current && targetAnnotationSetId === activeAnnotationSetIdRef.current) {
+        setError(sanitize(reason instanceof Error ? reason.message : "No se pudo crear el morfotipo."));
+      }
     }
   };
 
@@ -477,11 +488,13 @@ export default function VisionLab({
     setBusy("save");
     setError(null);
     setLayers((current) => [...current, { ...localLayer, status: "saving" }]);
+    const requestId = requestIdRef.current;
+    const targetAnnotationSetId = annotationSetId;
     try {
       const id = crypto.randomUUID();
       const region = await saveAcceptedRegion({
         id,
-        annotationSetId,
+        annotationSetId: targetAnnotationSetId,
         classification,
         morphotypeId: classification === "lichen" ? morphotypeId : null,
         mask: await pngDataUrlToBlob(activeCandidate.maskDataUrl),
@@ -495,17 +508,21 @@ export default function VisionLab({
         modelVersion: activeCandidate.modelVersion,
         notes: notes.trim() || null,
       });
+      if (requestId !== requestIdRef.current || targetAnnotationSetId !== activeAnnotationSetIdRef.current) return;
       const savedLayer: Layer = { ...localLayer, id: region.id, region, status: "saved" };
       setLayers((current) => current.map((layer) => layer.id === localLayer.id ? savedLayer : layer));
       setSelectedLayerId(region.id);
       setStatus("Capa guardada correctamente.");
     } catch (reason) {
+      if (requestId !== requestIdRef.current || targetAnnotationSetId !== activeAnnotationSetIdRef.current) return;
       const persistenceError = reason as RegionPersistenceError;
       const cleanupPending = persistenceError.name === "RegionPersistenceError" && persistenceError.cleanupPending;
       setLayers((current) => current.map((layer) => layer.id === localLayer.id ? { ...layer, status: cleanupPending ? "cleanup-pending" : "memory" } : layer));
       setError(sanitize(reason instanceof Error ? reason.message : "No se pudo guardar la capa."));
     } finally {
-      setBusy(null);
+      if (requestId === requestIdRef.current && targetAnnotationSetId === activeAnnotationSetIdRef.current) {
+        setBusy(null);
+      }
     }
   };
 

@@ -184,6 +184,7 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
     setPendingRoiPoint(null);
     setSelectedPoint(null);
     setImageLoadError(false);
+    setIsLoadingState(false);
     setIsLoadingImages(true);
 
     try {

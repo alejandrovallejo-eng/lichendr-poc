@@ -18,6 +18,7 @@ import {
   type NormalizedPoint,
   type RegionPersistenceError,
 } from "@/modules/annotations/regions";
+import PageHeader from "@/components/PageHeader";
 
 const MAX_ANALYSIS_DIMENSION = 1024;
 const DEBOUNCE_MS = 250;
@@ -88,9 +89,14 @@ async function pngDataUrlToBlob(dataUrl: string): Promise<Blob> {
   return blob;
 }
 
-export default function VisionLab() {
+interface VisionLabProps {
+  imageId?: string | null;
+  embedded?: boolean;
+}
+
+export default function VisionLab({ imageId: imageIdProp = null, embedded = false }: VisionLabProps) {
   const searchParams = useSearchParams();
-  const imageId = searchParams.get("imageId");
+  const imageId = imageIdProp ?? searchParams.get("imageId");
   const [displayUrl, setDisplayUrl] = useState<string | null>(null);
   const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
@@ -465,10 +471,11 @@ export default function VisionLab() {
   };
 
   return (
-    <div className="min-h-screen p-4 lg:p-6" style={{ background: "var(--ld-background)", color: "var(--ld-text)" }}>
-      <div className="rounded-2xl border bg-white p-5 shadow-sm" style={{ borderColor: "var(--ld-border)" }}>
-        <h1 className="text-2xl font-semibold">Laboratorio IA</h1>
-        <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>MobileSAM vit_t en CPU propone límites visuales; tú confirmas su clasificación.</p>
+    <div className={embedded ? undefined : "min-h-screen p-4 lg:p-6"} style={embedded ? { color: "var(--ld-text)" } : { background: "var(--ld-background)", color: "var(--ld-text)" }}>
+      <div className={embedded ? undefined : "rounded-2xl border bg-white p-5 shadow-sm"} style={embedded ? undefined : { borderColor: "var(--ld-border)" }}>
+        {embedded ? null : <PageHeader title="Laboratorio IA" subtitle="Segmentación asistida con MobileSAM para imágenes guardadas." />}
+        {embedded ? <><h4 className="text-base font-semibold">MobileSAM</h4><p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Genera máscaras y guárdalas como capas aceptadas dentro de esta anotación.</p></> : null}
+        {!embedded ? <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>MobileSAM vit_t en CPU propone límites visuales; tú confirmas su clasificación.</p> : null}
         <div className="mt-3 rounded border p-3 text-sm" style={{ borderColor: "var(--ld-border)" }}>
           <strong>Estado:</strong> {status} {!isStoredImage && sourceFile ? " Las capas de imágenes locales solo se conservan en memoria." : null}
         </div>
@@ -476,10 +483,10 @@ export default function VisionLab() {
         <div className="mt-4 grid gap-4 xl:grid-cols-[1.6fr_0.8fr]">
           <section className="rounded border p-4" style={{ borderColor: "var(--ld-border)", background: "var(--ld-background)" }}>
             <div className="mb-3 flex flex-wrap gap-2">
-              <label className="rounded border bg-white px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
+              {!embedded ? <label className="rounded border bg-white px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
                 <input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={(event) => void selectLocalFile(event)} className="mr-2" />
                 Seleccionar imagen local
-              </label>
+              </label> : null}
               <button type="button" onClick={() => setPoints((current) => current.slice(0, -1))} disabled={!points.length || busy !== null} className="rounded border bg-white px-3 py-2 text-sm disabled:opacity-50" style={{ borderColor: "var(--ld-border)" }}>Deshacer punto</button>
               <button type="button" onClick={() => { setPoints([]); setCandidates([]); }} disabled={!points.length || busy !== null} className="rounded border bg-white px-3 py-2 text-sm disabled:opacity-50" style={{ borderColor: "var(--ld-border)" }}>Limpiar guía</button>
             </div>
@@ -527,7 +534,7 @@ export default function VisionLab() {
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.8fr]">
           <section className="rounded border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}>
             <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">Capas aceptadas</h2>{isStoredImage && annotationSetId ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}&annotationSetId=${encodeURIComponent(annotationSetId)}`} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Guardar y continuar en Anotaciones</a> : null}</div>
-            {!layers.length ? <p className="mt-3 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Aún no hay capas aceptadas.</p> : <div className="mt-3 space-y-2">{layers.map((layer) => <div key={layer.id} className="rounded border p-3 text-sm" style={{ borderColor: selectedLayerId === layer.id ? "var(--ld-text)" : "var(--ld-border)" }}><button type="button" onClick={() => setSelectedLayerId(layer.id)} className="w-full text-left"><strong>{CLASS_LABELS[layer.classification]}</strong><p>{morphotypes.find((item) => item.id === layer.morphotypeId)?.label ?? "Sin morfotipo"} · Score {layer.score.toFixed(3)} · Área {layer.areaPixels} px</p><p>Estado: {layer.status === "saved" ? "guardada" : layer.status === "memory" ? "en memoria" : layer.status === "saving" ? "guardando" : "Limpieza pendiente"}</p></button><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, visible: !item.visible } : item))} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>{layer.visible ? "Ocultar" : "Mostrar"}</button><label>Opacidad <input type="range" min="0.1" max="0.9" step="0.05" value={layer.opacity} onChange={(event) => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, opacity: Number(event.target.value) } : item))} /></label><button type="button" onClick={() => void deleteLayer(layer)} className="rounded border px-2 py-1 text-red-700" style={{ borderColor: "var(--ld-border)" }}>Eliminar</button>{layer.region && annotationSetId ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}&annotationSetId=${encodeURIComponent(annotationSetId)}`} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>Abrir en Anotaciones</a> : null}</div></div>)}</div>}
+            {!layers.length ? <p className="mt-3 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Aún no hay capas aceptadas.</p> : <div className="mt-3 space-y-2">{layers.map((layer) => <div key={layer.id} className="rounded border p-3 text-sm" style={{ borderColor: selectedLayerId === layer.id ? "var(--ld-text)" : "var(--ld-border)" }}><button type="button" onClick={() => setSelectedLayerId(layer.id)} className="w-full text-left"><strong>{CLASS_LABELS[layer.classification]}</strong><p>{morphotypes.find((item) => item.id === layer.morphotypeId)?.label ?? "Sin morfotipo"} · Score {layer.score.toFixed(3)} · Área {layer.areaPixels} px</p><p>Estado: {layer.status === "saved" ? "guardada" : layer.status === "memory" ? "en memoria" : layer.status === "saving" ? "guardando" : "Limpieza pendiente"}</p></button><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, visible: !item.visible } : item))} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>{layer.visible ? "Ocultar" : "Mostrar"}</button><label>Opacidad <input type="range" min="0.1" max="0.9" step="0.05" value={layer.opacity} onChange={(event) => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, opacity: Number(event.target.value) } : item))} /></label><button type="button" onClick={() => void deleteLayer(layer)} className="rounded border px-2 py-1 text-red-700" style={{ borderColor: "var(--ld-border)" }}>Eliminar</button>{!embedded && layer.region && annotationSetId ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}&annotationSetId=${encodeURIComponent(annotationSetId)}`} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>Abrir en Anotaciones</a> : null}</div></div>)}</div>}
           </section>
           <section className="rounded border bg-white p-4 text-sm" style={{ borderColor: "var(--ld-border)" }}><h2 className="font-semibold">Resumen provisional</h2><p className="mt-3">Capas: {layers.length}</p>{ANNOTATION_REGION_CLASSES.map((item) => summary[item] ? <p key={item}>{CLASS_LABELS[item]}: {summary[item]}</p> : null)}<p className="mt-3">El área de cada capa se expresa en píxeles. Sumar áreas puede duplicar zonas solapadas y no constituye cobertura científica final.</p><p className="mt-2">La cobertura correcta requerirá la unión de máscaras de liquen dentro del área de corteza en una fase posterior.</p></section>
         </div>

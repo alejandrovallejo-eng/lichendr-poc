@@ -26,6 +26,7 @@ import {
   type MorphotypeRow,
   type AccessibleImageRecord,
 } from "@/modules/annotations/client";
+import VisionLab from "@/modules/vision-lab/VisionLab";
 
 interface LocalPointState {
   pointIndex: number;
@@ -129,10 +130,14 @@ function getNextAvailablePointIndex(existingPoints: Record<number, LocalPointSta
   return candidate;
 }
 
-export default function AnnotationsWorkflow() {
+interface AnnotationsWorkflowProps {
+  initialImageId?: string | null;
+}
+
+export default function AnnotationsWorkflow({ initialImageId = null }: AnnotationsWorkflowProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const imageIdParam = searchParams.get("imageId") ?? null;
+  const imageIdParam = searchParams.get("imageId") ?? initialImageId;
 
   const [availableImages, setAvailableImages] = useState<AccessibleImageRecord[]>([]);
   const [selectedImage, setSelectedImage] = useState<AccessibleImageRecord | null>(null);
@@ -904,7 +909,7 @@ export default function AnnotationsWorkflow() {
 
   return (
     <div>
-      <PageHeader title="Anotaciones manuales" subtitle="Marcación libre y cuadrícula sistemática para imágenes guardadas." />
+      <PageHeader title="Anotaciones" subtitle="Marcación manual y segmentación asistida con MobileSAM para imágenes guardadas." />
 
       <section className="mb-6 rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
         <div className="flex flex-wrap items-center gap-3">
@@ -1052,6 +1057,13 @@ export default function AnnotationsWorkflow() {
           </section>
 
           <section className="space-y-4">
+            <div className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
+              <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Asistencia con IA</h3>
+              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Usa MobileSAM directamente aquí para crear capas aceptadas asociadas a la misma imagen, conjunto de anotación y morfotipos.</p>
+              <div className="mt-4 rounded border p-3" style={{ borderColor: "var(--ld-border)", background: "#fff" }}>
+                <VisionLab embedded imageId={selectedImageId} />
+              </div>
+            </div>
             <div className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
               <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Herramienta de clasificación</h3>
               <div className="mt-3 flex flex-wrap gap-2">

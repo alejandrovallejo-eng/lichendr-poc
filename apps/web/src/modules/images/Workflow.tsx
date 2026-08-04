@@ -621,7 +621,7 @@ export default function ImagesWorkflow() {
                 <Link href={`/annotations?imageId=${savedImage.id}`} className="mt-3 inline-flex rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
                   Anotar imagen
                 </Link>
-                <Link href={`/vision-lab?imageId=${savedImage.id}`} className="mt-3 ml-2 inline-flex rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                <Link href={`/annotations?imageId=${savedImage.id}`} className="mt-3 ml-2 inline-flex rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
                   Analizar con IA
                 </Link>
               </div>

@@ -132,6 +132,7 @@ export default function VisionLab({
   const sessionIdRef = useRef<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const displayUrlRef = useRef<string | null>(null);
+  const controlledMorphotypesRef = useRef(morphotypesProp);
 
   const annotationSetId = annotationSetIdProp ?? localAnnotationSetId;
   const morphotypes = morphotypesProp ?? localMorphotypes;
@@ -143,12 +144,23 @@ export default function VisionLab({
   }, { lichen: 0, bark: 0, moss: 0, algae: 0, shadow: 0, glare: 0, unknown: 0 }), [layers]);
 
   const syncMorphotypes = useCallback((value: MorphotypeRow[] | ((current: MorphotypeRow[]) => MorphotypeRow[])) => {
+    const controlledMorphotypes = controlledMorphotypesRef.current;
+    if (controlledMorphotypes !== undefined) {
+      const next = typeof value === "function" ? value(controlledMorphotypes) : value;
+      controlledMorphotypesRef.current = next;
+      onMorphotypesChange?.(next);
+      return;
+    }
     setLocalMorphotypes((current) => {
       const next = typeof value === "function" ? value(current) : value;
       onMorphotypesChange?.(next);
       return next;
     });
   }, [onMorphotypesChange]);
+
+  useEffect(() => {
+    controlledMorphotypesRef.current = morphotypesProp;
+  }, [morphotypesProp]);
 
   const clearVisionSession = useCallback(() => {
     const sessionId = sessionIdRef.current;

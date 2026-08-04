@@ -166,8 +166,10 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
   const [lastActionStack, setLastActionStack] = useState<ActionRecord[]>([]);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const imageHostRef = useRef<HTMLDivElement | null>(null);
+  const imageLoadRequestIdRef = useRef(0);
 
   const loadAvailableImages = useCallback(async () => {
+    imageLoadRequestIdRef.current += 1;
     setSelectedImage(null);
     setSelectedImageId(null);
     setSignedUrl(null);
@@ -196,25 +198,26 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
   }, []);
 
   const loadAnnotationImage = useCallback(async (imageId: string) => {
+    const requestId = imageLoadRequestIdRef.current + 1;
+    imageLoadRequestIdRef.current = requestId;
     setIsLoadingState(true);
     setSaveStatus(null);
     setSelectedImageId(imageId);
+    setSelectedImage(null);
+    setSignedUrl(null);
+    setAnnotationSet(null);
+    setMorphotypes([]);
+    setPointStates({});
 
     try {
       const image = await getImageRecord(imageId);
+      if (requestId !== imageLoadRequestIdRef.current) return;
       if (!image) {
-        setSelectedImage(null);
-        setSignedUrl(null);
         setSaveStatus({ type: "error", text: "No se encontró la imagen seleccionada." });
-        setIsLoadingState(false);
         return;
       }
 
       const signed = await getSignedImageUrl(image.storage_path);
-      setSelectedImage(image);
-      setSignedUrl(signed);
-      setImageLoadError(false);
-
       const state = await loadAnnotationState(imageId);
       const activeAnnotationSet = state.annotationSet ?? await ensureAnnotationSetForImage(imageId, {
         method: "manual_free_points",
@@ -226,7 +229,11 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
         roiWidth: 1,
         roiHeight: 1,
       });
+      if (requestId !== imageLoadRequestIdRef.current) return;
 
+      setSelectedImage(image);
+      setSignedUrl(signed);
+      setImageLoadError(false);
       setAnnotationSet(activeAnnotationSet);
       setMorphotypes(state.morphotypes);
       setGridRows(activeAnnotationSet.grid_rows ?? 10);
@@ -256,9 +263,13 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
       setLastActionStack([]);
       setSelectedPoint(null);
     } catch {
-      setSaveStatus({ type: "error", text: "No se pudo cargar la anotación de esta imagen." });
+      if (requestId === imageLoadRequestIdRef.current) {
+        setSaveStatus({ type: "error", text: "No se pudo cargar la anotación de esta imagen." });
+      }
     } finally {
-      setIsLoadingState(false);
+      if (requestId === imageLoadRequestIdRef.current) {
+        setIsLoadingState(false);
+      }
     }
   }, []);
 

@@ -222,3 +222,15 @@ La migración crea tres tablas en `public` para soportar la anotación manual po
 ## Limitación actual
 
 Todavía no es posible crear sitios desde la interfaz web porque la funcionalidad de Sitios aún no se ha implementado. La migración prepara solo la base de datos y las restricciones.
+
+## Qué crea la migración de capas de anotación MobileSAM
+
+La migración crea `public.annotation_regions` para persistir cada máscara aceptada como una capa independiente de un `annotation_set`.
+
+- Registra la clasificación del vocabulario existente, morfotipo opcional, procedencia `mobile_sam`, nombre y versión del modelo, dimensiones, área, score y prompts positivos y negativos.
+- Guarda la ubicación de la máscara derivada en `mask_bucket` y `mask_path`; la ruta es obligatoria, sin espacios externos y única.
+- Un morfotipo solo se permite para `lichen` y la clave foránea compuesta garantiza que pertenezca al mismo `annotation_set`.
+- Los prompts se validan como arrays JSON; el score es opcional y no negativo, sin límite máximo.
+- Habilita RLS y crea las cuatro políticas de `authenticated` siguiendo `annotation_region → annotation_set → image → tree_sample → site → project → owner_id`.
+
+La migración no modifica Storage. Las políticas existentes del bucket privado `lichen-images` permiten rutas de máscaras PNG cuyo primer directorio sea el UID autenticado, como `auth.uid()/project_id/site_id/event_id/tree_sample_id/masks/uuid.png`; no validan los directorios posteriores.

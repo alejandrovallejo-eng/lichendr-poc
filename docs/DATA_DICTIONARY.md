@@ -57,3 +57,15 @@ Relaciones:
 - `shadow`, `glare` y `unknown` se excluirán del denominador.
 - `lichen cover percentage = lichen points / evaluable points × 100`.
 - Un morfotipo visible no equivale necesariamente a una especie.
+
+## Capas de anotación MobileSAM
+
+- `AnnotationRegion`: representa una máscara aceptada como capa independiente de un `AnnotationSet`.
+- Conserva la clasificación existente (`lichen`, `bark`, `moss`, `algae`, `shadow`, `glare` o `unknown`), el morfotipo opcional, la procedencia `mobile_sam`, el nombre y versión del modelo, dimensiones, área, score, prompts positivos/negativos, estado y notas.
+- `mask_bucket` y `mask_path` identifican el archivo derivado; la ruta es única y no modifica la imagen original.
+- Un morfotipo solo puede asociarse a una capa `lichen` y debe pertenecer al mismo `AnnotationSet`.
+- Las capas admiten los estados `draft`, `accepted` y `rejected`.
+
+### Compatibilidad con Storage privado
+
+Las políticas actuales de `lichen-images` permiten leer, crear, actualizar y eliminar una máscara PNG con una ruta que comience por el UID autenticado, por ejemplo `owner_id/project_id/site_id/event_id/tree_sample_id/masks/uuid.png` sustituyendo `owner_id` por `auth.uid()`. No validan los directorios posteriores ni la relación con la imagen; esta fase no modifica esas políticas ni crea objetos en Storage.

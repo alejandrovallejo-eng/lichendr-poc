@@ -85,6 +85,7 @@ export interface SegmentationCandidate {
   id: string;
   score: number;
   mask: number[][];
+  maskDataUrl?: string;
   width: number;
   height: number;
 }

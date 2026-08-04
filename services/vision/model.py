@@ -24,6 +24,8 @@ SESSION_TTL_SECONDS = 15 * 60  # 15 minutes
 MAX_IMAGE_DIMENSION = 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+MODEL_NAME = "MobileSAM vit_t"
+MODEL_VERSION: str | None = None
 
 _model_lock = threading.Lock()
 _inference_lock = threading.Lock()
@@ -184,7 +186,7 @@ def segment_session(
     Run MobileSAM predictor.predict for given points.
 
     Returns (candidates, recommended_index, segment_ms).
-    Each candidate: {"id": str, "score": float, "maskDataUrl": str, "width": int, "height": int}.
+    Each candidate includes its in-memory PNG, dimensions, score, area and model metadata.
     """
     if not _model_loaded or _predictor is None:
         raise RuntimeError("Model not loaded.")
@@ -230,6 +232,9 @@ def segment_session(
             "maskDataUrl": data_url,
             "width": mask_width,
             "height": mask_height,
+            "areaPixels": int(np.count_nonzero(mask_bool)),
+            "modelName": MODEL_NAME,
+            "modelVersion": MODEL_VERSION,
         })
 
     # Recommended = highest IoU score

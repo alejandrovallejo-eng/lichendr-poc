@@ -36,6 +36,9 @@ class SegmentCandidate(BaseModel):
 	maskDataUrl: str
 	width: int = Field(ge=1)
 	height: int = Field(ge=1)
+	areaPixels: int = Field(gt=0)
+	modelName: Literal["MobileSAM vit_t"]
+	modelVersion: str | None = None
 
 
 class SegmentResponse(BaseModel):

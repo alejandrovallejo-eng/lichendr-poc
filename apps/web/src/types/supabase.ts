@@ -533,6 +533,83 @@ export type Database = {
           }
         ];
       };
+      annotation_regions: {
+        Row: {
+          id: string;
+          annotation_set_id: string;
+          classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+          morphotype_id: string | null;
+          source: "mobile_sam";
+          model_name: string;
+          model_version: string | null;
+          mask_bucket: string;
+          mask_path: string;
+          mask_width_px: number;
+          mask_height_px: number;
+          area_pixels: number;
+          score: number | null;
+          positive_points: unknown[];
+          negative_points: unknown[];
+          status: "draft" | "accepted" | "rejected";
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          annotation_set_id: string;
+          classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+          morphotype_id?: string | null;
+          source?: "mobile_sam";
+          model_name: string;
+          model_version?: string | null;
+          mask_bucket?: string;
+          mask_path: string;
+          mask_width_px: number;
+          mask_height_px: number;
+          area_pixels: number;
+          score?: number | null;
+          positive_points?: unknown[];
+          negative_points?: unknown[];
+          status?: "draft" | "accepted" | "rejected";
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          annotation_set_id?: string;
+          classification?: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+          morphotype_id?: string | null;
+          source?: "mobile_sam";
+          model_name?: string;
+          model_version?: string | null;
+          mask_bucket?: string;
+          mask_path?: string;
+          mask_width_px?: number;
+          mask_height_px?: number;
+          area_pixels?: number;
+          score?: number | null;
+          positive_points?: unknown[];
+          negative_points?: unknown[];
+          status?: "draft" | "accepted" | "rejected";
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "annotation_regions_annotation_set_id_fkey";
+            columns: ["annotation_set_id"];
+            referencedRelation: "annotation_sets";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "annotation_regions_morphotype_fk";
+            columns: ["morphotype_id", "annotation_set_id"];
+            referencedRelation: "morphotypes";
+            referencedColumns: ["id", "annotation_set_id"];
+          }
+        ];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

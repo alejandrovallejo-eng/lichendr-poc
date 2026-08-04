@@ -97,6 +97,7 @@ export interface AcceptedMask {
   pixels: number;
   score: number;
   model: string;
+  modelVersion?: string;
   createdAt: string;
   width: number;
   height: number;

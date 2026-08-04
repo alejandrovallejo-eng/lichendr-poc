@@ -131,6 +131,28 @@ export interface AnnotationPoint {
   updatedAt: string;
 }
 
+export interface AnnotationRegion {
+  id: UUID;
+  annotationSetId: UUID;
+  classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+  morphotypeId?: UUID | null;
+  source: "mobile_sam";
+  modelName: string;
+  modelVersion?: string | null;
+  maskBucket: string;
+  maskPath: string;
+  maskWidthPx: number;
+  maskHeightPx: number;
+  areaPixels: number;
+  score?: number | null;
+  positivePoints: unknown[];
+  negativePoints: unknown[];
+  status: "draft" | "accepted" | "rejected";
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AnalysisRun {
   id: UUID;
   inputAnnotationSetIds: UUID[];

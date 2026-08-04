@@ -7,7 +7,7 @@ export type MorphotypeRow = Database["public"]["Tables"]["morphotypes"]["Row"];
 export type AnnotationPointRow = Database["public"]["Tables"]["annotation_points"]["Row"];
 
 export type AnnotationSetStatus = "draft" | "completed";
-export type AnnotationMethod = "systematic_point_count" | "manual_free_points";
+export type AnnotationMethod = "systematic_point_count" | "manual_free_points" | "ai_assisted_segmentation";
 export type MorphotypeGrowthForm = "crustose" | "foliose" | "fruticose" | "squamulose" | "unknown";
 export type AnnotationPointClassification = "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
 export type AnnotationPointConfidenceLevel = "low" | "medium" | "high";
@@ -105,7 +105,7 @@ export async function listAccessibleImages(): Promise<AccessibleImageRecord[]> {
 export async function getSignedImageUrl(storagePath: string): Promise<string> {
   await ensureSession();
 
-  const { data, error } = await supabase.storage.from("lichen-images").createSignedUrl(storagePath, 60 * 60);
+  const { data, error } = await supabase.storage.from("lichen-images").createSignedUrl(storagePath, 10 * 60);
   if (error) {
     throw error;
   }

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PageHeader from "@/components/PageHeader";
 import {
   ANNOTATION_REGION_CLASSES,
+  assertAiAnnotationSetForImage,
   createTemporaryUrl,
   deleteRegionWithStorage,
   getAccessibleStoredImage,
@@ -78,6 +79,7 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
       const [{ regions: nextRegions, morphotypes: nextMorphotypes }, signedImageUrl] = await Promise.all([
         loadAiAnnotationState(annotationSetId),
         createTemporaryUrl(storedImage.storage_path),
+        assertAiAnnotationSetForImage(annotationSetId, imageId),
       ]);
       const signedMasks = await Promise.all(nextRegions.map(async (region) => [region.id, await createTemporaryUrl(region.mask_path)] as const));
       if (requestId !== requestIdRef.current) return;
@@ -97,8 +99,11 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
   }, [annotationSetId, imageId, selectRegion]);
 
   useEffect(() => {
-    void load();
+    const timeout = window.setTimeout(() => {
+      void load();
+    }, 0);
     return () => {
+      window.clearTimeout(timeout);
       requestIdRef.current += 1;
     };
   }, [load]);
@@ -147,11 +152,14 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
             <div className="relative mt-4 overflow-hidden rounded border" style={{ borderColor: "var(--ld-border)" }}>
               <Image src={imageUrl} alt={image.original_filename} width={1200} height={800} className="block w-full object-contain" unoptimized />
               {regions.filter((region) => visible[region.id] && maskUrls[region.id]).map((region) => (
-                <img
+                <Image
                   key={region.id}
                   src={maskUrls[region.id]}
                   alt=""
-                  className="pointer-events-none absolute inset-0 h-full w-full object-fill mix-blend-multiply"
+                  fill
+                  sizes="100vw"
+                  unoptimized
+                  className="pointer-events-none object-fill mix-blend-multiply"
                   style={{ opacity: opacity[region.id] ?? 0.45 }}
                 />
               ))}

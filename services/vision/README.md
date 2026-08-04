@@ -44,7 +44,7 @@ Returns `{ sessionId, width, height, prepareMs }`.
 { "sessionId": "...", "points": [{ "x": 0.5, "y": 0.5, "label": 1 }] }
 ```
 x/y are normalised [0–1]. label 1 = positive, 0 = negative.
-Returns up to three mask candidates as PNG data URLs, plus scores and recommended index.
+Returns up to three in-memory PNG data URL candidates, dimensions, scores, `areaPixels`, the true constant model name (`MobileSAM vit_t`) and recommended index. Boolean mask matrices are never returned to the browser.
 
 ### `DELETE /sessions/{sessionId}`
 Frees the session immediately.

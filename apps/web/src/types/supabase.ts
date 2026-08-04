@@ -556,6 +556,7 @@ export type Database = {
           updated_at: string;
         };
         Insert: {
+          id?: string;
           annotation_set_id: string;
           classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;

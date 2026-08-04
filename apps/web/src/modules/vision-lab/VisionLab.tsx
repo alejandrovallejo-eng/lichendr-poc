@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import Image from "next/image";
 import {
   ANNOTATION_REGION_CLASSES,
   createMorphotypeForAnnotationSet,
@@ -118,7 +119,6 @@ export default function VisionLab() {
   const displayUrlRef = useRef<string | null>(null);
 
   const activeCandidate = candidates[candidateIndex] ?? null;
-  const selectedLayer = layers.find((layer) => layer.id === selectedLayerId) ?? null;
   const isStoredImage = storedImageId !== null && annotationSetId !== null;
   const summary = useMemo(() => layers.reduce<Record<AnnotationRegionClassification, number>>((accumulator, layer) => {
     accumulator[layer.classification] += 1;
@@ -137,6 +137,7 @@ export default function VisionLab() {
   }, []);
 
   const resetImageState = useCallback(() => {
+    requestIdRef.current += 1;
     cancelActiveRequest();
     clearVisionSession();
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -262,6 +263,7 @@ export default function VisionLab() {
     const loadStoredImage = async () => {
       if (!imageId) return;
       resetImageState();
+      const loadRequestId = requestIdRef.current;
       if (!isUuid(imageId)) {
         setError("El identificador de imagen no es válido.");
         setStatus("No se pudo abrir la imagen guardada.");
@@ -276,9 +278,11 @@ export default function VisionLab() {
           createTemporaryUrl(storedImage.storage_path),
           findOrCreateAiAnnotationSet(imageId),
         ]);
+        if (loadRequestId !== requestIdRef.current) return;
         const response = await fetch(signedUrl);
         if (!response.ok) throw new Error("No se pudo descargar la imagen.");
         const file = new File([await response.blob()], storedImage.original_filename, { type: storedImage.mime_type });
+        if (loadRequestId !== requestIdRef.current) return;
         const state = await loadAiAnnotationState(annotationSet.id);
         const existingLayers = await Promise.all(state.regions.map(async (region): Promise<Layer> => ({
           id: region.id,
@@ -292,6 +296,7 @@ export default function VisionLab() {
           opacity: 0.45,
           status: "saved",
         })));
+        if (loadRequestId !== requestIdRef.current) return;
         const objectUrl = URL.createObjectURL(file);
         setStoredImageId(imageId);
         setAnnotationSetId(annotationSet.id);
@@ -354,7 +359,27 @@ export default function VisionLab() {
   };
 
   const createMorphotype = async () => {
-    if (!annotationSetId) return;
+    if (!annotationSetId) {
+      const label = newMorphotype.label.trim();
+      if (!label || morphotypes.some((item) => item.label.toLocaleLowerCase() === label.toLocaleLowerCase()) || (newMorphotype.colorHex && !/^#[0-9A-Fa-f]{6}$/.test(newMorphotype.colorHex))) {
+        setError("Introduce un morfotipo local válido y no duplicado.");
+        return;
+      }
+      const localMorphotype: MorphotypeRow = {
+        id: crypto.randomUUID(),
+        annotation_set_id: "local",
+        label,
+        growth_form: newMorphotype.growthForm,
+        color_hex: newMorphotype.colorHex || null,
+        notes: newMorphotype.notes.trim() || null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      setMorphotypes((current) => [...current, localMorphotype]);
+      setMorphotypeId(localMorphotype.id);
+      setNewMorphotype({ label: "", growthForm: "unknown", colorHex: "", notes: "" });
+      return;
+    }
     try {
       const created = await createMorphotypeForAnnotationSet(annotationSetId, newMorphotype.label, newMorphotype.growthForm, newMorphotype.colorHex || null, newMorphotype.notes.trim() || null);
       setMorphotypes((current) => [...current, created]);
@@ -460,7 +485,7 @@ export default function VisionLab() {
             </div>
             {displayUrl && imageSize ? (
               <div className="relative overflow-hidden rounded border bg-white" style={{ borderColor: "var(--ld-border)" }}>
-                <img src={displayUrl} alt="Imagen para segmentar" className="block h-auto w-full" />
+                <Image src={displayUrl} alt="Imagen para segmentar" width={imageSize.width} height={imageSize.height} unoptimized className="block h-auto w-full" />
                 <svg viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} className="absolute inset-0 h-full w-full" onPointerDown={onCanvasPointerDown} onPointerMove={onCanvasPointerMove} onPointerUp={onCanvasPointerUp} style={{ cursor: busy ? "wait" : "crosshair" }}>
                   {layers.filter((layer) => layer.visible).map((layer) => <image key={layer.id} href={layer.maskUrl} width={imageSize.width} height={imageSize.height} opacity={layer.opacity} style={{ mixBlendMode: "multiply" }} />)}
                   {activeCandidate ? <image href={activeCandidate.maskDataUrl} width={imageSize.width} height={imageSize.height} opacity={0.35} style={{ mixBlendMode: "multiply" }} /> : null}
@@ -496,7 +521,7 @@ export default function VisionLab() {
               <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Notas opcionales" rows={2} className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} />
               <button type="button" onClick={() => void acceptCandidate()} disabled={!activeCandidate || !classification || busy !== null || (classification === "lichen" && !morphotypeId)} className="mt-3 rounded px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--ld-green)" }}>{isStoredImage ? "Aceptar y guardar capa" : "Aceptar capa en memoria"}</button>
             </div>
-            {isStoredImage ? <div className="rounded border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}><h2 className="font-semibold">Crear morfotipo</h2><input value={newMorphotype.label} onChange={(event) => setNewMorphotype((current) => ({ ...current, label: event.target.value }))} placeholder="Etiqueta" className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} /><select value={newMorphotype.growthForm} onChange={(event) => setNewMorphotype((current) => ({ ...current, growthForm: event.target.value as MorphotypeRow["growth_form"] }))} className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }}><option value="unknown">unknown</option><option value="crustose">crustose</option><option value="foliose">foliose</option><option value="fruticose">fruticose</option><option value="squamulose">squamulose</option></select><input value={newMorphotype.colorHex} onChange={(event) => setNewMorphotype((current) => ({ ...current, colorHex: event.target.value }))} placeholder="#RRGGBB" className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} /><textarea value={newMorphotype.notes} onChange={(event) => setNewMorphotype((current) => ({ ...current, notes: event.target.value }))} placeholder="Notas" rows={2} className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} /><button type="button" onClick={() => void createMorphotype()} className="mt-2 rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Crear morfotipo</button></div> : null}
+            <div className="rounded border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}><h2 className="font-semibold">Crear morfotipo</h2><input value={newMorphotype.label} onChange={(event) => setNewMorphotype((current) => ({ ...current, label: event.target.value }))} placeholder="Etiqueta" className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} /><select value={newMorphotype.growthForm} onChange={(event) => setNewMorphotype((current) => ({ ...current, growthForm: event.target.value as MorphotypeRow["growth_form"] }))} className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }}><option value="unknown">unknown</option><option value="crustose">crustose</option><option value="foliose">foliose</option><option value="fruticose">fruticose</option><option value="squamulose">squamulose</option></select><input value={newMorphotype.colorHex} onChange={(event) => setNewMorphotype((current) => ({ ...current, colorHex: event.target.value }))} placeholder="#RRGGBB" className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} /><textarea value={newMorphotype.notes} onChange={(event) => setNewMorphotype((current) => ({ ...current, notes: event.target.value }))} placeholder="Notas" rows={2} className="mt-2 w-full rounded border p-2" style={{ borderColor: "var(--ld-border)" }} /><button type="button" onClick={() => void createMorphotype()} className="mt-2 rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Crear morfotipo</button>{!isStoredImage ? <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Los morfotipos de imágenes locales solo se conservan en memoria.</p> : null}</div>
           </section>
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.8fr]">

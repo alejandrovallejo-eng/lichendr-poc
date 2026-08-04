@@ -176,6 +176,20 @@ export async function loadAiAnnotationState(annotationSetId: string): Promise<{ 
   return { regions: regions ?? [], morphotypes: morphotypes ?? [] };
 }
 
+export async function assertAiAnnotationSetForImage(annotationSetId: string, imageId: string): Promise<void> {
+  assertUuid(annotationSetId, "El conjunto de anotación");
+  assertUuid(imageId, "La imagen");
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("annotation_sets")
+    .select("id")
+    .eq("id", annotationSetId)
+    .eq("image_id", imageId)
+    .eq("method", AI_ANNOTATION_METHOD)
+    .maybeSingle();
+  if (error || !data) throw new Error("El conjunto de capas IA no está disponible.");
+}
+
 export async function createMorphotypeForAnnotationSet(
   annotationSetId: string,
   label: string,
@@ -188,13 +202,14 @@ export async function createMorphotypeForAnnotationSet(
   if (!trimmedLabel || trimmedLabel.length > 80) throw new Error("El nombre del morfotipo no es válido.");
   if (colorHex && !/^#[0-9A-Fa-f]{6}$/.test(colorHex)) throw new Error("El color debe usar formato #RRGGBB.");
   await ensureSession();
-  const { data: duplicates, error: duplicateError } = await supabase
+  const { data: existingMorphotypes, error: duplicateError } = await supabase
     .from("morphotypes")
-    .select("id")
-    .eq("annotation_set_id", annotationSetId)
-    .ilike("label", trimmedLabel);
+    .select("label")
+    .eq("annotation_set_id", annotationSetId);
   if (duplicateError) throw duplicateError;
-  if ((duplicates ?? []).length > 0) throw new Error("Ya existe un morfotipo con ese nombre.");
+  if ((existingMorphotypes ?? []).some((morphotype) => morphotype.label.toLocaleLowerCase() === trimmedLabel.toLocaleLowerCase())) {
+    throw new Error("Ya existe un morfotipo con ese nombre.");
+  }
   const { data, error } = await supabase
     .from("morphotypes")
     .insert({ annotation_set_id: annotationSetId, label: trimmedLabel, growth_form: growthForm, color_hex: colorHex, notes })
@@ -251,7 +266,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
 
   const { error: cleanupError } = await supabase.storage.from(MASK_BUCKET).remove([path]);
   throw new RegionPersistenceError(
-    cleanupError ? "Limpieza pendiente de la capa. Usa reintentar sin crear otra capa." : "No se pudo guardar la capa; la máscara subida fue limpiada.",
+    cleanupError ? `Limpieza pendiente de la capa ${input.id}. Usa reintentar sin crear otra capa.` : "No se pudo guardar la capa; la máscara subida fue limpiada.",
     input.id,
     Boolean(cleanupError),
   );

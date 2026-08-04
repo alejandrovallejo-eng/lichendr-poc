@@ -10,6 +10,7 @@ export const navigation: NavItem[] = [
   { label: "Jornadas", path: "/sampling-events" },
   { label: "Árboles", path: "/trees" },
   { label: "Imágenes", path: "/images" },
+  { label: "Laboratorio IA", path: "/vision-lab" },
   { label: "Anotaciones", path: "/annotations" },
   { label: "Análisis", path: "/analysis" },
   { label: "Calidad ambiental", path: "/environmental-quality" },

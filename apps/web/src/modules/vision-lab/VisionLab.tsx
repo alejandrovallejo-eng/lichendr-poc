@@ -110,8 +110,8 @@ export default function VisionLab({
   const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [storedImageId, setStoredImageId] = useState<string | null>(null);
-  const [annotationSetId, setAnnotationSetId] = useState<string | null>(annotationSetIdProp);
-  const [morphotypes, setMorphotypes] = useState<MorphotypeRow[]>(morphotypesProp ?? []);
+  const [localAnnotationSetId, setLocalAnnotationSetId] = useState<string | null>(null);
+  const [localMorphotypes, setLocalMorphotypes] = useState<MorphotypeRow[]>([]);
   const [points, setPoints] = useState<PointPrompt[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [candidateIndex, setCandidateIndex] = useState(0);
@@ -133,6 +133,8 @@ export default function VisionLab({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const displayUrlRef = useRef<string | null>(null);
 
+  const annotationSetId = annotationSetIdProp ?? localAnnotationSetId;
+  const morphotypes = morphotypesProp ?? localMorphotypes;
   const activeCandidate = candidates[candidateIndex] ?? null;
   const isStoredImage = storedImageId !== null && annotationSetId !== null;
   const summary = useMemo(() => layers.reduce<Record<AnnotationRegionClassification, number>>((accumulator, layer) => {
@@ -141,7 +143,7 @@ export default function VisionLab({
   }, { lichen: 0, bark: 0, moss: 0, algae: 0, shadow: 0, glare: 0, unknown: 0 }), [layers]);
 
   const syncMorphotypes = useCallback((value: MorphotypeRow[] | ((current: MorphotypeRow[]) => MorphotypeRow[])) => {
-    setMorphotypes((current) => {
+    setLocalMorphotypes((current) => {
       const next = typeof value === "function" ? value(current) : value;
       onMorphotypesChange?.(next);
       return next;
@@ -170,8 +172,8 @@ export default function VisionLab({
     setImageSize(null);
     setSourceFile(null);
     setStoredImageId(null);
-    setAnnotationSetId(null);
-    setMorphotypes([]);
+    setLocalAnnotationSetId(null);
+    setLocalMorphotypes([]);
     setPoints([]);
     setCandidates([]);
     setLayers([]);
@@ -180,16 +182,6 @@ export default function VisionLab({
     setMorphotypeId(null);
     setNotes("");
   }, [cancelActiveRequest, clearVisionSession]);
-
-  useEffect(() => {
-    setAnnotationSetId(annotationSetIdProp);
-  }, [annotationSetIdProp]);
-
-  useEffect(() => {
-    if (morphotypesProp) {
-      setMorphotypes(morphotypesProp);
-    }
-  }, [morphotypesProp]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -346,7 +338,7 @@ export default function VisionLab({
         if (loadRequestId !== requestIdRef.current) return;
         const objectUrl = URL.createObjectURL(file);
         setStoredImageId(imageId);
-        setAnnotationSetId(resolvedAnnotationSetId);
+        setLocalAnnotationSetId(resolvedAnnotationSetId);
         syncMorphotypes(state.morphotypes);
         setLayers(existingLayers);
         await prepare(file, objectUrl);

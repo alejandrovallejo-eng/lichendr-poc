@@ -89,7 +89,7 @@ export interface ImageRecord {
 export interface AnnotationSet {
   id: UUID;
   imageId: UUID;
-  method: "systematic_point_count" | "manual_free_points";
+  method: "systematic_point_count" | "manual_free_points" | "ai_assisted_segmentation";
   status: "draft" | "completed";
   version: number;
   gridRows: number;

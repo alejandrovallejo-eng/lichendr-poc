@@ -68,4 +68,6 @@ Relaciones:
 
 ### Compatibilidad con Storage privado
 
-Las políticas actuales de `lichen-images` permiten leer, crear, actualizar y eliminar una máscara PNG con una ruta que comience por el UID autenticado, por ejemplo `owner_id/project_id/site_id/event_id/tree_sample_id/masks/uuid.png` sustituyendo `owner_id` por `auth.uid()`. No validan los directorios posteriores ni la relación con la imagen; esta fase no modifica esas políticas ni crea objetos en Storage.
+Las políticas actuales de `lichen-images` permiten leer, crear, actualizar y eliminar una máscara PNG con una ruta que comience por el UID autenticado. Las capas de MobileSAM usan `{auth_uid}/annotations/{annotation_set_id}/{region_id}.png`. No validan los directorios posteriores ni la relación con la imagen; esta fase no modifica esas políticas ni crea objetos en Storage.
+
+El método `ai_assisted_segmentation` conserva capas aceptadas por MobileSAM separadas de las anotaciones por puntos. El área de una capa y los totales por clasificación son provisionales: la cobertura científica futura debe calcular la unión de las máscaras de liquen dentro del área de corteza para evitar doble conteo entre máscaras solapadas.

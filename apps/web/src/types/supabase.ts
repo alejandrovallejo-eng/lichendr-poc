@@ -387,7 +387,7 @@ export type Database = {
         Row: {
           id: string;
           image_id: string;
-          method: "systematic_point_count" | "manual_free_points";
+          method: "systematic_point_count" | "manual_free_points" | "ai_assisted_segmentation";
           status: string;
           version: number;
           grid_rows: number;
@@ -403,7 +403,7 @@ export type Database = {
         };
         Insert: {
           image_id: string;
-          method?: "systematic_point_count" | "manual_free_points";
+          method?: "systematic_point_count" | "manual_free_points" | "ai_assisted_segmentation";
           status?: string;
           version?: number;
           grid_rows: number;
@@ -419,7 +419,7 @@ export type Database = {
         };
         Update: {
           image_id?: string;
-          method?: "systematic_point_count" | "manual_free_points";
+          method?: "systematic_point_count" | "manual_free_points" | "ai_assisted_segmentation";
           status?: string;
           version?: number;
           grid_rows?: number;
@@ -556,6 +556,7 @@ export type Database = {
           updated_at: string;
         };
         Insert: {
+          id?: string;
           annotation_set_id: string;
           classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;

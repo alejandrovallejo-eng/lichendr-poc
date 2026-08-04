@@ -13,6 +13,7 @@ from model import (
     delete_session,
     is_model_loaded,
     load_model,
+    MODEL_NAME,
     prepare_session,
     segment_session,
 )
@@ -67,7 +68,7 @@ async def health() -> HealthResponse:
         status="ok",
         model_loaded=is_model_loaded(),
         backend="cpu",
-        model="MobileSAM vit_t",
+        model=MODEL_NAME,
     )
 
 

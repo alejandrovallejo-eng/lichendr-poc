@@ -8,7 +8,6 @@ import {
   createMorphotypeForAnnotationSet,
   createTemporaryUrl,
   deleteRegionWithStorage,
-  findOrCreateAiAnnotationSet,
   getAccessibleStoredImage,
   loadAiAnnotationState,
   saveAcceptedRegion,
@@ -18,6 +17,7 @@ import {
   type NormalizedPoint,
   type RegionPersistenceError,
 } from "@/modules/annotations/regions";
+import { ensureAnnotationSetForImage } from "@/modules/annotations/client";
 import PageHeader from "@/components/PageHeader";
 
 const MAX_ANALYSIS_DIMENSION = 1024;
@@ -92,17 +92,26 @@ async function pngDataUrlToBlob(dataUrl: string): Promise<Blob> {
 interface VisionLabProps {
   imageId?: string | null;
   embedded?: boolean;
+  annotationSetId?: string | null;
+  morphotypes?: MorphotypeRow[];
+  onMorphotypesChange?: (morphotypes: MorphotypeRow[]) => void;
 }
 
-export default function VisionLab({ imageId: imageIdProp = null, embedded = false }: VisionLabProps) {
+export default function VisionLab({
+  imageId: imageIdProp = null,
+  embedded = false,
+  annotationSetId: annotationSetIdProp = null,
+  morphotypes: morphotypesProp,
+  onMorphotypesChange,
+}: VisionLabProps) {
   const searchParams = useSearchParams();
   const imageId = imageIdProp ?? searchParams.get("imageId");
   const [displayUrl, setDisplayUrl] = useState<string | null>(null);
   const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [storedImageId, setStoredImageId] = useState<string | null>(null);
-  const [annotationSetId, setAnnotationSetId] = useState<string | null>(null);
-  const [morphotypes, setMorphotypes] = useState<MorphotypeRow[]>([]);
+  const [annotationSetId, setAnnotationSetId] = useState<string | null>(annotationSetIdProp);
+  const [morphotypes, setMorphotypes] = useState<MorphotypeRow[]>(morphotypesProp ?? []);
   const [points, setPoints] = useState<PointPrompt[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [candidateIndex, setCandidateIndex] = useState(0);
@@ -130,6 +139,14 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
     accumulator[layer.classification] += 1;
     return accumulator;
   }, { lichen: 0, bark: 0, moss: 0, algae: 0, shadow: 0, glare: 0, unknown: 0 }), [layers]);
+
+  const syncMorphotypes = useCallback((value: MorphotypeRow[] | ((current: MorphotypeRow[]) => MorphotypeRow[])) => {
+    setMorphotypes((current) => {
+      const next = typeof value === "function" ? value(current) : value;
+      onMorphotypesChange?.(next);
+      return next;
+    });
+  }, [onMorphotypesChange]);
 
   const clearVisionSession = useCallback(() => {
     const sessionId = sessionIdRef.current;
@@ -163,6 +180,16 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
     setMorphotypeId(null);
     setNotes("");
   }, [cancelActiveRequest, clearVisionSession]);
+
+  useEffect(() => {
+    setAnnotationSetId(annotationSetIdProp);
+  }, [annotationSetIdProp]);
+
+  useEffect(() => {
+    if (morphotypesProp) {
+      setMorphotypes(morphotypesProp);
+    }
+  }, [morphotypesProp]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -268,6 +295,11 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
   useEffect(() => {
     const loadStoredImage = async () => {
       if (!imageId) return;
+      if (embedded && !annotationSetIdProp) {
+        resetImageState();
+        setStatus("Preparando el conjunto de anotación…");
+        return;
+      }
       resetImageState();
       const loadRequestId = requestIdRef.current;
       if (!isUuid(imageId)) {
@@ -280,16 +312,25 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
       try {
         const storedImage = await getAccessibleStoredImage(imageId);
         if (!storedImage) throw new Error("La imagen no existe o no está disponible.");
-        const [signedUrl, annotationSet] = await Promise.all([
+        const resolvedAnnotationSetId = annotationSetIdProp ?? (await ensureAnnotationSetForImage(imageId, {
+          method: "manual_free_points",
+          status: "draft",
+          gridRows: 10,
+          gridColumns: 10,
+          roiX: 0,
+          roiY: 0,
+          roiWidth: 1,
+          roiHeight: 1,
+        })).id;
+        const [signedUrl, state] = await Promise.all([
           createTemporaryUrl(storedImage.storage_path),
-          findOrCreateAiAnnotationSet(imageId),
+          loadAiAnnotationState(resolvedAnnotationSetId),
         ]);
         if (loadRequestId !== requestIdRef.current) return;
         const response = await fetch(signedUrl);
         if (!response.ok) throw new Error("No se pudo descargar la imagen.");
         const file = new File([await response.blob()], storedImage.original_filename, { type: storedImage.mime_type });
         if (loadRequestId !== requestIdRef.current) return;
-        const state = await loadAiAnnotationState(annotationSet.id);
         const existingLayers = await Promise.all(state.regions.map(async (region): Promise<Layer> => ({
           id: region.id,
           region,
@@ -305,8 +346,8 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
         if (loadRequestId !== requestIdRef.current) return;
         const objectUrl = URL.createObjectURL(file);
         setStoredImageId(imageId);
-        setAnnotationSetId(annotationSet.id);
-        setMorphotypes(state.morphotypes);
+        setAnnotationSetId(resolvedAnnotationSetId);
+        syncMorphotypes(state.morphotypes);
         setLayers(existingLayers);
         await prepare(file, objectUrl);
       } catch {
@@ -316,7 +357,7 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
       }
     };
     void loadStoredImage();
-  }, [imageId, prepare, resetImageState]);
+  }, [annotationSetIdProp, embedded, imageId, prepare, resetImageState, syncMorphotypes]);
 
   const selectLocalFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -366,6 +407,10 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
 
   const createMorphotype = async () => {
     if (!annotationSetId) {
+      if (embedded) {
+        setError("Espera a que el conjunto de anotación esté listo para crear morfotipos.");
+        return;
+      }
       const label = newMorphotype.label.trim();
       if (!label || morphotypes.some((item) => item.label.toLocaleLowerCase() === label.toLocaleLowerCase()) || (newMorphotype.colorHex && !/^#[0-9A-Fa-f]{6}$/.test(newMorphotype.colorHex))) {
         setError("Introduce un morfotipo local válido y no duplicado.");
@@ -381,14 +426,14 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
-      setMorphotypes((current) => [...current, localMorphotype]);
+      syncMorphotypes((current) => [...current, localMorphotype]);
       setMorphotypeId(localMorphotype.id);
       setNewMorphotype({ label: "", growthForm: "unknown", colorHex: "", notes: "" });
       return;
     }
     try {
       const created = await createMorphotypeForAnnotationSet(annotationSetId, newMorphotype.label, newMorphotype.growthForm, newMorphotype.colorHex || null, newMorphotype.notes.trim() || null);
-      setMorphotypes((current) => [...current, created]);
+      syncMorphotypes((current) => [...current, created]);
       setMorphotypeId(created.id);
       setNewMorphotype({ label: "", growthForm: "unknown", colorHex: "", notes: "" });
       setStatus("Morfotipo creado.");
@@ -416,6 +461,10 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
       status: "memory",
     };
     if (!isStoredImage || !annotationSetId) {
+      if (embedded) {
+        setError("Espera a que el conjunto de anotación esté listo antes de guardar capas IA.");
+        return;
+      }
       setLayers((current) => [...current, localLayer]);
       setSelectedLayerId(localLayer.id);
       setStatus("Capa aceptada en memoria. Usa una imagen guardada para persistirla.");
@@ -533,8 +582,8 @@ export default function VisionLab({ imageId: imageIdProp = null, embedded = fals
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.8fr]">
           <section className="rounded border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}>
-            <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">Capas aceptadas</h2>{isStoredImage && annotationSetId ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}&annotationSetId=${encodeURIComponent(annotationSetId)}`} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Guardar y continuar en Anotaciones</a> : null}</div>
-            {!layers.length ? <p className="mt-3 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Aún no hay capas aceptadas.</p> : <div className="mt-3 space-y-2">{layers.map((layer) => <div key={layer.id} className="rounded border p-3 text-sm" style={{ borderColor: selectedLayerId === layer.id ? "var(--ld-text)" : "var(--ld-border)" }}><button type="button" onClick={() => setSelectedLayerId(layer.id)} className="w-full text-left"><strong>{CLASS_LABELS[layer.classification]}</strong><p>{morphotypes.find((item) => item.id === layer.morphotypeId)?.label ?? "Sin morfotipo"} · Score {layer.score.toFixed(3)} · Área {layer.areaPixels} px</p><p>Estado: {layer.status === "saved" ? "guardada" : layer.status === "memory" ? "en memoria" : layer.status === "saving" ? "guardando" : "Limpieza pendiente"}</p></button><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, visible: !item.visible } : item))} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>{layer.visible ? "Ocultar" : "Mostrar"}</button><label>Opacidad <input type="range" min="0.1" max="0.9" step="0.05" value={layer.opacity} onChange={(event) => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, opacity: Number(event.target.value) } : item))} /></label><button type="button" onClick={() => void deleteLayer(layer)} className="rounded border px-2 py-1 text-red-700" style={{ borderColor: "var(--ld-border)" }}>Eliminar</button>{!embedded && layer.region && annotationSetId ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}&annotationSetId=${encodeURIComponent(annotationSetId)}`} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>Abrir en Anotaciones</a> : null}</div></div>)}</div>}
+            <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">Capas aceptadas</h2>{isStoredImage ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}`} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Guardar y continuar en Anotaciones</a> : null}</div>
+            {!layers.length ? <p className="mt-3 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Aún no hay capas aceptadas.</p> : <div className="mt-3 space-y-2">{layers.map((layer) => <div key={layer.id} className="rounded border p-3 text-sm" style={{ borderColor: selectedLayerId === layer.id ? "var(--ld-text)" : "var(--ld-border)" }}><button type="button" onClick={() => setSelectedLayerId(layer.id)} className="w-full text-left"><strong>{CLASS_LABELS[layer.classification]}</strong><p>{morphotypes.find((item) => item.id === layer.morphotypeId)?.label ?? "Sin morfotipo"} · Score {layer.score.toFixed(3)} · Área {layer.areaPixels} px</p><p>Estado: {layer.status === "saved" ? "guardada" : layer.status === "memory" ? "en memoria" : layer.status === "saving" ? "guardando" : "Limpieza pendiente"}</p></button><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, visible: !item.visible } : item))} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>{layer.visible ? "Ocultar" : "Mostrar"}</button><label>Opacidad <input type="range" min="0.1" max="0.9" step="0.05" value={layer.opacity} onChange={(event) => setLayers((current) => current.map((item) => item.id === layer.id ? { ...item, opacity: Number(event.target.value) } : item))} /></label><button type="button" onClick={() => void deleteLayer(layer)} className="rounded border px-2 py-1 text-red-700" style={{ borderColor: "var(--ld-border)" }}>Eliminar</button>{!embedded && layer.region && isStoredImage ? <a href={`/annotations?imageId=${encodeURIComponent(storedImageId ?? "")}`} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>Abrir en Anotaciones</a> : null}</div></div>)}</div>}
           </section>
           <section className="rounded border bg-white p-4 text-sm" style={{ borderColor: "var(--ld-border)" }}><h2 className="font-semibold">Resumen provisional</h2><p className="mt-3">Capas: {layers.length}</p>{ANNOTATION_REGION_CLASSES.map((item) => summary[item] ? <p key={item}>{CLASS_LABELS[item]}: {summary[item]}</p> : null)}<p className="mt-3">El área de cada capa se expresa en píxeles. Sumar áreas puede duplicar zonas solapadas y no constituye cobertura científica final.</p><p className="mt-2">La cobertura correcta requerirá la unión de máscaras de liquen dentro del área de corteza en una fase posterior.</p></section>
         </div>

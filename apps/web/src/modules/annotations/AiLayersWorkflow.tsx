@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PageHeader from "@/components/PageHeader";
 import {
   ANNOTATION_REGION_CLASSES,
-  assertAiAnnotationSetForImage,
+  assertAnnotationSetForImage,
   createTemporaryUrl,
   deleteRegionWithStorage,
   getAccessibleStoredImage,
@@ -79,7 +79,7 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
       const [{ regions: nextRegions, morphotypes: nextMorphotypes }, signedImageUrl] = await Promise.all([
         loadAiAnnotationState(annotationSetId),
         createTemporaryUrl(storedImage.storage_path),
-        assertAiAnnotationSetForImage(annotationSetId, imageId),
+        assertAnnotationSetForImage(annotationSetId, imageId),
       ]);
       const signedMasks = await Promise.all(nextRegions.map(async (region) => [region.id, await createTemporaryUrl(region.mask_path)] as const));
       if (requestId !== requestIdRef.current) return;

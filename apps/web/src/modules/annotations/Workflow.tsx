@@ -8,6 +8,7 @@ import {
   completeAnnotationSet,
   deleteAnnotationPoint,
   deleteMorphotype,
+  ensureAnnotationSetForImage,
   getImageRecord,
   getSignedImageUrl,
   listAccessibleImages,
@@ -215,17 +216,28 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
       setImageLoadError(false);
 
       const state = await loadAnnotationState(imageId);
-      setAnnotationSet(state.annotationSet);
-      setMorphotypes(state.morphotypes);
-      setGridRows(state.annotationSet?.grid_rows ?? 10);
-      setGridColumns(state.annotationSet?.grid_columns ?? 10);
-      setRoi({
-        x: state.annotationSet?.roi_x ?? 0,
-        y: state.annotationSet?.roi_y ?? 0,
-        width: state.annotationSet?.roi_width ?? 1,
-        height: state.annotationSet?.roi_height ?? 1,
+      const activeAnnotationSet = state.annotationSet ?? await ensureAnnotationSetForImage(imageId, {
+        method: "manual_free_points",
+        status: "draft",
+        gridRows: 10,
+        gridColumns: 10,
+        roiX: 0,
+        roiY: 0,
+        roiWidth: 1,
+        roiHeight: 1,
       });
-      setAnnotationMode((state.annotationSet?.method as AnnotationMethod | undefined) ?? "manual_free_points");
+
+      setAnnotationSet(activeAnnotationSet);
+      setMorphotypes(state.morphotypes);
+      setGridRows(activeAnnotationSet.grid_rows ?? 10);
+      setGridColumns(activeAnnotationSet.grid_columns ?? 10);
+      setRoi({
+        x: activeAnnotationSet.roi_x ?? 0,
+        y: activeAnnotationSet.roi_y ?? 0,
+        width: activeAnnotationSet.roi_width ?? 1,
+        height: activeAnnotationSet.roi_height ?? 1,
+      });
+      setAnnotationMode((activeAnnotationSet.method as AnnotationMethod | undefined) ?? "manual_free_points");
 
       const nextPointStates: Record<number, LocalPointState> = {};
       for (const point of state.points) {
@@ -1061,7 +1073,13 @@ export default function AnnotationsWorkflow({ initialImageId = null }: Annotatio
               <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Asistencia con IA</h3>
               <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Usa MobileSAM directamente aquí para crear capas aceptadas asociadas a la misma imagen, conjunto de anotación y morfotipos.</p>
               <div className="mt-4 rounded border p-3" style={{ borderColor: "var(--ld-border)", background: "#fff" }}>
-                <VisionLab embedded imageId={selectedImageId} />
+                <VisionLab
+                  embedded
+                  imageId={selectedImageId}
+                  annotationSetId={annotationSet?.id ?? null}
+                  morphotypes={morphotypes}
+                  onMorphotypesChange={setMorphotypes}
+                />
               </div>
             </div>
             <div className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>

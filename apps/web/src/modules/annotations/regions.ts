@@ -5,7 +5,6 @@ import { supabase } from "@/lib/supabase/client";
 import type { Database } from "@/types/supabase";
 
 export const ANNOTATION_REGION_CLASSES = ["lichen", "bark", "moss", "algae", "shadow", "glare", "unknown"] as const;
-export const AI_ANNOTATION_METHOD = "ai_assisted_segmentation" as const;
 export const SIGNED_URL_TTL_SECONDS = 10 * 60;
 const MASK_BUCKET = "lichen-images";
 const MAX_MASK_BYTES = 10 * 1024 * 1024;
@@ -112,58 +111,6 @@ export async function createTemporaryUrl(storagePath: string): Promise<string> {
   return data.signedUrl;
 }
 
-export async function findOrCreateAiAnnotationSet(imageId: string): Promise<AnnotationSetRow> {
-  assertUuid(imageId, "La imagen");
-  await ensureSession();
-
-  const { data: existing, error: existingError } = await supabase
-    .from("annotation_sets")
-    .select("*")
-    .eq("image_id", imageId)
-    .eq("method", AI_ANNOTATION_METHOD)
-    .eq("status", "draft")
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (existingError) throw existingError;
-  if (existing?.[0]) return existing[0];
-
-  const { data: allSets, error: allSetsError } = await supabase
-    .from("annotation_sets")
-    .select("version")
-    .eq("image_id", imageId);
-  if (allSetsError) throw allSetsError;
-  const version = Math.max(0, ...(allSets ?? []).map((set) => set.version)) + 1;
-  const { data, error } = await supabase
-    .from("annotation_sets")
-    .insert({
-      image_id: imageId,
-      method: AI_ANNOTATION_METHOD,
-      status: "draft",
-      version,
-      grid_rows: 2,
-      grid_columns: 2,
-      roi_x: 0,
-      roi_y: 0,
-      roi_width: 1,
-      roi_height: 1,
-      notes: "Capas aceptadas con MobileSAM.",
-    })
-    .select("*")
-    .single();
-  if (!error) return data;
-
-  const { data: retry, error: retryError } = await supabase
-    .from("annotation_sets")
-    .select("*")
-    .eq("image_id", imageId)
-    .eq("method", AI_ANNOTATION_METHOD)
-    .eq("status", "draft")
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (retryError || !retry?.[0]) throw error;
-  return retry[0];
-}
-
 export async function loadAiAnnotationState(annotationSetId: string): Promise<{ regions: AnnotationRegionRow[]; morphotypes: MorphotypeRow[] }> {
   assertUuid(annotationSetId, "El conjunto de anotación");
   await ensureSession();
@@ -176,7 +123,7 @@ export async function loadAiAnnotationState(annotationSetId: string): Promise<{ 
   return { regions: regions ?? [], morphotypes: morphotypes ?? [] };
 }
 
-export async function assertAiAnnotationSetForImage(annotationSetId: string, imageId: string): Promise<void> {
+export async function assertAnnotationSetForImage(annotationSetId: string, imageId: string): Promise<void> {
   assertUuid(annotationSetId, "El conjunto de anotación");
   assertUuid(imageId, "La imagen");
   await ensureSession();
@@ -185,9 +132,8 @@ export async function assertAiAnnotationSetForImage(annotationSetId: string, ima
     .select("id")
     .eq("id", annotationSetId)
     .eq("image_id", imageId)
-    .eq("method", AI_ANNOTATION_METHOD)
     .maybeSingle();
-  if (error || !data) throw new Error("El conjunto de capas IA no está disponible.");
+  if (error || !data) throw new Error("El conjunto de anotación no está disponible para esta imagen.");
 }
 
 export async function createMorphotypeForAnnotationSet(

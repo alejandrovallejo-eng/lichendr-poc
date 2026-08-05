@@ -36,6 +36,12 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
+function canCalculateSummary(evaluation: AnalysisEvaluation): boolean {
+  if (!evaluation.metrics) return true;
+  const flags = evaluationQualityFlags(evaluation);
+  return flags.includes("signed_mask_unavailable") || flags.includes("mask_dimension_mismatch");
+}
+
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <article className="rounded-lg border p-4 shadow-sm" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
@@ -350,9 +356,9 @@ export default function AnalysisDashboard() {
                   <CoverageBar value={evaluation.metrics?.coverage_percent ?? null} label={evaluation.imageName} />
                   <p className="font-semibold">{evaluation.metrics ? formatPercent(evaluation.metrics.coverage_percent) : "Resumen pendiente de cálculo"}</p>
                   <Link href={`/annotations?imageId=${encodeURIComponent(evaluation.imageId)}&tool=layers&from=analysis`} className="font-semibold text-emerald-800 underline">Ver evaluación</Link>
-                  {!evaluation.metrics ? (
+                  {canCalculateSummary(evaluation) ? (
                     <button type="button" disabled={Boolean(recalculatingId)} onClick={() => void recalculate(evaluation)} className="rounded border px-3 py-2 text-sm font-semibold disabled:opacity-50 md:col-start-4" style={{ borderColor: "var(--ld-border)" }}>
-                      {recalculatingId === evaluation.annotationSetId ? "Calculando…" : "Calcular resumen"}
+                      {recalculatingId === evaluation.annotationSetId ? "Calculando…" : evaluation.metrics ? "Reintentar cálculo" : "Calcular resumen"}
                     </button>
                   ) : null}
                   {recalculationErrors[evaluation.annotationSetId] ? <p className="text-sm text-red-700 md:col-span-4">{recalculationErrors[evaluation.annotationSetId].message}</p> : null}
@@ -405,7 +411,7 @@ export default function AnalysisDashboard() {
                       <Link href={`/annotations?imageId=${encodeURIComponent(evaluation.imageId)}&tool=layers&from=analysis`} className="text-sm font-semibold text-emerald-800 underline">Ver evaluación</Link>
                     </div>
                     <ul className="mt-2 list-disc pl-5 text-sm">{flagsFor(evaluation).map((flag) => <li key={flag}>{QUALITY_LABELS[flag]}</li>)}</ul>
-                    {!evaluation.metrics ? <button type="button" disabled={Boolean(recalculatingId)} onClick={() => void recalculate(evaluation)} className="mt-3 rounded border px-3 py-2 text-sm font-semibold disabled:opacity-50" style={{ borderColor: "var(--ld-border)" }}>Calcular resumen</button> : null}
+                    {canCalculateSummary(evaluation) ? <button type="button" disabled={Boolean(recalculatingId)} onClick={() => void recalculate(evaluation)} className="mt-3 rounded border px-3 py-2 text-sm font-semibold disabled:opacity-50" style={{ borderColor: "var(--ld-border)" }}>{evaluation.metrics ? "Reintentar cálculo" : "Calcular resumen"}</button> : null}
                   </article>
                 ))}
               </div>

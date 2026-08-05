@@ -467,7 +467,15 @@ export default function AnnotationStudio({
     setCanvasRevision((current) => current + 1);
   }, []);
 
+  const clearMaskHistory = useCallback(() => {
+    historyRef.current = historyRef.current.filter((entry) => entry.kind !== "mask");
+    redoRef.current = redoRef.current.filter((entry) => entry.kind !== "mask");
+    historyBytesRef.current = historyRef.current.reduce((sum, entry) => sum + historyEntryBytes(entry), 0);
+    bumpHistory();
+  }, [bumpHistory]);
+
   const setCandidate = useCallback((mask: Uint8Array | null, metadata: CandidateMetadata | null) => {
+    if (mask) clearMaskHistory();
     candidateMaskRef.current = mask;
     setCandidateMetadata(metadata);
     if (!mask) {
@@ -477,7 +485,7 @@ export default function AnnotationStudio({
       return;
     }
     renderCandidate(mask);
-  }, [renderCandidate]);
+  }, [clearMaskHistory, renderCandidate, setCandidateCanvas, setCandidateMetadata, setColorComponents, setExcludedComponents]);
 
   const clearCandidateHistory = useCallback(() => {
     historyRef.current = historyRef.current.filter((entry) => entry.kind === "layer-add" || entry.kind === "visibility");
@@ -547,6 +555,7 @@ export default function AnnotationStudio({
       const requestMetadata = colorRequestMetadataRef.current.get(response.requestId);
       if (!requestMetadata) return;
       const mask = new Uint8Array(response.mask);
+      clearMaskHistory();
       candidateMaskRef.current = mask;
       setCandidateMetadata({
         source: "color_assisted",
@@ -569,7 +578,7 @@ export default function AnnotationStudio({
       if (colorTimerRef.current) clearTimeout(colorTimerRef.current);
       if (candidateRenderFrameRef.current !== null) cancelAnimationFrame(candidateRenderFrameRef.current);
     };
-  }, [cancelVisionRequest, clearVisionSession, renderCandidate]);
+  }, [cancelVisionRequest, clearMaskHistory, clearVisionSession, renderCandidate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -577,6 +586,16 @@ export default function AnnotationStudio({
       setBusy("loading");
       setError(null);
       setStatus("Cargando imagen y capas guardadas…");
+      const colorCancelId = colorRequestRef.current + 1;
+      colorRequestRef.current = colorCancelId;
+      latestColorRequestRef.current = colorCancelId;
+      colorRequestMetadataRef.current.clear();
+      colorWorkerRef.current?.postMessage({ type: "cancel", requestId: colorCancelId } satisfies ColorWorkerRequest);
+      if (candidateRenderFrameRef.current !== null) {
+        cancelAnimationFrame(candidateRenderFrameRef.current);
+        candidateRenderFrameRef.current = null;
+      }
+      candidateRenderRequestRef.current = null;
       candidateMaskRef.current = null;
       setCandidateMetadata(null);
       setCandidateCanvas(null);
@@ -858,12 +877,14 @@ export default function AnnotationStudio({
       const rgb = sampleMedianRgb(image.canvas, point.x, point.y, 7);
       setSampledRgb(rgb);
       setSampleConfirmed(false);
+      setColorComponents([]);
+      setExcludedComponents(new Set());
       setError(null);
       setStatus("Color seleccionado con la mediana de un parche de 7 × 7 píxeles.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "No se pudo muestrear el color.");
     }
-  }, [setError, setSampleConfirmed, setSampledRgb, setStatus]);
+  }, [setColorComponents, setError, setExcludedComponents, setSampleConfirmed, setSampledRgb, setStatus]);
 
   const requestSimilarColors = useCallback(() => {
     const worker = colorWorkerRef.current;
@@ -890,6 +911,7 @@ export default function AnnotationStudio({
     colorRequestMetadataRef.current.clear();
     colorRequestMetadataRef.current.set(requestId, requestMetadata);
     lastColorMetadataRef.current = requestMetadata;
+    setColorComponents([]);
     setExcludedComponents(new Set());
     const rgbaBuffer = rgba.slice().buffer;
     const scopeBuffer = scope.slice().buffer;
@@ -910,7 +932,7 @@ export default function AnnotationStudio({
     setStatus(trunkMask
       ? "Calculando componentes de color dentro del tronco evaluable…"
       : "Calculando componentes de color dentro del ROI actual…");
-  }, [colorTolerance, minimumArea, roi, sampledRgb, trunkLayer]);
+  }, [colorTolerance, minimumArea, roi, sampledRgb, setColorComponents, setError, setExcludedComponents, setStatus, trunkLayer]);
 
   useEffect(() => {
     const requestId = colorRequestRef.current + 1;
@@ -945,7 +967,7 @@ export default function AnnotationStudio({
       requestId,
       excludedComponentIds: [...nextExcluded],
     } satisfies ColorWorkerRequest);
-  }, [excludedComponents]);
+  }, [excludedComponents, setExcludedComponents]);
 
   const handleCanvasPointerDown = useCallback((event: KonvaEventObject<PointerEvent>) => {
     if (busy || event.target.name() === "guide-point") return;
@@ -1394,6 +1416,8 @@ export default function AnnotationStudio({
               disabled={disabled}
               onClick={() => {
                 setActiveTool(tool.value);
+                setColorComponents([]);
+                setExcludedComponents(new Set());
                 if (tool.value === "ai" || tool.value === "lasso") setCandidateTarget(trunkLayer ? "region" : "trunk");
               }}
               className="rounded border px-3 py-2 text-sm font-medium focus-visible:outline-2 disabled:cursor-not-allowed disabled:opacity-40"
@@ -1574,11 +1598,19 @@ export default function AnnotationStudio({
               <h2 className="font-semibold">Colores similares</h2>
               <label className="mt-3 block text-sm">
                 Tolerancia Delta E: {colorTolerance}
-                <input className="w-full" type="range" min={1} max={50} value={colorTolerance} onChange={(event) => setColorTolerance(Number(event.target.value))} />
+                <input className="w-full" type="range" min={1} max={50} value={colorTolerance} onChange={(event) => {
+                  setColorTolerance(Number(event.target.value));
+                  setColorComponents([]);
+                  setExcludedComponents(new Set());
+                }} />
               </label>
               <label className="mt-3 block text-sm">
                 Área mínima: {minimumArea} px
-                <input className="w-full" type="range" min={1} max={1000} value={minimumArea} onChange={(event) => setMinimumArea(Number(event.target.value))} />
+                <input className="w-full" type="range" min={1} max={1000} value={minimumArea} onChange={(event) => {
+                  setMinimumArea(Number(event.target.value));
+                  setColorComponents([]);
+                  setExcludedComponents(new Set());
+                }} />
               </label>
               <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>CIELAB D65 y Delta E 1976. La búsqueda se limita {trunkLayer ? "al tronco confirmado" : "al ROI actual"}.</p>
               <div className="mt-2 max-h-40 space-y-1 overflow-auto">

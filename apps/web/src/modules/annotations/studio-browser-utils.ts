@@ -110,9 +110,9 @@ export function readWorkingImagePixels(image: WorkingImage): Uint8ClampedArray {
   }
 }
 
-export async function loadMaskFromUrl(source: string, width: number, height: number): Promise<Uint8Array> {
+export async function loadMaskFromUrl(source: string, width: number, height: number, signal?: AbortSignal): Promise<Uint8Array> {
   const pixelCount = validateRasterDimensions(width, height);
-  const loaded = await loadBlobBackedImage(source);
+  const loaded = await loadBlobBackedImage(source, signal);
   try {
     const canvas = document.createElement("canvas");
     canvas.width = width;

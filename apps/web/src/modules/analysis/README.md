@@ -1,11 +1,11 @@
-Propósito
-: Ejecutar y registrar corridas de análisis sobre anotaciones e imágenes.
+# Analysis
 
-Datos que administra
-- `AnalysisRun`, resultados resumidos y versiones de algoritmo
+El módulo muestra únicamente evaluaciones con `annotation_sets.status = 'completed'` y `completed_at` no nulo. Las agregaciones consultan `annotation_metrics`; no descargan máscaras al abrir el panel.
 
-Responsabilidades
-- Ejecutar pipelines de análisis y guardar metadatos
+La cobertura por evaluación es la unión de píxeles de regiones de liquen aceptadas, intersectada con la máscara del tronco, dividida por los píxeles únicos del tronco. La cobertura agregada es ponderada:
 
-Pendiente
-- Integración con motores de cómputo y control de versiones
+`sum(lichen_union_area_pixels) / sum(trunk_area_pixels) × 100`
+
+Las máscaras se cargan con URL firmada temporal solamente al abrir el detalle de lectura existente o al ejecutar **Calcular resumen**. Los borradores quedan excluidos incluso si conservan métricas de una finalización anterior.
+
+Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.

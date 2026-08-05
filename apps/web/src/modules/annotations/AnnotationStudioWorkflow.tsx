@@ -142,6 +142,15 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
         } : item));
       }}
       onViewEvaluated={() => router.push("/annotations?tab=evaluated")}
+      onGoToAnalysis={() => {
+        const params = new URLSearchParams({
+          projectId: image.context.projectId,
+          siteId: image.context.siteId,
+          samplingEventId: image.context.samplingEventId,
+          treeSampleId: image.context.treeSampleId,
+        });
+        router.push(`/analysis?${params.toString()}`);
+      }}
       onEvaluateNext={async () => {
         const available = await listAnnotationImages();
         const pending = available

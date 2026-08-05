@@ -260,6 +260,20 @@ function notesWithLayerName(notes: string | null, name: string): string {
   return `${LAYER_NAME_PREFIX}${name}${remaining ? `\n${remaining}` : ""}`;
 }
 
+function storedGuidePoints(region: AnnotationRegionRow): PointPrompt[] {
+  const normalize = (values: unknown[], label: 0 | 1): PointPrompt[] => values.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const point = value as { x?: unknown; y?: unknown };
+    if (typeof point.x !== "number" || typeof point.y !== "number") return [];
+    if (point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) return [];
+    return [{ x: point.x, y: point.y, label }];
+  });
+  return [
+    ...normalize(region.positive_points, 1),
+    ...normalize(region.negative_points, 0),
+  ];
+}
+
 function historyEntryBytes(entry: HistoryEntry): number {
   if (entry.kind === "mask") return entry.indices.byteLength + entry.before.byteLength + entry.after.byteLength;
   if (entry.kind === "layer-add") return entry.saveInput.mask.size;
@@ -371,6 +385,7 @@ export default function AnnotationStudio({
   const candidateImageDataRef = useRef<ImageData | null>(null);
   const candidateRenderFrameRef = useRef<number | null>(null);
   const candidateRenderRequestRef = useRef<CandidateRenderRequest | null>(null);
+  const stageSizeRef = useRef({ width: 900, height: 620 });
 
   const [workingImage, setWorkingImage] = useState<WorkingImage | null>(null);
   const [candidateCanvas, setCandidateCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -571,12 +586,13 @@ export default function AnnotationStudio({
   const focusMask = useCallback((mask: Uint8Array) => {
     const image = workingImageRef.current;
     if (!image) return;
+    const currentStageSize = stageSizeRef.current;
     const bounds = calculateMaskBounds(mask, image.width, image.height);
     if (!bounds) return;
-    const baseScale = Math.min(stageSize.width / image.width, stageSize.height / image.height);
+    const baseScale = Math.min(currentStageSize.width / image.width, currentStageSize.height / image.height);
     const paddedWidth = Math.max(1, bounds.width * 1.14);
     const paddedHeight = Math.max(1, bounds.height * 1.14);
-    const targetScale = Math.min(stageSize.width / paddedWidth, stageSize.height / paddedHeight);
+    const targetScale = Math.min(currentStageSize.width / paddedWidth, currentStageSize.height / paddedHeight);
     const zoom = Math.max(0.5, Math.min(6, targetScale / baseScale));
     const display = baseScale * zoom;
     const centerX = bounds.x + bounds.width / 2;
@@ -586,7 +602,7 @@ export default function AnnotationStudio({
       x: (image.width / 2 - centerX) * display,
       y: (image.height / 2 - centerY) * display,
     });
-  }, [stageSize.height, stageSize.width]);
+  }, [setView]);
 
   const analyzeTrunkColors = useCallback((trunkMask: Uint8Array) => {
     const worker = colorWorkerRef.current;
@@ -614,7 +630,7 @@ export default function AnnotationStudio({
       maximumColors: 8,
       minimumPercentage: 0.35,
     } satisfies ColorWorkerRequest);
-  }, []);
+  }, [setColorPalette, setStudioState]);
 
   const updateCoverage = useCallback((nextLayers: StudioLayer[]) => {
     const nextTrunk = nextLayers.find(isTrunkLayer);
@@ -638,7 +654,9 @@ export default function AnnotationStudio({
     const updateSize = () => {
       const width = Math.max(320, host.clientWidth);
       const height = Math.max(420, Math.min(720, window.innerHeight - 260));
-      setStageSize({ width, height });
+      const nextSize = { width, height };
+      stageSizeRef.current = nextSize;
+      setStageSize(nextSize);
     };
     updateSize();
     const observer = new ResizeObserver(updateSize);
@@ -827,7 +845,7 @@ export default function AnnotationStudio({
       }
       return null;
     }
-  }, [cancelVisionRequest, candidateTarget, clearVisionSession]);
+  }, [cancelVisionRequest, candidateTarget, clearVisionSession, setStudioState]);
 
   const applyMobileSamCandidate = useCallback(async (nextIndex: number, nextCandidates = candidates) => {
     const selected = nextCandidates[nextIndex];
@@ -895,7 +913,7 @@ export default function AnnotationStudio({
         setStudioState("error");
       }
     }
-  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, prepareVision, setCandidate]);
+  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, prepareVision, setCandidate, setStudioState]);
 
   const scheduleSegment = useCallback((nextPoints: PointPrompt[]) => {
     if (segmentationTimerRef.current) clearTimeout(segmentationTimerRef.current);
@@ -961,7 +979,10 @@ export default function AnnotationStudio({
     for (let index = 0; index < indices.length; index += 1) after[index] = mask[indices[index]];
     pushHistory({ kind: "mask", indices, before, after });
     renderCandidate(mask);
-  }, [pushHistory, renderCandidate]);
+    if (calculateMaskArea(mask) > 0) {
+      setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "reviewing-region");
+    }
+  }, [candidateTarget, pushHistory, renderCandidate, setStudioState]);
 
   const finishPolygon = useCallback(() => {
     const image = workingImageRef.current;
@@ -1004,7 +1025,7 @@ export default function AnnotationStudio({
     });
     setPolygonPoints([]);
     setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "reviewing-region");
-  }, [candidateTarget, polygonPoints, pushHistory, sampledRgb, setCandidate, trunkLayer]);
+  }, [candidateTarget, polygonPoints, pushHistory, sampledRgb, setCandidate, setStudioState, trunkLayer]);
 
   const sampleColor = useCallback((point: MaskPoint) => {
     const image = workingImageRef.current;
@@ -1020,7 +1041,7 @@ export default function AnnotationStudio({
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "No se pudo muestrear el color.");
     }
-  }, [setColorComponents, setError, setExcludedComponents, setSampleConfirmed, setSampledRgb]);
+  }, [setColorComponents, setError, setExcludedComponents, setSampleConfirmed, setSampledRgb, setStudioState]);
 
   const requestSimilarColors = useCallback(() => {
     const worker = colorWorkerRef.current;
@@ -1066,7 +1087,7 @@ export default function AnnotationStudio({
       minimumArea,
     } satisfies ColorWorkerRequest);
     setStudioState("analyzing-colors");
-  }, [colorTolerance, minimumArea, roi, sampledRgb, setColorComponents, setError, setExcludedComponents, trunkLayer]);
+  }, [colorTolerance, minimumArea, roi, sampledRgb, setColorComponents, setError, setExcludedComponents, setStudioState, trunkLayer]);
 
   useEffect(() => {
     const requestId = colorRequestRef.current + 1;
@@ -1110,14 +1131,14 @@ export default function AnnotationStudio({
     setSampleConfirmed(true);
     setActiveTool("similar");
     setStudioState("analyzing-colors");
-  }, [resetCandidate]);
+  }, [resetCandidate, setActiveTool, setCandidateTarget, setSampleConfirmed, setSampledRgb, setStudioState]);
 
   const discardRegionCandidate = useCallback(() => {
     resetCandidate();
     setActiveTool("ai");
     setCandidateTarget("region");
     setStudioState("exploring-candidates");
-  }, [resetCandidate]);
+  }, [resetCandidate, setActiveTool, setCandidateTarget, setStudioState]);
 
   const retryTrunkProposal = useCallback(() => {
     resetCandidate();
@@ -1125,7 +1146,7 @@ export default function AnnotationStudio({
     setActiveTool("ai");
     setStudioState("selecting-trunk");
     fitToScreen();
-  }, [fitToScreen, resetCandidate]);
+  }, [fitToScreen, resetCandidate, setActiveTool, setCandidateTarget, setStudioState]);
 
   const editTrunk = useCallback(() => {
     if (!trunkLayer) return;
@@ -1133,7 +1154,12 @@ export default function AnnotationStudio({
     if (regionCount > 0 && !window.confirm("Ya existen regiones guardadas. ¿Quieres editar la corteza manteniendo esas regiones?")) return;
     const mask = layerMasksRef.current.get(trunkLayer.region.id);
     if (!mask) return;
+    resetCandidate();
     setCandidateTarget("trunk");
+    setPoints(storedGuidePoints(trunkLayer.region));
+    const storedColor = trunkLayer.region.representative_color_hex;
+    setSampledRgb(storedColor ? hexToRgb(storedColor) : null);
+    setSampleConfirmed(Boolean(storedColor));
     setCandidate(mask.slice(), {
       source: trunkLayer.region.source,
       score: trunkLayer.region.score,
@@ -1144,7 +1170,7 @@ export default function AnnotationStudio({
     });
     setActiveTool("brush");
     setStudioState("reviewing-trunk");
-  }, [layers, setCandidate, trunkLayer]);
+  }, [layers, resetCandidate, setActiveTool, setCandidate, setCandidateTarget, setPoints, setSampleConfirmed, setSampledRgb, setStudioState, trunkLayer]);
 
   const handleCanvasPointerDown = useCallback((event: KonvaEventObject<PointerEvent>) => {
     if (busy || event.target.name() === "guide-point") return;
@@ -1194,7 +1220,7 @@ export default function AnnotationStudio({
       applyBrushCircle(point, value, stroke.before);
       renderCandidate();
     }
-  }, [activeTool, addGuidePoint, applyBrushCircle, busy, candidateTarget, pointFromEvent, points, pushHistory, renderCandidate, sampleColor, scheduleSegment, studioState, trunkLayer]);
+  }, [activeTool, addGuidePoint, applyBrushCircle, busy, candidateTarget, pointFromEvent, points, pushHistory, renderCandidate, sampleColor, scheduleSegment, setCandidateTarget, setClassification, setClickFeedback, setError, setPoints, setSampleConfirmed, studioState, trunkLayer]);
 
   const handleCanvasPointerMove = useCallback((event: KonvaEventObject<PointerEvent>) => {
     const stroke = strokeRef.current;
@@ -1442,7 +1468,9 @@ export default function AnnotationStudio({
       setActiveTool("ai");
       if (candidateTarget === "trunk") {
         focusMask(persistedMask);
-        analyzeTrunkColors(persistedMask);
+        window.setTimeout(() => {
+          if (mountedRef.current) analyzeTrunkColors(persistedMask);
+        }, 0);
       } else {
         const morphotypeLabel = nextClassification === "lichen"
           ? nextMorphotypes.find((item) => item.id === selectedMorphotypeId)?.label
@@ -1478,7 +1506,7 @@ export default function AnnotationStudio({
     setMorphotypeId(layer.region.morphotype_id);
     setStudioState("reviewing-layers");
     renderLayers(layers, layer.region.id);
-  }, [layers, renderLayers, setClassification, setMorphotypeId, setSelectedLayerId]);
+  }, [layers, renderLayers, setClassification, setMorphotypeId, setSelectedLayerId, setStudioState]);
 
   const saveSelectedLayerClassification = useCallback(async () => {
     if (!selectedLayer || busy || isTrunkLayer(selectedLayer)) return;
@@ -1824,21 +1852,6 @@ export default function AnnotationStudio({
                 <p className="mt-3 flex items-center gap-2 text-sm"><span className="studio-spinner" aria-hidden="true" />Analizando la corteza…</p>
               ) : null}
 
-              {currentStep === 2 ? (
-                <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-                  <h2 className="font-semibold">Buscar líquenes</h2>
-                  <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>La aplicación encontró colores y regiones visualmente diferentes dentro de la corteza. Pulsa una zona para revisarla. Tú decides si realmente es un liquen.</p>
-                  {!candidateMetadata && layers.some((layer) => !isTrunkLayer(layer)) ? <button type="button" onClick={() => setStudioState("reviewing-layers")} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Revisar capas y guardar</button> : null}
-                </section>
-              ) : null}
-
-              {currentStep === 4 ? (
-                <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-                  <h2 className="font-semibold">Revisión final</h2>
-                  <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Las capas mostradas abajo ya están guardadas en este conjunto de anotación.</p>
-                  <button type="button" onClick={() => { setStudioState("exploring-candidates"); setActiveTool("ai"); }} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Continuar buscando regiones</button>
-                </section>
-              ) : null}
               {candidateMetadata && candidateTarget === "trunk" ? (
                 <>
                   <button type="button" aria-busy={busy === "save"} disabled={Boolean(busy)} onClick={() => void persistCandidate()} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">
@@ -1852,6 +1865,22 @@ export default function AnnotationStudio({
                   {busy ? "Analizando la corteza…" : "Seleccionar corteza"}
                 </button>
               )}
+            </section>
+          ) : null}
+
+          {currentStep === 2 ? (
+            <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+              <h2 className="font-semibold">Buscar líquenes</h2>
+              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>La aplicación encontró colores y regiones visualmente diferentes dentro de la corteza. Pulsa una zona para revisarla. Tú decides si realmente es un liquen.</p>
+              {!candidateMetadata && layers.some((layer) => !isTrunkLayer(layer)) ? <button type="button" onClick={() => setStudioState("reviewing-layers")} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Revisar capas y guardar</button> : null}
+            </section>
+          ) : null}
+
+          {currentStep === 4 ? (
+            <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+              <h2 className="font-semibold">Revisión final</h2>
+              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Las capas mostradas abajo ya están guardadas en este conjunto de anotación.</p>
+              <button type="button" onClick={() => { setStudioState("exploring-candidates"); setActiveTool("ai"); }} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Continuar buscando regiones</button>
             </section>
           ) : null}
 

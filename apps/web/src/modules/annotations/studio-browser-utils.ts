@@ -5,6 +5,11 @@ export interface WorkingImage {
   height: number;
 }
 
+export interface BlobBackedImage {
+  element: HTMLImageElement;
+  objectUrl: string;
+}
+
 export interface MaskPoint {
   x: number;
   y: number;
@@ -20,12 +25,61 @@ export function loadCrossOriginImage(source: string): Promise<HTMLImageElement> 
   });
 }
 
+export async function loadBlobBackedImage(source: string, signal?: AbortSignal): Promise<BlobBackedImage> {
+  let response: Response;
+  try {
+    response = await fetch(source, { signal });
+  } catch (reason) {
+    if ((reason as { name?: string }).name === "AbortError") throw reason;
+    throw new Error("No se pudo descargar la imagen.");
+  }
+  if (!response.ok) throw new Error("No se pudo descargar la imagen.");
+  const declaredType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
+  if (!declaredType.startsWith("image/")) throw new Error("El archivo descargado no es una imagen válida.");
+  const blob = await response.blob();
+  if (blob.size === 0 || !blob.type.toLowerCase().startsWith("image/")) {
+    throw new Error("El archivo descargado no es una imagen válida.");
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    return { element: await loadCrossOriginImage(objectUrl), objectUrl };
+  } catch {
+    URL.revokeObjectURL(objectUrl);
+    throw new Error("No se pudo abrir la imagen descargada.");
+  }
+}
+
+export function validateRasterDimensions(width: number, height: number, maximumDimension = 1024): number {
+  if (
+    !Number.isSafeInteger(width)
+    || !Number.isSafeInteger(height)
+    || width <= 0
+    || height <= 0
+    || width > maximumDimension
+    || height > maximumDimension
+  ) {
+    throw new Error("Las dimensiones de la imagen no son válidas.");
+  }
+  return width * height;
+}
+
 export function createWorkingImage(element: HTMLImageElement, maximumDimension = 1024): WorkingImage {
-  const naturalWidth = Math.max(1, element.naturalWidth);
-  const naturalHeight = Math.max(1, element.naturalHeight);
+  const naturalWidth = element.naturalWidth;
+  const naturalHeight = element.naturalHeight;
+  if (
+    !Number.isFinite(naturalWidth)
+    || !Number.isFinite(naturalHeight)
+    || naturalWidth <= 0
+    || naturalHeight <= 0
+    || !Number.isFinite(maximumDimension)
+    || maximumDimension <= 0
+  ) {
+    throw new Error("Las dimensiones de la imagen no son válidas.");
+  }
   const scale = Math.min(1, maximumDimension / Math.max(naturalWidth, naturalHeight));
   const width = Math.max(1, Math.round(naturalWidth * scale));
   const height = Math.max(1, Math.round(naturalHeight * scale));
+  validateRasterDimensions(width, height, maximumDimension);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -33,31 +87,51 @@ export function createWorkingImage(element: HTMLImageElement, maximumDimension =
   if (!context) throw new Error("No se pudo preparar el lienzo de la imagen.");
   try {
     context.drawImage(element, 0, 0, width, height);
-    context.getImageData(0, 0, 1, 1);
   } catch {
-    throw new Error("El navegador bloqueó el acceso a los píxeles de la imagen.");
+    throw new Error("No se pudo preparar la imagen para el análisis.");
   }
   return { element, canvas, width, height };
 }
 
-export async function loadMaskFromUrl(source: string, width: number, height: number): Promise<Uint8Array> {
-  const image = await loadCrossOriginImage(source);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("No se pudo leer la máscara guardada.");
-  context.imageSmoothingEnabled = false;
-  context.drawImage(image, 0, 0, width, height);
-  const pixels = context.getImageData(0, 0, width, height).data;
-  const mask = new Uint8Array(width * height);
-  for (let index = 0; index < mask.length; index += 1) {
-    const pixelIndex = index * 4;
-    if (pixels[pixelIndex] >= 128 || pixels[pixelIndex + 3] >= 128 && pixels[pixelIndex] > 0) {
-      mask[index] = 1;
+export function readWorkingImagePixels(image: WorkingImage): Uint8ClampedArray {
+  const pixelCount = validateRasterDimensions(image.width, image.height);
+  const context = image.canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("No fue posible leer los colores de esta imagen.");
+  try {
+    const pixels = context.getImageData(0, 0, image.width, image.height).data;
+    if (pixels.length !== pixelCount * 4) {
+      throw new Error("Los píxeles no coinciden con las dimensiones de la imagen.");
     }
+    return pixels;
+  } catch {
+    throw new Error("No fue posible leer los colores de esta imagen.");
   }
-  return mask;
+}
+
+export async function loadMaskFromUrl(source: string, width: number, height: number): Promise<Uint8Array> {
+  const pixelCount = validateRasterDimensions(width, height);
+  const loaded = await loadBlobBackedImage(source);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("No se pudo leer la máscara guardada.");
+    context.imageSmoothingEnabled = false;
+    context.drawImage(loaded.element, 0, 0, width, height);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    if (pixels.length !== pixelCount * 4) throw new Error("La máscara guardada tiene dimensiones inválidas.");
+    const mask = new Uint8Array(pixelCount);
+    for (let index = 0; index < mask.length; index += 1) {
+      const pixelIndex = index * 4;
+      if (pixels[pixelIndex] >= 128 && pixels[pixelIndex + 3] >= 128) {
+        mask[index] = 1;
+      }
+    }
+    return mask;
+  } finally {
+    URL.revokeObjectURL(loaded.objectUrl);
+  }
 }
 
 export function drawMask(

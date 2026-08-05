@@ -15,8 +15,28 @@ let componentLabels: Int32Array | null = null;
 let retainedComponents: SimilarColorComponent[] = [];
 let latestRequestId = 0;
 
+const MAX_DIMENSION = 1024;
+const MAX_PIXELS = MAX_DIMENSION * MAX_DIMENSION;
+const MAX_PALETTE_SAMPLES = 60_000;
+const MAX_PALETTE_BUCKETS = 512;
+const MAX_FINAL_COLORS = 10;
+const MAX_COMPONENTS = 256;
+const MIN_COMPONENT_AREA = 16;
+
 function post(response: ColorWorkerResponse, transfer: Transferable[] = []): void {
   self.postMessage(response, transfer);
+}
+
+function postProgress(requestId: number, stage: Extract<ColorWorkerResponse, { type: "progress" }>["stage"]): void {
+  if (!isStale(requestId)) post({ type: "progress", requestId, stage });
+}
+
+function postError(
+  requestId: number,
+  code: Extract<ColorWorkerResponse, { type: "error" }>["code"],
+  message: string,
+): void {
+  post({ type: "error", requestId, code, message, recoverable: true });
 }
 
 function srgbChannelToLinear(value: number): number {
@@ -69,20 +89,28 @@ async function buildPalette(
   const rgba = imageRgba;
   const scope = scopeMask;
   if (!rgba || !scope || imageWidth <= 0 || imageHeight <= 0) {
-    post({ type: "error", requestId, message: "La imagen de trabajo no está preparada." });
+    postError(requestId, "not-configured", "La imagen de trabajo no está preparada.");
     return;
   }
 
-  const scopedPixels = scope.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
+  let scopedPixels = 0;
+  for (let index = 0; index < scope.length; index += 1) {
+    if (scope[index] !== 0) scopedPixels += 1;
+    if (index > 0 && index % 131072 === 0) {
+      await yieldToMessages();
+      if (isStale(requestId)) return;
+    }
+  }
   if (scopedPixels === 0) {
     post({ type: "palette", requestId, candidates: [] });
     return;
   }
 
-  const stride = Math.max(1, Math.ceil(Math.sqrt(scopedPixels / 60_000)));
+  postProgress(requestId, "comparing-colors");
+  const stride = Math.max(1, Math.ceil(Math.sqrt(scopedPixels / MAX_PALETTE_SAMPLES)));
   const buckets = new Map<string, PaletteGroup>();
   let sampledPixels = 0;
-  for (let y = 0; y < imageHeight; y += stride) {
+  outer: for (let y = 0; y < imageHeight; y += stride) {
     for (let x = 0; x < imageWidth; x += stride) {
       const index = y * imageWidth + x;
       if (scope[index] === 0) continue;
@@ -101,6 +129,7 @@ async function buildPalette(
       bucket.y += y;
       buckets.set(key, bucket);
       sampledPixels += 1;
+      if (sampledPixels >= MAX_PALETTE_SAMPLES) break outer;
     }
     if (y % (stride * 32) === 0) {
       await yieldToMessages();
@@ -108,8 +137,17 @@ async function buildPalette(
     }
   }
 
+  if (sampledPixels === 0 || isStale(requestId)) {
+    if (!isStale(requestId)) post({ type: "palette", requestId, candidates: [] });
+    return;
+  }
+  postProgress(requestId, "grouping-regions");
   const merged: PaletteGroup[] = [];
-  for (const bucket of [...buckets.values()].sort((left, right) => right.count - left.count)) {
+  const sortedBuckets = [...buckets.values()]
+    .sort((left, right) => right.count - left.count)
+    .slice(0, MAX_PALETTE_BUCKETS);
+  for (let bucketIndex = 0; bucketIndex < sortedBuckets.length; bucketIndex += 1) {
+    const bucket = sortedBuckets[bucketIndex];
     const bucketRgb: [number, number, number] = [
       bucket.red / bucket.count,
       bucket.green / bucket.count,
@@ -130,12 +168,17 @@ async function buildPalette(
     } else {
       merged.push({ ...bucket });
     }
+    if (bucketIndex > 0 && bucketIndex % 64 === 0) {
+      await yieldToMessages();
+      if (isStale(requestId)) return;
+    }
   }
 
+  postProgress(requestId, "preparing-results");
   const candidates: ColorPaletteCandidate[] = merged
     .filter((group) => group.count / sampledPixels * 100 >= minimumPercentage)
     .sort((left, right) => right.count - left.count)
-    .slice(0, Math.max(1, Math.min(10, maximumColors)))
+    .slice(0, Math.max(1, Math.min(MAX_FINAL_COLORS, maximumColors)))
     .map((group, index) => ({
       id: index + 1,
       rgb: [
@@ -159,13 +202,14 @@ async function selectSimilarColors(
   const rgba = imageRgba;
   const scope = scopeMask;
   if (!rgba || !scope || imageWidth <= 0 || imageHeight <= 0) {
-    post({ type: "error", requestId, message: "La imagen de trabajo no está preparada." });
+    postError(requestId, "not-configured", "La imagen de trabajo no está preparada.");
     return;
   }
 
   const pixelCount = imageWidth * imageHeight;
   const matches = new Uint8Array(pixelCount);
   const sampleLab = rgbToLab(sampleRgb[0], sampleRgb[1], sampleRgb[2]);
+  postProgress(requestId, "comparing-colors");
   for (let y = 0; y < imageHeight; y += 1) {
     const rowOffset = y * imageWidth;
     for (let x = 0; x < imageWidth; x += 1) {
@@ -184,8 +228,14 @@ async function selectSimilarColors(
   const labels = new Int32Array(pixelCount);
   const queue = new Int32Array(pixelCount);
   const components: SimilarColorComponent[] = [];
+  const effectiveMinimumArea = Math.max(MIN_COMPONENT_AREA, Math.floor(minimumArea));
   let nextLabel = 1;
+  postProgress(requestId, "grouping-regions");
   for (let start = 0; start < pixelCount; start += 1) {
+    if (start > 0 && start % 32768 === 0) {
+      await yieldToMessages();
+      if (isStale(requestId)) return;
+    }
     if (matches[start] === 0 || labels[start] !== 0) continue;
     let read = 0;
     let write = 1;
@@ -216,7 +266,7 @@ async function selectSimilarColors(
         if (isStale(requestId)) return;
       }
     }
-    if (write >= minimumArea) {
+    if (write >= effectiveMinimumArea && components.length < MAX_COMPONENTS) {
       components.push({
         id: nextLabel,
         areaPixels: write,
@@ -235,13 +285,14 @@ async function selectSimilarColors(
   if (isStale(requestId)) return;
   componentLabels = labels;
   retainedComponents = components;
+  postProgress(requestId, "preparing-results");
   await renderComponents(requestId, []);
 }
 
 async function renderComponents(requestId: number, excludedComponentIds: number[]): Promise<void> {
   const labels = componentLabels;
   if (!labels) {
-    post({ type: "error", requestId, message: "No hay componentes de color para actualizar." });
+    postError(requestId, "not-configured", "No hay componentes de color para actualizar.");
     return;
   }
   const excluded = new Set(excludedComponentIds);
@@ -260,21 +311,58 @@ async function renderComponents(requestId: number, excludedComponentIds: number[
   );
 }
 
-self.onmessage = (event: MessageEvent<ColorWorkerRequest>) => {
-  const request = event.data;
+function configure(request: Extract<ColorWorkerRequest, { type: "configure" }>): void {
+  const { width, height } = request;
+  if (
+    !Number.isSafeInteger(width)
+    || !Number.isSafeInteger(height)
+    || width <= 0
+    || height <= 0
+    || width > MAX_DIMENSION
+    || height > MAX_DIMENSION
+    || width * height > MAX_PIXELS
+  ) {
+    throw new Error("Las dimensiones de la imagen no son válidas.");
+  }
+  const pixelCount = width * height;
+  if (request.rgba.byteLength !== pixelCount * 4 || request.scopeMask.byteLength !== pixelCount) {
+    throw new Error("Los píxeles o la máscara no coinciden con las dimensiones de la imagen.");
+  }
+  imageWidth = width;
+  imageHeight = height;
+  imageRgba = new Uint8ClampedArray(request.rgba);
+  scopeMask = new Uint8Array(request.scopeMask);
+  componentLabels = null;
+  retainedComponents = [];
+}
+
+function validateSelect(request: Extract<ColorWorkerRequest, { type: "select" }>): void {
+  if (
+    request.sampleRgb.length !== 3
+    || request.sampleRgb.some((value) => !Number.isFinite(value) || value < 0 || value > 255)
+    || !Number.isFinite(request.toleranceDeltaE)
+    || request.toleranceDeltaE <= 0
+    || !Number.isFinite(request.minimumArea)
+    || request.minimumArea <= 0
+  ) {
+    throw new Error("Los parámetros de selección de color no son válidos.");
+  }
+}
+
+async function handleRequest(request: ColorWorkerRequest): Promise<void> {
+  if (!Number.isSafeInteger(request.requestId) || request.requestId <= 0) {
+    throw new Error("El identificador de análisis no es válido.");
+  }
+  if (request.requestId < latestRequestId) return;
+  latestRequestId = request.requestId;
   if (request.type === "configure") {
-    imageWidth = request.width;
-    imageHeight = request.height;
-    imageRgba = new Uint8ClampedArray(request.rgba);
-    scopeMask = new Uint8Array(request.scopeMask);
-    componentLabels = null;
-    retainedComponents = [];
+    configure(request);
     return;
   }
-  latestRequestId = request.requestId;
   if (request.type === "cancel") return;
   if (request.type === "select") {
-    void selectSimilarColors(
+    validateSelect(request);
+    await selectSimilarColors(
       request.requestId,
       request.sampleRgb,
       request.toleranceDeltaE,
@@ -283,14 +371,28 @@ self.onmessage = (event: MessageEvent<ColorWorkerRequest>) => {
     return;
   }
   if (request.type === "palette") {
-    void buildPalette(
+    await buildPalette(
       request.requestId,
       request.maximumColors,
       request.minimumPercentage,
     );
     return;
   }
-  void renderComponents(request.requestId, request.excludedComponentIds);
+  await renderComponents(request.requestId, request.excludedComponentIds.slice(0, MAX_COMPONENTS));
+}
+
+self.onmessage = (event: MessageEvent<ColorWorkerRequest>) => {
+  const requestId = Number.isSafeInteger(event.data?.requestId) ? event.data.requestId : latestRequestId;
+  void handleRequest(event.data).catch((reason: unknown) => {
+    if (requestId !== latestRequestId) return;
+    postError(
+      requestId,
+      reason instanceof Error && reason.message.includes("dimensiones")
+        ? "invalid-input"
+        : "processing-failed",
+      reason instanceof Error ? reason.message : "No se pudo completar el análisis de colores.",
+    );
+  });
 };
 
 export {};

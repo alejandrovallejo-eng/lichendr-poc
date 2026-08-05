@@ -13,9 +13,15 @@ export interface ColorPaletteCandidate {
   centroidY: number;
 }
 
+export type ColorAnalysisStage =
+  | "comparing-colors"
+  | "grouping-regions"
+  | "preparing-results";
+
 export type ColorWorkerRequest =
   | {
       type: "configure";
+      requestId: number;
       width: number;
       height: number;
       rgba: ArrayBuffer;
@@ -46,6 +52,11 @@ export type ColorWorkerRequest =
 
 export type ColorWorkerResponse =
   | {
+      type: "progress";
+      requestId: number;
+      stage: ColorAnalysisStage;
+    }
+  | {
       type: "result";
       requestId: number;
       mask: ArrayBuffer;
@@ -59,5 +70,7 @@ export type ColorWorkerResponse =
   | {
       type: "error";
       requestId: number;
+      code: "invalid-input" | "not-configured" | "processing-failed";
       message: string;
+      recoverable: true;
     };

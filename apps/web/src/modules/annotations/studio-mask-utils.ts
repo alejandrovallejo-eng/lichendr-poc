@@ -54,6 +54,9 @@ export function clipMask(mask: Uint8Array, boundary: Uint8Array): Uint8Array {
 }
 
 export function calculateMaskBounds(mask: Uint8Array, width: number, height: number): MaskBounds | null {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+    throw new Error("Las dimensiones de la imagen no son válidas.");
+  }
   if (mask.length !== width * height) throw new Error("La máscara no coincide con las dimensiones de la imagen.");
   let minX = width;
   let minY = height;

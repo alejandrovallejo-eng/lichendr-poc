@@ -1,5 +1,0 @@
-psql:202607280001_create_image_storage_and_metadata.sql:1: NOTICE:  extension "pgcrypto" already exists, skipping
-CREATE EXTENSION
-psql:202607280001_create_image_storage_and_metadata.sql:22: ERROR:  relation "storage.buckets" does not exist
-LINE 1: insert into storage.buckets (id, name, public, file_size_lim...
-                    ^

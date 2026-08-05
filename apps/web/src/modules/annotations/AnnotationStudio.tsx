@@ -11,6 +11,7 @@ import {
   loadAiAnnotationState,
   replaceAcceptedTrunkRegion,
   RegionPersistenceError,
+  retryMaskCleanup,
   saveAcceptedRegion,
   updateRegionClassification,
   updateRegionNotes,
@@ -20,7 +21,14 @@ import {
   type MorphotypeRow,
   type RegionSaveInput,
 } from "@/modules/annotations/regions";
-import { upsertMorphotype, type MorphotypeDraft } from "@/modules/annotations/client";
+import {
+  finalizeAnnotationSet,
+  reopenAnnotationSet,
+  upsertMorphotype,
+  type AnnotationImageContext,
+  type AnnotationSetRow,
+  type MorphotypeDraft,
+} from "@/modules/annotations/client";
 import {
   createRoiMask,
   createWorkingImage,
@@ -174,14 +182,21 @@ function colorStageMessage(stage: ColorAnalysisStage): string {
 }
 
 interface AnnotationStudioProps {
+  imageId: string;
   imageUrl: string;
   imageName: string;
   annotationSetId: string;
+  annotationStatus: "draft" | "completed";
+  completedAt: string | null;
+  imageContext: AnnotationImageContext;
   initialMorphotypes: MorphotypeRow[];
   roi: { x: number | null; y: number | null; width: number | null; height: number | null };
   initialTool?: "ai" | "layers" | "manual";
   onChooseAnotherImage: () => void;
   onMorphotypesChange: (morphotypes: MorphotypeRow[]) => void;
+  onAnnotationSetChange: (annotationSet: AnnotationSetRow) => void;
+  onViewEvaluated: () => void;
+  onEvaluateNext: () => Promise<boolean>;
 }
 
 const CLASS_LABELS: Record<AnnotationRegionClassification, string> = {
@@ -376,18 +391,26 @@ function sortLayers(layers: StudioLayer[]): StudioLayer[] {
 }
 
 export default function AnnotationStudio({
+  imageId,
   imageUrl,
   imageName,
   annotationSetId,
+  annotationStatus,
+  completedAt,
+  imageContext,
   initialMorphotypes,
   roi,
   initialTool = "manual",
   onChooseAnotherImage,
   onMorphotypesChange,
+  onAnnotationSetChange,
+  onViewEvaluated,
+  onEvaluateNext,
 }: AnnotationStudioProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const workingImageRef = useRef<WorkingImage | null>(null);
   const candidateMaskRef = useRef<Uint8Array | null>(null);
+  const initialReadOnlyRef = useRef(annotationStatus === "completed");
   const layerMasksRef = useRef<Map<string, Uint8Array>>(new Map());
   const historyRef = useRef<HistoryEntry[]>([]);
   const redoRef = useRef<HistoryEntry[]>([]);
@@ -459,9 +482,18 @@ export default function AnnotationStudio({
   const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
   const [clickFeedback, setClickFeedback] = useState<MaskPoint | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"loading" | "prepare" | "segment" | "save" | "delete" | null>("loading");
+  const [busy, setBusy] = useState<"loading" | "prepare" | "segment" | "save" | "delete" | "complete" | "reopen" | "cleanup" | null>("loading");
   const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
   const [coverage, setCoverage] = useState(() => calculateCoverage(null, []));
+  const [pendingCleanupPaths, setPendingCleanupPaths] = useState<string[]>([]);
+  const [completionSummary, setCompletionSummary] = useState<{
+    completedAt: string;
+    evaluatedRegionCount: number;
+    lichenRegionCount: number;
+    morphotypeLabels: string[];
+    coveragePercent: number | null;
+  } | null>(null);
+  const [noPendingImages, setNoPendingImages] = useState(false);
 
   const fitScale = workingImage
     ? Math.min(stageSize.width / workingImage.width, stageSize.height / workingImage.height)
@@ -470,6 +502,23 @@ export default function AnnotationStudio({
   const trunkLayer = layers.find(isTrunkLayer) ?? null;
   const currentStep = stepForState(studioState);
   const selectedLayer = layers.find((layer) => layer.region.id === selectedLayerId) ?? null;
+  const isReadOnly = annotationStatus === "completed";
+  const selectedLayerHasUnsavedClassification = Boolean(
+    selectedLayer
+    && !isTrunkLayer(selectedLayer)
+    && (
+      selectedLayer.region.classification !== classification
+      || selectedLayer.region.morphotype_id !== (classification === "lichen" ? morphotypeId : null)
+    ),
+  );
+  const hasUnsavedChanges = Boolean(
+    candidateMetadata
+    || polygonPoints.length > 0
+    || selectedLayerHasUnsavedClassification
+    || pendingCleanupPaths.length > 0
+    || busy === "save"
+    || busy === "delete",
+  );
 
   const bumpHistory = useCallback(() => {
     setHistoryCounts({ undo: historyRef.current.length, redo: redoRef.current.length });
@@ -913,8 +962,12 @@ export default function AnnotationStudio({
     let loadedObjectUrl: string | null = null;
     const controller = new AbortController();
     const load = async () => {
+      const loadReadOnly = initialReadOnlyRef.current;
       setBusy("loading");
       setError(null);
+      setPendingCleanupPaths([]);
+      setCompletionSummary(null);
+      setNoPendingImages(false);
       setStudioState("loading-image");
       cancelColorAnalysis(false);
       imageLoadAbortRef.current?.abort();
@@ -975,21 +1028,21 @@ export default function AnnotationStudio({
         setMorphotypes(state.morphotypes);
         onMorphotypesChange(state.morphotypes);
         setLayers(sorted);
-        setSelectedLayerId(initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
+        setSelectedLayerId(loadReadOnly || initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
         setCandidateTarget(sorted.some(isTrunkLayer) ? "region" : "trunk");
         const loadedTrunk = sorted.find(isTrunkLayer);
-        setStudioState(loadedTrunk ? "trunk-confirmed" : "selecting-trunk");
-        setActiveTool("ai");
+        setStudioState(loadReadOnly ? "reviewing-layers" : loadedTrunk ? "trunk-confirmed" : "selecting-trunk");
+        setActiveTool(loadReadOnly ? "select" : "ai");
         updateCoverage(sorted);
         setBusy(null);
         renderTimer = window.setTimeout(() => {
           if (cancelled) return;
-          renderLayers(sorted, initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
+          renderLayers(sorted, loadReadOnly || initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
           if (loadedTrunk) {
             const mask = layerMasksRef.current.get(loadedTrunk.region.id);
             if (mask) {
               focusMask(mask);
-              void analyzeTrunkColors(mask);
+              if (!loadReadOnly) void analyzeTrunkColors(mask);
             }
           }
         }, 0);
@@ -1553,7 +1606,7 @@ export default function AnnotationStudio({
   }, [cancelColorAnalysis, resetCandidate, setActiveTool, setCandidateTarget, setColorAnalysisFeedback, setError, setStudioState]);
 
   const handleCanvasPointerDown = useCallback((event: KonvaEventObject<PointerEvent>) => {
-    if (busy || event.target.name() === "guide-point") return;
+    if (isReadOnly || busy || event.target.name() === "guide-point") return;
     const point = pointFromEvent(event);
     if (!point) return;
     setClickFeedback(point);
@@ -1600,9 +1653,10 @@ export default function AnnotationStudio({
       applyBrushCircle(point, value, stroke.before);
       renderCandidate();
     }
-  }, [activeTool, addGuidePoint, applyBrushCircle, busy, candidateTarget, pointFromEvent, points, pushHistory, renderCandidate, sampleColor, scheduleSegment, setCandidateTarget, setClassification, setClickFeedback, setError, setPoints, setSampleConfirmed, studioState, trunkLayer]);
+  }, [activeTool, addGuidePoint, applyBrushCircle, busy, candidateTarget, isReadOnly, pointFromEvent, points, pushHistory, renderCandidate, sampleColor, scheduleSegment, setCandidateTarget, setClassification, setClickFeedback, setError, setPoints, setSampleConfirmed, studioState, trunkLayer]);
 
   const handleCanvasPointerMove = useCallback((event: KonvaEventObject<PointerEvent>) => {
+    if (isReadOnly) return;
     const stroke = strokeRef.current;
     if (!stroke) return;
     const point = pointFromEvent(event);
@@ -1610,7 +1664,7 @@ export default function AnnotationStudio({
     applyBrushLine(stroke.previousPoint, point, stroke.value, stroke.before);
     stroke.previousPoint = point;
     renderCandidate();
-  }, [applyBrushLine, pointFromEvent, renderCandidate]);
+  }, [applyBrushLine, isReadOnly, pointFromEvent, renderCandidate]);
 
   const handleCanvasPointerUp = useCallback(() => finishStroke(), [finishStroke]);
 
@@ -1638,6 +1692,9 @@ export default function AnnotationStudio({
         await deleteRegionWithStorage(entry.layer.region);
       } catch (reason) {
         cleanupPending = reason instanceof RegionPersistenceError && reason.cleanupPending;
+        if (reason instanceof RegionPersistenceError && reason.cleanupPending && reason.storagePath) {
+          setPendingCleanupPaths((current) => [...new Set([...current, reason.storagePath as string])]);
+        }
         if (!cleanupPending) {
           setError("No se pudo deshacer la aceptación de la capa.");
           historyRef.current.push(entry);
@@ -1702,12 +1759,12 @@ export default function AnnotationStudio({
       ) {
         return;
       }
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !isReadOnly) {
         cancelColorAnalysis(true);
         setPolygonPoints([]);
         setStudioState(trunkLayer ? "exploring-candidates" : "selecting-trunk");
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+      if (!isReadOnly && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) void handleRedo();
         else void handleUndo();
@@ -1715,13 +1772,13 @@ export default function AnnotationStudio({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cancelColorAnalysis, handleRedo, handleUndo, trunkLayer]);
+  }, [cancelColorAnalysis, handleRedo, handleUndo, isReadOnly, trunkLayer]);
 
-  const persistCandidate = async () => {
+  const persistCandidate = async (): Promise<boolean> => {
     const image = workingImageRef.current;
     const mask = candidateMaskRef.current;
     const metadata = candidateMetadata;
-    if (!image || !mask || !metadata || busy) return;
+    if (isReadOnly || !image || !mask || !metadata || busy) return false;
     const trunkBoundary = candidateTarget === "region" && trunkLayer
       ? layerMasksRef.current.get(trunkLayer.region.id)
       : null;
@@ -1729,7 +1786,7 @@ export default function AnnotationStudio({
     const areaPixels = calculateMaskArea(persistedMask);
     if (areaPixels === 0) {
       setError("La máscara candidata está vacía.");
-      return;
+      return false;
     }
     const nextClassification = candidateTarget === "trunk" ? "bark" : classification;
     let selectedMorphotypeId = nextClassification === "lichen" ? morphotypeId : null;
@@ -1737,22 +1794,22 @@ export default function AnnotationStudio({
     if (nextClassification === "lichen") {
       if (!sampledRgb || !sampleConfirmed) {
         setError("Confirma un color visible con el cuentagotas antes de guardar una capa de liquen.");
-        return;
+        return false;
       }
       const selectedColor = rgbToHex(sampledRgb);
       if (showNewMorphotype) {
         if (!newMorphotype.label.trim()) {
           setError("Escribe un nombre para el nuevo morfotipo.");
-          return;
+          return false;
         }
       } else {
         const selected = morphotypes.find((item) => item.id === selectedMorphotypeId);
         if (!selected) {
           setError("Selecciona un morfotipo.");
-          return;
+          return false;
         }
         if (selected.color_hex && selected.color_hex.toUpperCase() !== selectedColor && !window.confirm(`El morfotipo ${selected.label} ya usa ${selected.color_hex}. ¿Reemplazarlo por ${selectedColor}?`)) {
-          return;
+          return false;
         }
       }
     }
@@ -1825,7 +1882,7 @@ export default function AnnotationStudio({
       const region = replacingTrunk
         ? await replaceAcceptedTrunkRegion(replacingTrunk.region, saveInput)
         : await saveAcceptedRegion(saveInput);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) return false;
       layerMasksRef.current.set(region.id, persistedMask.slice());
       const layer: StudioLayer = {
         region,
@@ -1862,12 +1919,17 @@ export default function AnnotationStudio({
           if (mountedRef.current) setStudioState("exploring-candidates");
         }, 1800);
       }
+      return true;
     } catch (reason) {
       if (mountedRef.current) {
+        if (reason instanceof RegionPersistenceError && reason.cleanupPending && reason.storagePath) {
+          setPendingCleanupPaths((current) => [...new Set([...current, reason.storagePath as string])]);
+        }
         setBusy(null);
         setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo guardar la capa.");
         setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "classifying-region");
       }
+      return false;
     }
   };
 
@@ -1889,11 +1951,11 @@ export default function AnnotationStudio({
     renderLayers(layers, layer.region.id);
   }, [layers, renderLayers, setClassification, setMorphotypeId, setSelectedLayerId, setStudioState]);
 
-  const saveSelectedLayerClassification = useCallback(async () => {
-    if (!selectedLayer || busy || isTrunkLayer(selectedLayer)) return;
+  const saveSelectedLayerClassification = useCallback(async (): Promise<boolean> => {
+    if (isReadOnly || !selectedLayer || busy || isTrunkLayer(selectedLayer)) return false;
     if (classification === "lichen" && !morphotypeId) {
       setError("Selecciona un morfotipo.");
-      return;
+      return false;
     }
     setBusy("save");
     try {
@@ -1909,11 +1971,13 @@ export default function AnnotationStudio({
       refreshLayerCanvases(sortLayers(next), region.id);
       setLastSavedMessage("Clasificación de la capa actualizada.");
       setBusy(null);
+      return true;
     } catch {
       setBusy(null);
       setError("No se pudo actualizar la clasificación.");
+      return false;
     }
-  }, [annotationSetId, busy, classification, layers, morphotypeId, morphotypes, refreshLayerCanvases, selectedLayer]);
+  }, [annotationSetId, busy, classification, isReadOnly, layers, morphotypeId, morphotypes, refreshLayerCanvases, selectedLayer]);
 
   const renameLayer = async (layer: StudioLayer) => {
     if (busy || isTrunkLayer(layer)) return;
@@ -1977,6 +2041,9 @@ export default function AnnotationStudio({
       await deleteRegionWithStorage(layer.region);
     } catch (reason) {
       cleanupPending = reason instanceof RegionPersistenceError && reason.cleanupPending;
+      if (reason instanceof RegionPersistenceError && reason.cleanupPending && reason.storagePath) {
+        setPendingCleanupPaths((current) => [...new Set([...current, reason.storagePath as string])]);
+      }
       if (!cleanupPending) {
         setBusy(null);
         setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo eliminar la capa.");
@@ -2007,6 +2074,104 @@ export default function AnnotationStudio({
     }
   };
 
+  const retryPendingCleanup = async () => {
+    if (busy || pendingCleanupPaths.length === 0) return;
+    setBusy("cleanup");
+    const results = await Promise.all(pendingCleanupPaths.map(async (storagePath) => {
+      try {
+        await retryMaskCleanup(storagePath);
+        return { storagePath, succeeded: true };
+      } catch {
+        return { storagePath, succeeded: false };
+      }
+    }));
+    const remaining = results.filter((result) => !result.succeeded).map((result) => result.storagePath);
+    setPendingCleanupPaths(remaining);
+    setBusy(null);
+    if (remaining.length > 0) {
+      setError("No se pudo completar toda la limpieza pendiente. Puedes volver a intentarlo.");
+    } else {
+      setError(null);
+      setLastSavedMessage("Borrador guardado");
+    }
+  };
+
+  const finalizeEvaluation = async () => {
+    if (isReadOnly || busy) return;
+    setNoPendingImages(false);
+    if (pendingCleanupPaths.length > 0) {
+      setError("Completa las operaciones de limpieza pendientes antes de finalizar.");
+      return;
+    }
+    if (candidateMetadata || polygonPoints.length > 0 || points.length > 0) {
+      setError("Confirma o descarta la región pendiente antes de finalizar.");
+      return;
+    }
+    if (error) {
+      setError("Resuelve o descarta el error actual antes de finalizar.");
+      return;
+    }
+    if (selectedLayerHasUnsavedClassification && !await saveSelectedLayerClassification()) return;
+
+    setBusy("complete");
+    setError(null);
+    try {
+      const result = await finalizeAnnotationSet(annotationSetId, imageId);
+      const evaluatedRegions = result.regions.filter((region) => region.region_role !== "trunk");
+      const lichenRegions = evaluatedRegions.filter((region) => region.classification === "lichen");
+      const usedMorphotypeIds = new Set(lichenRegions.flatMap((region) => region.morphotype_id ? [region.morphotype_id] : []));
+      setCompletionSummary({
+        completedAt: result.annotationSet.completed_at ?? new Date().toISOString(),
+        evaluatedRegionCount: evaluatedRegions.length,
+        lichenRegionCount: lichenRegions.length,
+        morphotypeLabels: result.morphotypes.filter((morphotype) => usedMorphotypeIds.has(morphotype.id)).map((morphotype) => morphotype.label),
+        coveragePercent: coverage.coveragePercent,
+      });
+      setLastSavedMessage("Evaluación guardada correctamente");
+      setStudioState("reviewing-layers");
+      setActiveTool("select");
+      setBusy(null);
+      onAnnotationSetChange(result.annotationSet);
+    } catch (reason) {
+      setBusy(null);
+      setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo finalizar la evaluación. El borrador se conserva.");
+    }
+  };
+
+  const reopenEvaluation = async () => {
+    if (!isReadOnly || busy) return;
+    if (!window.confirm("Esta evaluación está completada. ¿Deseas reabrirla para editar?")) return;
+    setBusy("reopen");
+    setError(null);
+    try {
+      const reopened = await reopenAnnotationSet(annotationSetId, imageId);
+      setCompletionSummary(null);
+      setNoPendingImages(false);
+      setLastSavedMessage("Borrador guardado");
+      setBusy(null);
+      onAnnotationSetChange(reopened);
+    } catch (reason) {
+      setBusy(null);
+      setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo reabrir la evaluación.");
+    }
+  };
+
+  const evaluateNextImage = async () => {
+    if (busy) return;
+    setBusy("loading");
+    setNoPendingImages(false);
+    try {
+      const found = await onEvaluateNext();
+      if (!found) {
+        setNoPendingImages(true);
+        setBusy(null);
+      }
+    } catch {
+      setBusy(null);
+      setError("No se pudo buscar la siguiente imagen pendiente.");
+    }
+  };
+
   const stageOrigin = workingImage ? {
     x: (stageSize.width - workingImage.width * displayScale) / 2 + view.x,
     y: (stageSize.height - workingImage.height * displayScale) / 2 + view.y,
@@ -2018,13 +2183,69 @@ export default function AnnotationStudio({
         <div>
           <h1 className="text-xl font-semibold">Annotation Studio</h1>
           <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>{imageName}</p>
+          {isReadOnly ? <p className="mt-1 text-sm font-semibold text-green-800">Evaluación completada</p> : null}
         </div>
-        <button type="button" onClick={() => { cancelColorAnalysis(false); onChooseAnotherImage(); }} className="rounded border px-3 py-2 text-sm focus-visible:outline-2" style={{ borderColor: "var(--ld-border)" }}>
+        <button type="button" onClick={() => {
+          if (pendingCleanupPaths.length > 0) {
+            setError("Completa la limpieza pendiente antes de elegir otra imagen.");
+            return;
+          }
+          if (hasUnsavedChanges && !window.confirm("Hay cambios sin guardar. ¿Deseas elegir otra imagen y conservar solo el borrador ya guardado?")) return;
+          cancelColorAnalysis(false);
+          onChooseAnotherImage();
+        }} className="rounded border px-3 py-2 text-sm focus-visible:outline-2" style={{ borderColor: "var(--ld-border)" }}>
           Elegir otra imagen
         </button>
       </header>
 
-      <div className="sticky top-0 z-20 rounded border bg-white p-3 shadow-sm" style={{ borderColor: "var(--ld-border)" }}>
+      <section className="sticky top-0 z-30 rounded border bg-white p-3 shadow-md" style={{ borderColor: "var(--ld-border)" }}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="font-semibold">{isReadOnly ? "Evaluación completada" : hasUnsavedChanges ? "Cambios sin guardar" : "Borrador guardado"}</p>
+            {isReadOnly && completedAt ? <p className="text-xs" style={{ color: "var(--ld-text-secondary)" }}>{new Date(completedAt).toLocaleString()}</p> : null}
+          </div>
+          {isReadOnly ? (
+            <button type="button" disabled={Boolean(busy)} onClick={() => void reopenEvaluation()} className="rounded border px-4 py-2 text-sm font-semibold disabled:opacity-50" style={{ borderColor: "var(--ld-border)" }}>
+              {busy === "reopen" ? "Reabriendo…" : "Editar evaluación"}
+            </button>
+          ) : (
+            <button type="button" aria-busy={busy === "complete"} disabled={Boolean(busy)} onClick={() => void finalizeEvaluation()} className="studio-primary rounded border px-5 py-3 text-sm font-semibold disabled:opacity-50">
+              {busy === "complete" ? "Finalizando evaluación…" : "Finalizar y guardar evaluación"}
+            </button>
+          )}
+        </div>
+        {pendingCleanupPaths.length > 0 ? (
+          <button type="button" disabled={Boolean(busy)} onClick={() => void retryPendingCleanup()} className="mt-2 rounded border px-3 py-2 text-sm font-semibold text-amber-800 disabled:opacity-50" style={{ borderColor: "var(--ld-border)" }}>
+            {busy === "cleanup" ? "Reintentando limpieza…" : "Reintentar limpieza pendiente"}
+          </button>
+        ) : null}
+      </section>
+
+      {completionSummary ? (
+        <section className="rounded border border-green-200 bg-green-50 p-4 text-sm text-green-950" aria-live="polite">
+          <h2 className="text-base font-semibold">Evaluación guardada correctamente</h2>
+          <dl className="mt-3 grid gap-x-4 gap-y-1 sm:grid-cols-[max-content_1fr]">
+            <dt className="font-semibold">Proyecto</dt><dd>{imageContext.projectName}</dd>
+            <dt className="font-semibold">Sitio</dt><dd>{imageContext.siteName}</dd>
+            <dt className="font-semibold">Jornada de muestreo</dt><dd>{imageContext.samplingEventName}</dd>
+            <dt className="font-semibold">Árbol o muestra</dt><dd>{imageContext.treeCode}</dd>
+            <dt className="font-semibold">Nombre de imagen</dt><dd>{imageName}</dd>
+            <dt className="font-semibold">Regiones evaluadas</dt><dd>{completionSummary.evaluatedRegionCount}</dd>
+            <dt className="font-semibold">Regiones de liquen</dt><dd>{completionSummary.lichenRegionCount}</dd>
+            <dt className="font-semibold">Morfotipos</dt><dd>{completionSummary.morphotypeLabels.join(", ") || "Ninguno"}</dd>
+            <dt className="font-semibold">Cobertura provisional</dt><dd>{completionSummary.coveragePercent == null ? "Sin datos" : `${completionSummary.coveragePercent.toFixed(1)}%`}</dd>
+            <dt className="font-semibold">Fecha de finalización</dt><dd>{new Date(completionSummary.completedAt).toLocaleString()}</dd>
+          </dl>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" onClick={onViewEvaluated} className="rounded border bg-white px-3 py-2 font-semibold" style={{ borderColor: "var(--ld-border)" }}>Ver imágenes evaluadas</button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => void evaluateNextImage()} className="studio-primary rounded border px-3 py-2 font-semibold disabled:opacity-50">Evaluar siguiente imagen</button>
+          </div>
+          {noPendingImages ? <p className="mt-3 font-semibold">No quedan imágenes pendientes en este sitio.</p> : null}
+        </section>
+      ) : null}
+
+      <fieldset disabled={isReadOnly} className="contents">
+      <div className="rounded border bg-white p-3 shadow-sm" style={{ borderColor: "var(--ld-border)" }}>
         <p className="text-base font-semibold">Paso {currentStep} de 4 — {STEP_LABELS[currentStep - 1]}</p>
         <ol className="mt-2 grid gap-2 text-xs sm:grid-cols-4" aria-label="Flujo de trabajo">
           {STEP_LABELS.map((label, index) => {
@@ -2210,7 +2431,12 @@ export default function AnnotationStudio({
             {STATE_STATUS[studioState]}
           </p>
           {lastSavedMessage ? <p className="mt-2 rounded border border-green-200 bg-green-50 p-2 text-sm text-green-800" aria-live="polite">{lastSavedMessage}</p> : null}
-          {error ? <p className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700" role="alert">{error}</p> : null}
+          {error ? (
+            <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700" role="alert">
+              <p>{error}</p>
+              {!isReadOnly ? <button type="button" onClick={() => setError(null)} className="mt-2 rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold">Descartar aviso</button> : null}
+            </div>
+          ) : null}
         </main>
 
         <aside className="space-y-3">
@@ -2475,6 +2701,7 @@ export default function AnnotationStudio({
           </section>
         </aside>
       </div>
+      </fieldset>
     </div>
   );
 }

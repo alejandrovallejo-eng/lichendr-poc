@@ -272,7 +272,7 @@ export async function recalculateEvaluationMetrics(
         if (error || !data?.signedUrl) throw new Error("signed_mask_unavailable");
         return data.signedUrl;
       }));
-    } catch (reason) {
+    } catch {
       signal?.throwIfAborted();
       metricSummary = {
         trunkAreaPixels: null,

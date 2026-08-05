@@ -164,6 +164,29 @@ export async function loadAnnotationState(imageId: string): Promise<AnnotationSt
   };
 }
 
+export async function ensureAnnotationSetForImage(
+  imageId: string,
+  defaults?: Partial<Pick<AnnotationSetDraft, "method" | "status" | "gridRows" | "gridColumns" | "roiX" | "roiY" | "roiWidth" | "roiHeight" | "notes">>,
+): Promise<AnnotationSetRow> {
+  const state = await loadAnnotationState(imageId);
+  if (state.annotationSet) {
+    return state.annotationSet;
+  }
+
+  return upsertAnnotationSet({
+    imageId,
+    method: defaults?.method ?? "manual_free_points",
+    status: defaults?.status ?? "draft",
+    gridRows: defaults?.gridRows ?? 10,
+    gridColumns: defaults?.gridColumns ?? 10,
+    roiX: defaults?.roiX ?? 0,
+    roiY: defaults?.roiY ?? 0,
+    roiWidth: defaults?.roiWidth ?? 1,
+    roiHeight: defaults?.roiHeight ?? 1,
+    notes: defaults?.notes ?? null,
+  });
+}
+
 export async function upsertAnnotationSet(payload: AnnotationSetDraft): Promise<AnnotationSetRow> {
   await ensureSession();
 

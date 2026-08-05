@@ -5,7 +5,6 @@ import { supabase } from "@/lib/supabase/client";
 import type { Database } from "@/types/supabase";
 
 export const ANNOTATION_REGION_CLASSES = ["lichen", "bark", "moss", "algae", "shadow", "glare", "unknown"] as const;
-export const AI_ANNOTATION_METHOD = "ai_assisted_segmentation" as const;
 export const SIGNED_URL_TTL_SECONDS = 10 * 60;
 const MASK_BUCKET = "lichen-images";
 const MAX_MASK_BYTES = 10 * 1024 * 1024;
@@ -112,58 +111,6 @@ export async function createTemporaryUrl(storagePath: string): Promise<string> {
   return data.signedUrl;
 }
 
-export async function findOrCreateAiAnnotationSet(imageId: string): Promise<AnnotationSetRow> {
-  assertUuid(imageId, "La imagen");
-  await ensureSession();
-
-  const { data: existing, error: existingError } = await supabase
-    .from("annotation_sets")
-    .select("*")
-    .eq("image_id", imageId)
-    .eq("method", AI_ANNOTATION_METHOD)
-    .eq("status", "draft")
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (existingError) throw existingError;
-  if (existing?.[0]) return existing[0];
-
-  const { data: allSets, error: allSetsError } = await supabase
-    .from("annotation_sets")
-    .select("version")
-    .eq("image_id", imageId);
-  if (allSetsError) throw allSetsError;
-  const version = Math.max(0, ...(allSets ?? []).map((set) => set.version)) + 1;
-  const { data, error } = await supabase
-    .from("annotation_sets")
-    .insert({
-      image_id: imageId,
-      method: AI_ANNOTATION_METHOD,
-      status: "draft",
-      version,
-      grid_rows: 2,
-      grid_columns: 2,
-      roi_x: 0,
-      roi_y: 0,
-      roi_width: 1,
-      roi_height: 1,
-      notes: "Capas aceptadas con MobileSAM.",
-    })
-    .select("*")
-    .single();
-  if (!error) return data;
-
-  const { data: retry, error: retryError } = await supabase
-    .from("annotation_sets")
-    .select("*")
-    .eq("image_id", imageId)
-    .eq("method", AI_ANNOTATION_METHOD)
-    .eq("status", "draft")
-    .order("created_at", { ascending: true })
-    .limit(1);
-  if (retryError || !retry?.[0]) throw error;
-  return retry[0];
-}
-
 export async function loadAiAnnotationState(annotationSetId: string): Promise<{ regions: AnnotationRegionRow[]; morphotypes: MorphotypeRow[] }> {
   assertUuid(annotationSetId, "El conjunto de anotación");
   await ensureSession();
@@ -176,7 +123,7 @@ export async function loadAiAnnotationState(annotationSetId: string): Promise<{ 
   return { regions: regions ?? [], morphotypes: morphotypes ?? [] };
 }
 
-export async function assertAiAnnotationSetForImage(annotationSetId: string, imageId: string): Promise<void> {
+export async function assertAnnotationSetForImage(annotationSetId: string, imageId: string): Promise<void> {
   assertUuid(annotationSetId, "El conjunto de anotación");
   assertUuid(imageId, "La imagen");
   await ensureSession();
@@ -185,9 +132,8 @@ export async function assertAiAnnotationSetForImage(annotationSetId: string, ima
     .select("id")
     .eq("id", annotationSetId)
     .eq("image_id", imageId)
-    .eq("method", AI_ANNOTATION_METHOD)
     .maybeSingle();
-  if (error || !data) throw new Error("El conjunto de capas IA no está disponible.");
+  if (error || !data) throw new Error("El conjunto de anotación no está disponible para esta imagen.");
 }
 
 export async function createMorphotypeForAnnotationSet(
@@ -220,12 +166,14 @@ export async function createMorphotypeForAnnotationSet(
 }
 
 export async function saveAcceptedRegion(input: RegionSaveInput): Promise<AnnotationRegionRow> {
-  assertUuid(input.id, "La capa");
-  assertUuid(input.annotationSetId, "El conjunto de anotación");
+  const regionId = input.id;
+  const annotationSetId = input.annotationSetId;
+  const morphotypeId = input.classification === "lichen" ? input.morphotypeId : null;
+  assertUuid(regionId, "La capa");
+  assertUuid(annotationSetId, "El conjunto de anotación");
   assertClassification(input.classification);
-  if (input.classification === "lichen" && !input.morphotypeId) throw new Error("Selecciona un morfotipo para la capa de líquen.");
-  if (input.classification !== "lichen" && input.morphotypeId) throw new Error("Solo las capas de líquen pueden tener morfotipo.");
-  if (input.morphotypeId) assertUuid(input.morphotypeId, "El morfotipo");
+  if (input.classification === "lichen" && !morphotypeId) throw new Error("Selecciona un morfotipo para la capa de líquen.");
+  if (morphotypeId) assertUuid(morphotypeId, "El morfotipo");
   if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || input.width <= 0 || input.height <= 0 || !Number.isInteger(input.areaPixels) || input.areaPixels <= 0 || !Number.isFinite(input.score) || input.score < 0 || !input.modelName.trim()) {
     throw new Error("Los metadatos de la máscara no son válidos.");
   }
@@ -234,23 +182,24 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   await assertPngMask(input.mask);
   await ensureSession();
   const { data: userData, error: userError } = await supabase.auth.getUser();
-  if (userError || !userData.user?.id) throw new Error("No se pudo validar el usuario.");
-  const path = `${userData.user.id}/annotations/${input.annotationSetId}/${input.id}.png`;
-  const { error: uploadError } = await supabase.storage.from(MASK_BUCKET).upload(path, input.mask, { contentType: "image/png", upsert: false });
-  if (uploadError) throw new RegionPersistenceError("No se pudo subir la máscara. Puedes reintentar.", input.id, false);
+  const user = userData.user;
+  if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");
+  const maskPath = `${user.id}/annotations/${annotationSetId}/${regionId}.png`;
+  const { error: uploadError } = await supabase.storage.from(MASK_BUCKET).upload(maskPath, input.mask, { contentType: "image/png", upsert: false });
+  if (uploadError) throw new RegionPersistenceError("No se pudo subir la máscara. Puedes reintentar.", regionId, false);
 
   const { data, error } = await supabase
     .from("annotation_regions")
     .insert({
-      id: input.id,
-      annotation_set_id: input.annotationSetId,
+      id: regionId,
+      annotation_set_id: annotationSetId,
       classification: input.classification,
-      morphotype_id: input.morphotypeId,
+      morphotype_id: morphotypeId,
       source: "mobile_sam",
       model_name: input.modelName.trim(),
       model_version: input.modelVersion,
       mask_bucket: MASK_BUCKET,
-      mask_path: path,
+      mask_path: maskPath,
       mask_width_px: input.width,
       mask_height_px: input.height,
       area_pixels: input.areaPixels,
@@ -264,10 +213,10 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
     .single();
   if (!error) return data;
 
-  const { error: cleanupError } = await supabase.storage.from(MASK_BUCKET).remove([path]);
+  const { error: cleanupError } = await supabase.storage.from(MASK_BUCKET).remove([maskPath]);
   throw new RegionPersistenceError(
-    cleanupError ? `Limpieza pendiente de la capa ${input.id}. Usa reintentar sin crear otra capa.` : "No se pudo guardar la capa; la máscara subida fue limpiada.",
-    input.id,
+    cleanupError ? `Limpieza pendiente de la capa ${regionId}. Usa reintentar sin crear otra capa.` : "No se pudo guardar la capa; la máscara subida fue limpiada.",
+    regionId,
     Boolean(cleanupError),
   );
 }
@@ -281,17 +230,17 @@ export async function updateRegionClassification(
   assertUuid(regionId, "La capa");
   assertUuid(annotationSetId, "El conjunto de anotación");
   assertClassification(classification);
-  if (classification === "lichen" && !morphotypeId) throw new Error("Selecciona un morfotipo para la capa de líquen.");
-  if (classification !== "lichen" && morphotypeId) throw new Error("Solo las capas de líquen pueden tener morfotipo.");
+  const normalizedMorphotypeId = classification === "lichen" ? morphotypeId : null;
+  if (classification === "lichen" && !normalizedMorphotypeId) throw new Error("Selecciona un morfotipo para la capa de líquen.");
   await ensureSession();
-  if (morphotypeId) {
-    assertUuid(morphotypeId, "El morfotipo");
-    const { data, error } = await supabase.from("morphotypes").select("id").eq("id", morphotypeId).eq("annotation_set_id", annotationSetId).maybeSingle();
+  if (normalizedMorphotypeId) {
+    assertUuid(normalizedMorphotypeId, "El morfotipo");
+    const { data, error } = await supabase.from("morphotypes").select("id").eq("id", normalizedMorphotypeId).eq("annotation_set_id", annotationSetId).maybeSingle();
     if (error || !data) throw new Error("El morfotipo no pertenece a este conjunto de anotación.");
   }
   const { data, error } = await supabase
     .from("annotation_regions")
-    .update({ classification, morphotype_id: morphotypeId })
+    .update({ classification, morphotype_id: normalizedMorphotypeId })
     .eq("id", regionId)
     .eq("annotation_set_id", annotationSetId)
     .select("*")
@@ -307,9 +256,5 @@ export async function deleteRegionWithStorage(region: AnnotationRegionRow): Prom
   const { error: storageError } = await supabase.storage.from(MASK_BUCKET).remove([region.mask_path]);
   if (!storageError) return;
 
-  const { error: restoreError } = await supabase.from("annotation_regions").insert(region);
-  if (restoreError) {
-    throw new RegionPersistenceError("Limpieza pendiente de la capa eliminada. Conserva el identificador de la capa para reintentar.", region.id, true);
-  }
-  throw new Error("No se pudo eliminar la máscara; la capa se conservó para poder reintentar.");
+  throw new RegionPersistenceError("Limpieza pendiente de la capa eliminada. Conserva el identificador de la capa para reintentar.", region.id, true);
 }

@@ -8,6 +8,7 @@ import {
   completeAnnotationSet,
   deleteAnnotationPoint,
   deleteMorphotype,
+  ensureAnnotationSetForImage,
   getImageRecord,
   getSignedImageUrl,
   listAccessibleImages,
@@ -26,6 +27,10 @@ import {
   type MorphotypeRow,
   type AccessibleImageRecord,
 } from "@/modules/annotations/client";
+import AiLayersWorkflow from "@/modules/annotations/AiLayersWorkflow";
+import VisionLab from "@/modules/vision-lab/VisionLab";
+
+export type AnnotationTool = "manual" | "ai" | "layers";
 
 interface LocalPointState {
   pointIndex: number;
@@ -129,11 +134,17 @@ function getNextAvailablePointIndex(existingPoints: Record<number, LocalPointSta
   return candidate;
 }
 
-export default function AnnotationsWorkflow() {
+interface AnnotationsWorkflowProps {
+  initialImageId?: string | null;
+  initialTool?: AnnotationTool;
+}
+
+export default function AnnotationsWorkflow({ initialImageId = null, initialTool = "manual" }: AnnotationsWorkflowProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const imageIdParam = searchParams.get("imageId") ?? null;
+  const imageIdParam = searchParams.get("imageId") ?? initialImageId;
 
+  const [activeTool, setActiveTool] = useState<AnnotationTool>(initialTool);
   const [availableImages, setAvailableImages] = useState<AccessibleImageRecord[]>([]);
   const [selectedImage, setSelectedImage] = useState<AccessibleImageRecord | null>(null);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(imageIdParam);
@@ -160,8 +171,10 @@ export default function AnnotationsWorkflow() {
   const [lastActionStack, setLastActionStack] = useState<ActionRecord[]>([]);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const imageHostRef = useRef<HTMLDivElement | null>(null);
+  const imageLoadRequestIdRef = useRef(0);
 
   const loadAvailableImages = useCallback(async () => {
+    imageLoadRequestIdRef.current += 1;
     setSelectedImage(null);
     setSelectedImageId(null);
     setSignedUrl(null);
@@ -176,6 +189,9 @@ export default function AnnotationsWorkflow() {
     setPendingRoiPoint(null);
     setSelectedPoint(null);
     setImageLoadError(false);
+    setIsLoadingState(false);
+    setIsSaving(false);
+    setIsCompleting(false);
     setIsLoadingImages(true);
 
     try {
@@ -190,37 +206,55 @@ export default function AnnotationsWorkflow() {
   }, []);
 
   const loadAnnotationImage = useCallback(async (imageId: string) => {
+    const requestId = imageLoadRequestIdRef.current + 1;
+    imageLoadRequestIdRef.current = requestId;
     setIsLoadingState(true);
     setSaveStatus(null);
     setSelectedImageId(imageId);
+    setSelectedImage(null);
+    setSignedUrl(null);
+    setAnnotationSet(null);
+    setMorphotypes([]);
+    setPointStates({});
+    setIsSaving(false);
+    setIsCompleting(false);
 
     try {
       const image = await getImageRecord(imageId);
+      if (requestId !== imageLoadRequestIdRef.current) return;
       if (!image) {
-        setSelectedImage(null);
-        setSignedUrl(null);
         setSaveStatus({ type: "error", text: "No se encontró la imagen seleccionada." });
-        setIsLoadingState(false);
         return;
       }
 
       const signed = await getSignedImageUrl(image.storage_path);
+      const state = await loadAnnotationState(imageId);
+      const activeAnnotationSet = state.annotationSet ?? await ensureAnnotationSetForImage(imageId, {
+        method: "manual_free_points",
+        status: "draft",
+        gridRows: 10,
+        gridColumns: 10,
+        roiX: 0,
+        roiY: 0,
+        roiWidth: 1,
+        roiHeight: 1,
+      });
+      if (requestId !== imageLoadRequestIdRef.current) return;
+
       setSelectedImage(image);
       setSignedUrl(signed);
       setImageLoadError(false);
-
-      const state = await loadAnnotationState(imageId);
-      setAnnotationSet(state.annotationSet);
+      setAnnotationSet(activeAnnotationSet);
       setMorphotypes(state.morphotypes);
-      setGridRows(state.annotationSet?.grid_rows ?? 10);
-      setGridColumns(state.annotationSet?.grid_columns ?? 10);
+      setGridRows(activeAnnotationSet.grid_rows ?? 10);
+      setGridColumns(activeAnnotationSet.grid_columns ?? 10);
       setRoi({
-        x: state.annotationSet?.roi_x ?? 0,
-        y: state.annotationSet?.roi_y ?? 0,
-        width: state.annotationSet?.roi_width ?? 1,
-        height: state.annotationSet?.roi_height ?? 1,
+        x: activeAnnotationSet.roi_x ?? 0,
+        y: activeAnnotationSet.roi_y ?? 0,
+        width: activeAnnotationSet.roi_width ?? 1,
+        height: activeAnnotationSet.roi_height ?? 1,
       });
-      setAnnotationMode((state.annotationSet?.method as AnnotationMethod | undefined) ?? "manual_free_points");
+      setAnnotationMode((activeAnnotationSet.method as AnnotationMethod | undefined) ?? "manual_free_points");
 
       const nextPointStates: Record<number, LocalPointState> = {};
       for (const point of state.points) {
@@ -239,9 +273,13 @@ export default function AnnotationsWorkflow() {
       setLastActionStack([]);
       setSelectedPoint(null);
     } catch {
-      setSaveStatus({ type: "error", text: "No se pudo cargar la anotación de esta imagen." });
+      if (requestId === imageLoadRequestIdRef.current) {
+        setSaveStatus({ type: "error", text: "No se pudo cargar la anotación de esta imagen." });
+      }
     } finally {
-      setIsLoadingState(false);
+      if (requestId === imageLoadRequestIdRef.current) {
+        setIsLoadingState(false);
+      }
     }
   }, []);
 
@@ -344,7 +382,7 @@ export default function AnnotationsWorkflow() {
   }, [pointEntries.length]);
 
   const handleSelectImage = (imageId: string) => {
-    router.push(`/annotations?imageId=${imageId}`);
+    router.push(`/annotations?imageId=${imageId}&tool=${activeTool}`);
   };
 
   const handleToggleFullImage = () => {
@@ -763,6 +801,7 @@ export default function AnnotationsWorkflow() {
       return;
     }
 
+    const requestId = imageLoadRequestIdRef.current;
     setIsSaving(true);
     setSaveStatus({ type: "info", text: "Guardando anotación..." });
 
@@ -781,12 +820,17 @@ export default function AnnotationsWorkflow() {
       };
 
       const nextAnnotationSet = await upsertAnnotationSet(annotationDraft);
+      if (requestId !== imageLoadRequestIdRef.current) return;
       setAnnotationSet(nextAnnotationSet);
       setSaveStatus({ type: "success", text: status === "completed" ? "Anotación completada correctamente." : "Borrador guardado correctamente." });
     } catch {
-      setSaveStatus({ type: "error", text: "No se pudo guardar la anotación. Puedes reintentar." });
+      if (requestId === imageLoadRequestIdRef.current) {
+        setSaveStatus({ type: "error", text: "No se pudo guardar la anotación. Puedes reintentar." });
+      }
     } finally {
-      setIsSaving(false);
+      if (requestId === imageLoadRequestIdRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -904,9 +948,36 @@ export default function AnnotationsWorkflow() {
 
   return (
     <div>
-      <PageHeader title="Anotaciones manuales" subtitle="Marcación libre y cuadrícula sistemática para imágenes guardadas." />
+      <PageHeader title="Anotaciones" subtitle="Marcación manual y segmentación asistida con MobileSAM para imágenes guardadas." />
 
-      <section className="mb-6 rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
+      <nav className="mb-6 flex flex-wrap gap-2" aria-label="Herramientas de anotación">
+        {([
+          ["manual", "Manual"],
+          ["ai", "Asistencia IA"],
+          ["layers", "Capas"],
+        ] as const).map(([tool, label]) => (
+          <button
+            key={tool}
+            type="button"
+            aria-pressed={activeTool === tool}
+            onClick={() => {
+              setActiveTool(tool);
+              const imageQuery = selectedImageId ? `imageId=${encodeURIComponent(selectedImageId)}&` : "";
+              router.replace(`/annotations?${imageQuery}tool=${tool}`, { scroll: false });
+            }}
+            className="rounded border px-4 py-2 text-sm font-medium"
+            style={{
+              borderColor: activeTool === tool ? "var(--ld-text)" : "var(--ld-border)",
+              background: activeTool === tool ? "var(--ld-sand)" : "var(--ld-card)",
+              color: "var(--ld-text)",
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {activeTool === "manual" ? <section className="mb-6 rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>
         <div className="flex flex-wrap items-center gap-3">
           <span className="rounded-full border px-3 py-1 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
             Modo activo: {annotationMode === "manual_free_points" ? "Marcación libre" : "Cuadrícula sistemática"}
@@ -916,7 +987,7 @@ export default function AnnotationsWorkflow() {
           </span>
         </div>
         <p className="mt-3 text-sm">{annotationMode === "manual_free_points" ? "La marcación libre sirve para registrar ocurrencias y morfotipos; no produce una estimación no sesgada de cobertura." : "La cuadrícula systemic usa puntos fijos dentro del ROI para producir una estimación de cobertura."}</p>
-      </section>
+      </section> : null}
 
       {!selectedImageId ? (
         <section className="mb-6 rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
@@ -933,7 +1004,7 @@ export default function AnnotationsWorkflow() {
         </section>
       ) : null}
 
-      {selectedImageId && selectedImage ? (
+      {selectedImageId && selectedImage && activeTool === "manual" ? (
         <div className="grid gap-6 lg:grid-cols-[1.6fr_0.9fr]">
           <section className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1158,6 +1229,26 @@ export default function AnnotationsWorkflow() {
             </div>
           </section>
         </div>
+      ) : null}
+
+      {selectedImageId && selectedImage && activeTool === "ai" ? (
+        <section className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
+          <h2 className="font-semibold" style={{ color: "var(--ld-text)" }}>Asistencia IA</h2>
+          <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Usa MobileSAM para crear capas asociadas a la imagen y al conjunto de anotación actuales.</p>
+          <div className="mt-4 rounded border p-3" style={{ borderColor: "var(--ld-border)", background: "#fff" }}>
+            <VisionLab
+              embedded
+              imageId={selectedImageId}
+              annotationSetId={annotationSet?.id ?? null}
+              morphotypes={morphotypes}
+              onMorphotypesChange={setMorphotypes}
+            />
+          </div>
+        </section>
+      ) : null}
+
+      {selectedImageId && selectedImage && activeTool === "layers" ? (
+        annotationSet ? <AiLayersWorkflow imageId={selectedImageId} annotationSetId={annotationSet.id} /> : <p className="text-sm">Cargando conjunto de anotación…</p>
       ) : null}
     </div>
   );

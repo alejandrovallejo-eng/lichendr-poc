@@ -58,6 +58,23 @@ function normalizeQualityFlags(value: AnnotationMetricsRow["quality_flags"]): An
   ));
 }
 
+function unavailableMaskSummary(
+  lichenRegionCount: number,
+  flag: "mask_dimension_mismatch" | "signed_mask_unavailable",
+): AnnotationMetricSummary {
+  return {
+    trunkAreaPixels: null,
+    lichenUnionInsideTrunkPixels: null,
+    lichenOutsideTrunkPixels: null,
+    overlappingLichenPixels: null,
+    coveragePercent: null,
+    qualityFlags: [
+      ...(lichenRegionCount === 0 ? ["no_lichen_regions" as const] : []),
+      flag,
+    ],
+  };
+}
+
 export function evaluationQualityFlags(evaluation: AnalysisEvaluation): AnnotationQualityFlag[] {
   if (!evaluation.metrics) return ["summary_pending"];
   return normalizeQualityFlags(evaluation.metrics.quality_flags);
@@ -274,19 +291,10 @@ export async function recalculateEvaluationMetrics(
       }));
     } catch {
       signal?.throwIfAborted();
-      metricSummary = {
-        trunkAreaPixels: null,
-        lichenUnionInsideTrunkPixels: null,
-        lichenOutsideTrunkPixels: null,
-        overlappingLichenPixels: null,
-        coveragePercent: null,
-        qualityFlags: [
-          ...(lichenRegions.length === 0 ? ["no_lichen_regions" as const] : []),
-          "signed_mask_unavailable",
-        ],
-      };
     }
-    if (signedUrls) {
+    if (!signedUrls) {
+      metricSummary = unavailableMaskSummary(lichenRegions.length, "signed_mask_unavailable");
+    } else {
       signal?.throwIfAborted();
       try {
         const masks = await Promise.all(maskRegions.map((region, index) => (
@@ -296,17 +304,10 @@ export async function recalculateEvaluationMetrics(
       } catch (reason) {
         if ((reason as { name?: string }).name === "AbortError") throw reason;
         const incompatibleDimensions = reason instanceof Error && reason.message.includes("dimensiones");
-        metricSummary = {
-          trunkAreaPixels: null,
-          lichenUnionInsideTrunkPixels: null,
-          lichenOutsideTrunkPixels: null,
-          overlappingLichenPixels: null,
-          coveragePercent: null,
-          qualityFlags: [
-            ...(lichenRegions.length === 0 ? ["no_lichen_regions" as const] : []),
-            incompatibleDimensions ? "mask_dimension_mismatch" : "signed_mask_unavailable",
-          ],
-        };
+        metricSummary = unavailableMaskSummary(
+          lichenRegions.length,
+          incompatibleDimensions ? "mask_dimension_mismatch" : "signed_mask_unavailable",
+        );
       }
     }
   }

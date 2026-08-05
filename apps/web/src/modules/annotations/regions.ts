@@ -15,6 +15,7 @@ export type AnnotationRegionRow = Database["public"]["Tables"]["annotation_regio
 export type AnnotationSetRow = Database["public"]["Tables"]["annotation_sets"]["Row"];
 export type MorphotypeRow = Database["public"]["Tables"]["morphotypes"]["Row"];
 export type AnnotationRegionClassification = (typeof ANNOTATION_REGION_CLASSES)[number];
+export type AnnotationRegionSource = "mobile_sam" | "manual" | "color_assisted";
 
 export interface NormalizedPoint {
   x: number;
@@ -37,12 +38,15 @@ export interface RegionSaveInput {
   width: number;
   height: number;
   areaPixels: number;
-  score: number;
+  score: number | null;
   positivePoints: NormalizedPoint[];
   negativePoints: NormalizedPoint[];
   modelName: string;
   modelVersion: string | null;
   notes: string | null;
+  source?: AnnotationRegionSource;
+  representativeColorHex?: string | null;
+  colorToleranceDeltaE?: number | null;
 }
 
 export class RegionPersistenceError extends Error {
@@ -174,8 +178,20 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   assertClassification(input.classification);
   if (input.classification === "lichen" && !morphotypeId) throw new Error("Selecciona un morfotipo para la capa de líquen.");
   if (morphotypeId) assertUuid(morphotypeId, "El morfotipo");
-  if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || input.width <= 0 || input.height <= 0 || !Number.isInteger(input.areaPixels) || input.areaPixels <= 0 || !Number.isFinite(input.score) || input.score < 0 || !input.modelName.trim()) {
+  const source = input.source ?? "mobile_sam";
+  const representativeColorHex = input.representativeColorHex ?? null;
+  const colorToleranceDeltaE = input.colorToleranceDeltaE ?? null;
+  if (!["mobile_sam", "manual", "color_assisted"].includes(source)) {
+    throw new Error("La procedencia de la máscara no es válida.");
+  }
+  if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || input.width <= 0 || input.height <= 0 || !Number.isInteger(input.areaPixels) || input.areaPixels <= 0 || (input.score !== null && (!Number.isFinite(input.score) || input.score < 0)) || !input.modelName.trim()) {
     throw new Error("Los metadatos de la máscara no son válidos.");
+  }
+  if (representativeColorHex && !/^#[0-9A-Fa-f]{6}$/.test(representativeColorHex)) {
+    throw new Error("El color representativo debe usar formato #RRGGBB.");
+  }
+  if (colorToleranceDeltaE !== null && (!Number.isFinite(colorToleranceDeltaE) || colorToleranceDeltaE < 0)) {
+    throw new Error("La tolerancia de color no es válida.");
   }
   assertNormalizedPoints(input.positivePoints);
   assertNormalizedPoints(input.negativePoints);
@@ -195,7 +211,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
       annotation_set_id: annotationSetId,
       classification: input.classification,
       morphotype_id: morphotypeId,
-      source: "mobile_sam",
+      source,
       model_name: input.modelName.trim(),
       model_version: input.modelVersion,
       mask_bucket: MASK_BUCKET,
@@ -204,6 +220,8 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
       mask_height_px: input.height,
       area_pixels: input.areaPixels,
       score: input.score,
+      representative_color_hex: representativeColorHex,
+      color_tolerance_delta_e: colorToleranceDeltaE,
       positive_points: input.positivePoints,
       negative_points: input.negativePoints,
       status: "accepted",

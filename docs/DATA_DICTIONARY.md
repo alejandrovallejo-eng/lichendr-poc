@@ -61,7 +61,8 @@ Relaciones:
 ## Capas de anotación MobileSAM
 
 - `AnnotationRegion`: representa una máscara aceptada como capa independiente de un `AnnotationSet`.
-- Conserva la clasificación existente (`lichen`, `bark`, `moss`, `algae`, `shadow`, `glare` o `unknown`), el morfotipo opcional, la procedencia `mobile_sam`, el nombre y versión del modelo, dimensiones, área, score, prompts positivos/negativos, estado y notas.
+- Conserva la clasificación existente (`lichen`, `bark`, `moss`, `algae`, `shadow`, `glare` o `unknown`), el morfotipo opcional, la procedencia (`mobile_sam`, `manual` o `color_assisted`), el nombre y versión del método/modelo, dimensiones, área, score, prompts positivos/negativos, estado y notas.
+- Las selecciones visuales pueden guardar `representative_color_hex` y la tolerancia no negativa `color_tolerance_delta_e`; ambos campos son opcionales y no implican una identificación automática.
 - `mask_bucket` y `mask_path` identifican el archivo derivado; la ruta es única y no modifica la imagen original.
 - Un morfotipo solo puede asociarse a una capa `lichen` y debe pertenecer al mismo `AnnotationSet`.
 - Las capas admiten los estados `draft`, `accepted` y `rejected`.
@@ -70,4 +71,4 @@ Relaciones:
 
 Las políticas actuales de `lichen-images` permiten leer, crear, actualizar y eliminar una máscara PNG con una ruta que comience por el UID autenticado. Las capas de MobileSAM usan `{auth_uid}/annotations/{annotation_set_id}/{region_id}.png`. No validan los directorios posteriores ni la relación con la imagen; esta fase no modifica esas políticas ni crea objetos en Storage.
 
-El método `ai_assisted_segmentation` conserva capas aceptadas por MobileSAM separadas de las anotaciones por puntos. El área de una capa y los totales por clasificación son provisionales: la cobertura científica futura debe calcular la unión de las máscaras de liquen dentro del área de corteza para evitar doble conteo entre máscaras solapadas.
+El editor visual conserva capas confirmadas por el usuario separadas de las anotaciones por puntos. La cobertura provisional usa la unión de las máscaras de liquen, recortada por la máscara confirmada de tronco, para evitar doble conteo entre máscaras solapadas.

@@ -539,7 +539,7 @@ export type Database = {
           annotation_set_id: string;
           classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id: string | null;
-          source: "mobile_sam";
+          source: "mobile_sam" | "manual" | "color_assisted";
           model_name: string;
           model_version: string | null;
           mask_bucket: string;
@@ -548,6 +548,8 @@ export type Database = {
           mask_height_px: number;
           area_pixels: number;
           score: number | null;
+          representative_color_hex: string | null;
+          color_tolerance_delta_e: number | null;
           positive_points: unknown[];
           negative_points: unknown[];
           status: "draft" | "accepted" | "rejected";
@@ -560,7 +562,7 @@ export type Database = {
           annotation_set_id: string;
           classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;
-          source?: "mobile_sam";
+          source?: "mobile_sam" | "manual" | "color_assisted";
           model_name: string;
           model_version?: string | null;
           mask_bucket?: string;
@@ -569,6 +571,8 @@ export type Database = {
           mask_height_px: number;
           area_pixels: number;
           score?: number | null;
+          representative_color_hex?: string | null;
+          color_tolerance_delta_e?: number | null;
           positive_points?: unknown[];
           negative_points?: unknown[];
           status?: "draft" | "accepted" | "rejected";
@@ -580,7 +584,7 @@ export type Database = {
           annotation_set_id?: string;
           classification?: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;
-          source?: "mobile_sam";
+          source?: "mobile_sam" | "manual" | "color_assisted";
           model_name?: string;
           model_version?: string | null;
           mask_bucket?: string;
@@ -589,6 +593,8 @@ export type Database = {
           mask_height_px?: number;
           area_pixels?: number;
           score?: number | null;
+          representative_color_hex?: string | null;
+          color_tolerance_delta_e?: number | null;
           positive_points?: unknown[];
           negative_points?: unknown[];
           status?: "draft" | "accepted" | "rejected";

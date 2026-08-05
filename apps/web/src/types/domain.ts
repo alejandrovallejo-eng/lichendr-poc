@@ -136,7 +136,7 @@ export interface AnnotationRegion {
   annotationSetId: UUID;
   classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
   morphotypeId?: UUID | null;
-  source: "mobile_sam";
+  source: "mobile_sam" | "manual" | "color_assisted";
   modelName: string;
   modelVersion?: string | null;
   maskBucket: string;
@@ -145,6 +145,8 @@ export interface AnnotationRegion {
   maskHeightPx: number;
   areaPixels: number;
   score?: number | null;
+  representativeColorHex?: string | null;
+  colorToleranceDeltaE?: number | null;
   positivePoints: unknown[];
   negativePoints: unknown[];
   status: "draft" | "accepted" | "rejected";

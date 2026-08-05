@@ -1,0 +1,30 @@
+alter table public.annotation_regions
+  add column if not exists representative_color_hex text,
+  add column if not exists color_tolerance_delta_e numeric;
+
+alter table public.annotation_regions
+  drop constraint if exists annotation_regions_source_allowed;
+
+alter table public.annotation_regions
+  add constraint annotation_regions_source_allowed
+  check (source in ('mobile_sam', 'manual', 'color_assisted'));
+
+alter table public.annotation_regions
+  drop constraint if exists annotation_regions_representative_color_hex_format;
+
+alter table public.annotation_regions
+  add constraint annotation_regions_representative_color_hex_format
+  check (
+    representative_color_hex is null
+    or representative_color_hex ~ '^#[0-9A-Fa-f]{6}$'
+  );
+
+alter table public.annotation_regions
+  drop constraint if exists annotation_regions_color_tolerance_non_negative;
+
+alter table public.annotation_regions
+  add constraint annotation_regions_color_tolerance_non_negative
+  check (
+    color_tolerance_delta_e is null
+    or color_tolerance_delta_e >= 0
+  );

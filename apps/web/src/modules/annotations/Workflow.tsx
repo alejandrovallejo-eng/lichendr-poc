@@ -960,7 +960,11 @@ export default function AnnotationsWorkflow({ initialImageId = null, initialTool
             key={tool}
             type="button"
             aria-pressed={activeTool === tool}
-            onClick={() => setActiveTool(tool)}
+            onClick={() => {
+              setActiveTool(tool);
+              const imageQuery = selectedImageId ? `imageId=${encodeURIComponent(selectedImageId)}&` : "";
+              router.replace(`/annotations?${imageQuery}tool=${tool}`, { scroll: false });
+            }}
             className="rounded border px-4 py-2 text-sm font-medium"
             style={{
               borderColor: activeTool === tool ? "var(--ld-text)" : "var(--ld-border)",

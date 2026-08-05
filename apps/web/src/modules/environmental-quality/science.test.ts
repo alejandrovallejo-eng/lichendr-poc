@@ -55,7 +55,9 @@ function evaluation(
 }
 
 test("marca preparación completa, parcial y faltante sin producir puntaje", () => {
-  assert.ok(buildReadinessChecklist(completeReadiness).every((item) => item.status === "Completo"));
+  const complete = buildReadinessChecklist(completeReadiness);
+  assert.ok(complete.filter((item) => item.key !== "references").every((item) => item.status === "Completo"));
+  assert.equal(complete.find((item) => item.key === "references")?.status, "Parcial");
 
   const partial = buildReadinessChecklist({
     ...completeReadiness,

@@ -352,6 +352,11 @@ export default function EnvironmentalQualityDashboard() {
       });
       setSamplingSaveState("saved");
       await refresh();
+      setSamplingDrafts((current) => {
+        const next = { ...current };
+        delete next[selectedSample.id];
+        return next;
+      });
     } catch (reason) {
       setSamplingSaveState("error");
       setSaveError(reason instanceof Error ? reason.message : "No se pudo guardar el contexto.");
@@ -469,7 +474,7 @@ export default function EnvironmentalQualityDashboard() {
         <article className="rounded-lg border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
           <h3 className="font-semibold">Preparación para comparación y calibración</h3>
           <p className="mt-2 text-sm">La comparación descriptiva es posible para los árboles y sitios representados, pero su comparabilidad científica depende del contexto de muestreo faltante indicado arriba.</p>
-          <p className="mt-2 text-sm">Calibración instrumental: <strong>{pollutants.length > 0 ? `hay ${pollutants.length} mediciones co-localizadas registradas` : "no hay mediciones co-localizadas registradas"}</strong>.</p>
+          <p className="mt-2 text-sm">Datos para una futura calibración instrumental: <strong>{pollutants.length > 0 ? `hay ${pollutants.length} mediciones co-localizadas registradas` : "no hay mediciones co-localizadas registradas"}</strong>. Su existencia no valida por sí sola una calibración.</p>
           {compatiblePollutants.length > 0 ? <p className="mt-2 text-xs text-slate-500">{compatiblePollutants.length} series compatibles por contaminante, unidad y período de promedio. Nunca se convierten ni mezclan ppm, ppb, µg/m³ y mg/m³ automáticamente.</p> : null}
         </article>
       </section>
@@ -534,7 +539,7 @@ export default function EnvironmentalQualityDashboard() {
               <label className="text-sm">pH de corteza<input type="number" min="0" max="14" step="any" value={selectedDraft.barkPh} onChange={(event) => updateSamplingDraft("barkPh", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
               <label className="text-sm">Textura de corteza<input value={selectedDraft.barkTexture} onChange={(event) => updateSamplingDraft("barkTexture", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
               <label className="text-sm">Cobertura de dosel (%)<input type="number" min="0" max="100" step="any" value={selectedDraft.canopyCoverPercent} onChange={(event) => updateSamplingDraft("canopyCoverPercent", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
-              <label className="text-sm">Temperatura del aire (°C)<input type="number" min="-50" max="60" step="any" value={selectedDraft.airTemperatureC} onChange={(event) => updateSamplingDraft("airTemperatureC", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
+              <label className="text-sm">Temperatura del aire (°C)<input type="number" min="-10" max="50" step="any" value={selectedDraft.airTemperatureC} onChange={(event) => updateSamplingDraft("airTemperatureC", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
               <label className="text-sm">Humedad relativa (%)<input type="number" min="0" max="100" step="any" value={selectedDraft.relativeHumidityPercent} onChange={(event) => updateSamplingDraft("relativeHumidityPercent", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
               <label className="text-sm">Uso de suelo / contexto<input value={selectedDraft.landUseClassification} onChange={(event) => updateSamplingDraft("landUseClassification", event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
               <label className="text-sm">¿Candidato a referencia/control?
@@ -586,12 +591,13 @@ export default function EnvironmentalQualityDashboard() {
           <div><dt className="text-xs text-slate-500">Árboles</dt><dd className="font-semibold">{profile.representedTrees}</dd></div>
           <div><dt className="text-xs text-slate-500">Imágenes completadas</dt><dd className="font-semibold">{profile.completedImages}</dd></div>
           <div><dt className="text-xs text-slate-500">Jornadas</dt><dd className="font-semibold">{profile.representedSamplingEvents}</dd></div>
-          <div><dt className="text-xs text-slate-500">Calibración instrumental</dt><dd className="font-semibold">{pollutants.length > 0 ? "Existe" : "No existe"}</dd></div>
+          <div><dt className="text-xs text-slate-500">Mediciones para calibración instrumental</dt><dd className="font-semibold">{pollutants.length > 0 ? "Existen" : "No existen"}</dd></div>
           <div className="sm:col-span-2"><dt className="text-xs text-slate-500">Método / versión</dt><dd className="font-semibold">{profile.calculationMethods.join(", ") || "No calculado"}</dd></div>
           <div><dt className="text-xs text-slate-500">Último cálculo</dt><dd className="font-semibold">{profile.lastCalculatedAt ? new Date(profile.lastCalculatedAt).toLocaleString("es-DO") : "No calculado"}</dd></div>
           <div><dt className="text-xs text-slate-500">Metadatos faltantes</dt><dd className="font-semibold">{missingMetadata.length} criterios</dd></div>
         </dl>
         <p className="mt-3 text-sm"><strong>Alertas:</strong> {profile.qualityFlags.map((flag) => QUALITY_LABELS[flag] ?? flag).join(", ") || "ninguna registrada"}.</p>
+        <p className="mt-2 rounded bg-slate-50 p-3 font-mono text-xs">Cobertura por imagen (%) = píxeles de la unión de liquen dentro del tronco / píxeles del tronco × 100</p>
         <p className="mt-2 rounded bg-slate-50 p-3 font-mono text-xs">Cobertura ponderada (%) = Σ píxeles de la unión de liquen dentro del tronco / Σ píxeles del tronco × 100</p>
       </section>
 

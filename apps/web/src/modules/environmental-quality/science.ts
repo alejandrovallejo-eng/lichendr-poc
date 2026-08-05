@@ -151,8 +151,8 @@ export function buildReadinessChecklist(input: ReadinessInput): ReadinessItem[] 
       label: "Sitios de referencia comparables disponibles",
       status: input.representedSites === 0
         ? "No aplica"
-        : input.candidateReferenceSites > 0 ? "Completo" : "Faltante",
-      detail: `${input.candidateReferenceSites} candidatos entre ${input.representedSites} sitios`,
+        : input.candidateReferenceSites > 0 ? "Parcial" : "Faltante",
+      detail: `${input.candidateReferenceSites} candidatos entre ${input.representedSites} sitios; la comparabilidad requiere revisión`,
     },
     {
       key: "pollutants",
@@ -209,6 +209,9 @@ export function buildDescriptiveProfile(
   const completed = selectCompletedEvaluations(allEvaluations);
   const metrics = completed.flatMap((evaluation) => evaluation.metrics ? [evaluation.metrics] : []);
   const calculatedDates = metrics.map((metric) => metric.calculated_at).sort();
+  const missingMetrics = completed.length - metrics.length;
+  const qualityFlags = new Set(metrics.flatMap((metric) => normalizeQualityFlags(metric.quality_flags)));
+  if (missingMetrics > 0) qualityFlags.add("summary_pending");
   return {
     completedImages: completed.length,
     representedTrees: new Set(completed.map((item) => item.treeId)).size,
@@ -219,9 +222,9 @@ export function buildDescriptiveProfile(
     morphotypeRichness: new Set(completed.flatMap((item) => (
       item.morphotypeLabels.map((label) => label.trim().toLocaleLowerCase()).filter(Boolean)
     ))).size,
-    missingMetrics: completed.length - metrics.length,
+    missingMetrics,
     incompleteMetrics: metrics.filter((metric) => metric.coverage_percent == null).length,
-    qualityFlags: [...new Set(metrics.flatMap((metric) => normalizeQualityFlags(metric.quality_flags)))],
+    qualityFlags: [...qualityFlags],
     excludedRecords: allEvaluations.length - completed.length,
     perTreeCoverage: groupedCoverage(completed, "treeId"),
     perSiteCoverage: groupedCoverage(completed, "siteId"),

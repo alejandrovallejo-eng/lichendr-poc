@@ -152,7 +152,9 @@ export async function saveSamplingContext(input: SaveSamplingContextInput): Prom
       notes: input.notes,
     })
     .eq("id", input.treeSampleId);
-  if (sampleError) throw sampleError;
+  if (sampleError) {
+    throw new Error(`No se guardaron altura, orientación ni notas: ${sampleError.message}`);
+  }
 
   const payload: Database["public"]["Tables"]["tree_sample_scientific_contexts"]["Insert"] = {
     tree_sample_id: input.treeSampleId,
@@ -170,7 +172,9 @@ export async function saveSamplingContext(input: SaveSamplingContextInput): Prom
   const { error } = await supabase
     .from("tree_sample_scientific_contexts")
     .upsert(payload, { onConflict: "tree_sample_id" });
-  if (error) throw error;
+  if (error) {
+    throw new Error(`Se guardaron altura, orientación y notas, pero no los datos científicos adicionales: ${error.message}`);
+  }
 }
 
 export interface SaveSiteContextInput {
@@ -193,7 +197,7 @@ export async function saveSiteContext(input: SaveSiteContextInput): Promise<void
   const { error } = await supabase
     .from("site_environmental_contexts")
     .upsert(payload, { onConflict: "site_id" });
-  if (error) throw error;
+  if (error) throw new Error(`El contexto de la muestra se guardó, pero no el contexto del sitio: ${error.message}`);
 }
 
 export type PollutantCode = PollutantMeasurementRow["pollutant_code"];
@@ -215,6 +219,9 @@ export interface CreatePollutantInput {
 
 export async function createPollutantMeasurement(input: CreatePollutantInput): Promise<void> {
   await ensureSession();
+  if (!input.unit.trim() || !input.dataSource.trim()) {
+    throw new Error("La unidad y la fuente de datos no pueden quedar vacías.");
+  }
   const payload: Database["public"]["Tables"]["pollutant_measurements"]["Insert"] = {
     site_id: input.siteId,
     sampling_event_id: input.samplingEventId,

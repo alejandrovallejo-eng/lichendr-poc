@@ -262,3 +262,96 @@ La migración aditiva `202608050002_create_annotation_metrics.sql` crea `public.
 Las consultas del panel parten de `annotation_sets` con `status = 'completed'` y `completed_at is not null`, y después consultan métricas persistidas. Las agregaciones no descargan máscaras. El recálculo de un resumen anterior obtiene URLs firmadas temporales para las máscaras de esa única evaluación.
 
 `overlapping_lichen_pixels` se calcula dentro del tronco como `Σ popcount(Li AND T) − popcount(union(Li) AND T)`. La unión fuera del tronco se conserva separadamente en `lichen_outside_trunk_pixels`.
+
+## Fase 1 de Calidad Ambiental: contexto y mediciones de contaminantes
+
+La migración aditiva `202608060001_create_environmental_quality_context.sql` no modifica migraciones históricas ni ejecuta migraciones remotas. Antes de crear columnas nuevas, audita y reutiliza los campos ya existentes:
+
+- `public.sites`: `latitude`, `longitude`, `radius_m`, `notes`.
+- `public.sampling_events`: `sampled_at`.
+- `public.trees`: `species_name`, `species_confidence`, `latitude`, `longitude`.
+- `public.tree_samples`: `sampling_height_m`, `trunk_orientation`, `notes`.
+
+Solo agrega almacenamiento normalizado para contexto que faltaba y mediciones de contaminantes opcionales. **No crea ninguna tabla de estimación, índice o puntaje de calidad ambiental.**
+
+### Tabla `public.site_environmental_contexts` (uno a uno con `sites`)
+
+- `site_id`: uuid, clave primaria, referencia `public.sites(id)` con `on delete cascade`.
+- `land_use_classification`: texto libre opcional (no vacío, sin espacios al inicio o al final, máximo 160 caracteres si se proporciona). Sin lista cerrada de valores.
+- `is_reference_candidate`: **booleano opcional**, no un texto con literal `unknown`. `true` = candidato de referencia/control confirmado, `false` = confirmado que no lo es, `NULL` = estado de referencia aún no evaluado ("desconocido" se representa con `NULL`, no con una cadena de texto).
+- `measured_at`: timestamptz opcional (sin valor por defecto).
+- `provenance`: texto libre opcional (no vacío, sin espacios al inicio o al final si se proporciona, máximo 255 caracteres).
+- `created_at` y `updated_at`: timestamptz obligatorios con valor por defecto `now()` y trigger `set_updated_at`.
+
+### Tabla `public.tree_sample_scientific_contexts` (uno a uno con `tree_samples`)
+
+- `tree_sample_id`: uuid, clave primaria, referencia `public.tree_samples(id)` con `on delete cascade`.
+- `sampled_width_cm` y `sampled_height_cm`: double precision opcionales. Restricción exacta: `is null or valor > 0` para cada uno (dimensiones del área de muestra evaluada).
+- `dbh_cm`: double precision opcional (diámetro a la altura del pecho, DAP, del árbol hospedero). Restricción exacta: `dbh_cm is null or dbh_cm > 0`. Es contexto estructural del árbol hospedero medido en el momento del muestreo; no duplica la identidad de especie, que ya se registra en `trees.species_name`/`trees.species_confidence`.
+- `bark_ph`: double precision opcional. Restricción exacta: `bark_ph is null or (bark_ph >= 0 and bark_ph <= 14)`.
+- `bark_texture`: texto libre opcional (no vacío, sin espacios al inicio o al final, máximo 120 caracteres si se proporciona). Sin lista cerrada de valores.
+- `canopy_cover_percent`: double precision opcional. Restricción exacta: `is null or (canopy_cover_percent >= 0 and canopy_cover_percent <= 100)`.
+- `air_temperature_c`: double precision opcional. Restricción exacta: `air_temperature_c is null or (air_temperature_c >= -10 and air_temperature_c <= 50)`. Es un rango operativo de validación de plausibilidad (no un rango científico establecido); ver detalle en `docs/SCIENTIFIC_METHOD.md`.
+- `relative_humidity_percent`: double precision opcional. Restricción exacta: `is null or (relative_humidity_percent >= 0 and relative_humidity_percent <= 100)`.
+- `measured_at`: timestamptz opcional (sin valor por defecto).
+- `provenance`: texto libre opcional (mismas reglas que en `site_environmental_contexts`).
+- `created_at` y `updated_at`: timestamptz obligatorios con valor por defecto `now()` y trigger `set_updated_at`.
+
+### Tabla `public.pollutant_measurements` (cero o varias por sitio; el evento de muestreo es opcional)
+
+- `id`: uuid, clave primaria, generado por `gen_random_uuid()`.
+- `site_id`: uuid obligatorio, referencia `public.sites(id)` con `on delete cascade`.
+- `sampling_event_id`: uuid **opcional (nullable), pero consistente con el sitio cuando se proporciona**. La clave foránea compuesta `pollutant_measurements_sampling_event_site_fk (sampling_event_id, site_id)` reutiliza la restricción única existente `sampling_events_id_site_id_unique` (creada en `202607270004_create_trees_and_tree_samples.sql`). Con `sampling_event_id` nulo, la semántica `MATCH SIMPLE` de PostgreSQL omite la verificación de la clave foránea; cuando se proporciona un valor, debe pertenecer al mismo `site_id` o la inserción falla.
+- `measured_at`: timestamptz obligatorio, sin valor por defecto (debe proporcionarse explícitamente).
+- `pollutant_code`: texto obligatorio con lista cerrada de valores permitidos: `PM2.5`, `PM10`, `NO2`, `SO2`, `NH3`, `O3` o `CO`.
+- `value`: double precision obligatorio. **Sin restricción de signo o rango**: almacena la lectura numérica cruda del instrumento tal como se reporta (la deriva del sensor, los desplazamientos de calibración o los artefactos del instrumento pueden producir lecturas crudas negativas). La confiabilidad se evalúa mediante `qa_qc_status`, no rechazando el valor al insertarlo.
+- `unit`: texto obligatorio, no vacío, sin espacios al inicio o al final, máximo 40 caracteres. **No existe ninguna restricción que combine `pollutant_code` con `unit`, y la migración no convierte unidades.**
+- `averaging_period`: texto opcional (p. ej. `1 h`, `24 h`), sin espacios al inicio o al final si se proporciona, máximo 40 caracteres.
+- `instrument_method`: texto opcional, sin espacios al inicio o al final si se proporciona, máximo 160 caracteres.
+- `data_source`: texto obligatorio, no vacío, sin espacios al inicio o al final, máximo 120 caracteres (sin valor por defecto).
+- `qa_qc_status`: texto obligatorio, valor por defecto `not_assessed`; acepta `not_assessed`, `provisional`, `validated` o `rejected`.
+- `notes`: texto opcional.
+- `created_at` y `updated_at`: timestamptz obligatorios con valor por defecto `now()` y trigger `set_updated_at`.
+
+### Índices creados
+
+- `idx_site_environmental_contexts_is_reference_candidate` sobre `site_environmental_contexts`.
+- `idx_tree_sample_scientific_contexts_measured_at` sobre `tree_sample_scientific_contexts`.
+- `idx_pollutant_measurements_site_id`, `idx_pollutant_measurements_sampling_event_id`, `idx_pollutant_measurements_pollutant_code`, `idx_pollutant_measurements_measured_at_desc` e `idx_pollutant_measurements_qa_qc_status` sobre `pollutant_measurements`.
+
+Las claves primarias de `site_environmental_contexts` y `tree_sample_scientific_contexts` ya proveen el índice de la relación uno a uno con `sites` y `tree_samples` respectivamente.
+
+### Triggers `updated_at`
+
+Las tres tablas reutilizan la función existente `public.set_updated_at()` (no es `SECURITY DEFINER`) mediante `drop trigger if exists set_updated_at ...; create trigger set_updated_at before update ... execute function public.set_updated_at();`, igual que el resto del esquema.
+
+### RLS y propiedad
+
+Las tres tablas habilitan RLS. Cada política se recrea con `drop policy if exists ...;` inmediatamente antes de `create policy ...` para permitir reejecución segura:
+
+- `site_environmental_contexts`: `site_environmental_contexts → sites → projects.owner_id = auth.uid()`.
+- `tree_sample_scientific_contexts`: `tree_sample_scientific_contexts → tree_samples → sites → projects.owner_id = auth.uid()`.
+- `pollutant_measurements`: `pollutant_measurements → sites → projects.owner_id = auth.uid()` (usa `site_id` directo, igual que `tree_samples`).
+
+Las cuatro políticas (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) están limitadas a `to authenticated`. Ninguna función usa `SECURITY DEFINER`.
+
+### Privilegios mínimos
+
+Cada tabla ejecuta `revoke all on table public.<tabla> from anon;` seguido de `grant select, insert, update, delete on public.<tabla> to authenticated;`. `anon` no tiene ningún privilegio sobre estas tablas.
+
+### Por qué el rango de temperatura documentado
+
+`air_temperature_c` (en `tree_sample_scientific_contexts`) acepta valores entre -10 °C y 50 °C. Este es un **rango operativo de validación de plausibilidad** para lecturas de temperatura ambiente de campo, cuyo único propósito es rechazar errores evidentes de captura de datos (p. ej. un dígito mal escrito o una confusión de escala). **No se afirma que Counoy et al. (2025) ni ninguna otra referencia citada establezca científicamente este rango exacto**; ningún estudio citado especifica estos límites numéricos. Los valores fuera de rango se **rechazan**, nunca se recortan (clamp) ni se modifican silenciosamente. La temperatura se registra únicamente como una variable climática descriptiva que ayuda a interpretar la respuesta de los líquenes en el momento y lugar de la muestra; nunca se convierte ni se usa para calcular un índice o estimación ambiental.
+
+### Aviso obligatorio
+
+> Los datos de contexto ambiental y las mediciones de contaminantes almacenados en esta fase son exclusivamente descriptivos y no constituyen un índice, puntaje o estimación de calidad ambiental. LichenDR no calcula ni infiere calidad del aire, contaminación alta o baja, ni conversiones entre unidades de contaminantes. Cualquier interpretación ambiental requiere validación científica adicional por especialistas.
+
+### Referencias científicas
+
+- EN 16413:2014. *Ambient air — Biomonitoring with lichens — Assessing epiphytic lichen diversity.*
+- Counoy, H. et al. (2025). *Towards a New Interpretative Framework for Air Quality and Climate Biomonitoring With Lichens: A Meta-Analysis of Surveys Using the European Protocol.* Global Change Biology. DOI: [10.1111/gcb.70632](https://doi.org/10.1111/gcb.70632).
+- Díaz, J. et al. (2021). *Epiphytic Cryptogams as Bioindicators of Air Quality in a Tropical Andean City.* Sustainability, 13(20), 11218. DOI: [10.3390/su132011218](https://doi.org/10.3390/su132011218).
+- Sebald, J. et al. (2022). *NO2 air pollution drives species composition, but tree traits drive richness/diversity of epiphytic lichens in urban environments.* Environmental Pollution. DOI: [10.1016/j.envpol.2022.119678](https://doi.org/10.1016/j.envpol.2022.119678).
+- Rautiainen, M., Kuusinen, N. & Majasalmi, T. (2024). *Remote sensing and spectroscopy of lichens.* Ecology and Evolution, 14(3), e11110. DOI: [10.1002/ece3.11110](https://doi.org/10.1002/ece3.11110).
+- Cuenca et al. (2026). Atmospheric Pollution Research. DOI: [10.1016/j.apr.2026.103030](https://doi.org/10.1016/j.apr.2026.103030).

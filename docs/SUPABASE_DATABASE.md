@@ -234,3 +234,14 @@ La migración crea `public.annotation_regions` para persistir cada máscara acep
 - Habilita RLS y crea las cuatro políticas de `authenticated` siguiendo `annotation_region → annotation_set → image → tree_sample → site → project → owner_id`.
 
 La migración no modifica Storage. Las políticas existentes del bucket privado `lichen-images` permiten rutas de máscaras PNG cuyo primer directorio sea el UID autenticado, como `auth.uid()/project_id/site_id/event_id/tree_sample_id/masks/uuid.png`; no validan los directorios posteriores.
+
+## Extensión para el editor visual
+
+La migración `202608050001_extend_annotation_regions_for_visual_editor.sql` amplía de forma aditiva `annotation_regions`:
+
+- `source` acepta `mobile_sam`, `manual` y `color_assisted` para conservar la procedencia real de cada máscara confirmada.
+- `representative_color_hex` admite un color opcional en formato `#RRGGBB`.
+- `color_tolerance_delta_e` admite una tolerancia CIELAB Delta E opcional entre 0 y 50.
+- `region_role` identifica opcionalmente el `trunk`; una restricción exige clasificación `bark` y un índice parcial permite un solo tronco aceptado por `annotation_set`.
+
+La selección por color convierte sRGB a CIELAB con iluminante D65 y usa Delta E 1976 (distancia euclidiana en L\*a\*b\*) como ayuda visual. No clasifica especies ni categorías automáticamente. La migración reutiliza el trigger `updated_at` existente y no cambia RLS ni las políticas de Storage.

@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
 import { extractExifMetadata, type ExtractedImageMetadata } from "@/modules/images/exif";
-import { createSignedImageUrl, getImagesForTreeSample, ImagePersistenceError, persistImageWithMetadata, type ImageRecordRow, type ImageUploadProgress } from "@/modules/images/client";
+import { createSignedImageUrl, getImagesForTreeSample, ImagePersistenceError, persistImageWithMetadata, type ImageRecordRow, type ImageRecordWithAnnotationStatus, type ImageUploadProgress } from "@/modules/images/client";
 import { ensureAnonymousSession } from "@/modules/auth/client";
 
 interface ReviewImage {
@@ -109,7 +109,7 @@ export default function ImagesWorkflow() {
   const treeSampleId = searchParams.get("treeSampleId") ?? undefined;
 
   const [images, setImages] = useState<ReviewImage[]>([]);
-  const [savedImages, setSavedImages] = useState<ImageRecordRow[]>([]);
+  const [savedImages, setSavedImages] = useState<ImageRecordWithAnnotationStatus[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -356,7 +356,7 @@ export default function ImagesWorkflow() {
         setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saving-metadata", progress: 100, canRetry: false } : entry));
         const signedUrl = await createSignedImageUrl(persistedRecord.storage_path);
         setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saved", progress: 100, savedRecord: persistedRecord, signedUrl, canRetry: false } : entry));
-        setSavedImages((current) => [persistedRecord, ...current]);
+        setSavedImages((current) => [{ ...persistedRecord, annotationStatus: "not_started" }, ...current]);
       } catch (error) {
         const cleanupError = error instanceof ImagePersistenceError ? error : null;
         const nextState = cleanupError?.phase === "upload"
@@ -614,15 +614,17 @@ export default function ImagesWorkflow() {
           <div className="mt-3 grid gap-3 md:grid-cols-2">
             {savedImages.map((savedImage) => (
               <div key={savedImage.id} className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-                <p className="text-sm font-medium" style={{ color: "var(--ld-text)" }}>{savedImage.original_filename}</p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-medium" style={{ color: "var(--ld-text)" }}>{savedImage.original_filename}</p>
+                  <span className="rounded-full border px-2 py-1 text-xs font-medium" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
+                    {savedImage.annotationStatus === "completed" ? "Evaluada" : savedImage.annotationStatus === "draft" ? "Borrador" : "Sin evaluar"}
+                  </span>
+                </div>
                 <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>{savedImage.caption ?? "Sin caption"}</p>
                 <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Orden: {savedImage.image_order}</p>
                 <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Creada: {new Date(savedImage.created_at).toLocaleString()}</p>
                 <Link href={`/annotations?imageId=${savedImage.id}`} className="mt-3 inline-flex rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
-                  Anotar imagen
-                </Link>
-                <Link href={`/annotations?imageId=${savedImage.id}&tool=ai`} className="mt-3 ml-2 inline-flex rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
-                  Analizar con IA
+                  {savedImage.annotationStatus === "completed" ? "Ver evaluación" : savedImage.annotationStatus === "draft" ? "Continuar anotación" : "Anotar imagen"}
                 </Link>
               </div>
             ))}

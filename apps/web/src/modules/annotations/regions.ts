@@ -54,12 +54,14 @@ export interface RegionSaveInput {
 export class RegionPersistenceError extends Error {
   readonly cleanupPending: boolean;
   readonly regionId: string;
+  readonly storagePath: string | null;
 
-  constructor(message: string, regionId: string, cleanupPending: boolean) {
+  constructor(message: string, regionId: string, cleanupPending: boolean, storagePath: string | null = null) {
     super(message);
     this.name = "RegionPersistenceError";
     this.regionId = regionId;
     this.cleanupPending = cleanupPending;
+    this.storagePath = storagePath;
   }
 }
 
@@ -247,6 +249,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
     cleanupError ? `Limpieza pendiente de la capa ${regionId}. Usa reintentar sin crear otra capa.` : "No se pudo guardar la capa; la máscara subida fue limpiada.",
     regionId,
     Boolean(cleanupError),
+    cleanupError ? maskPath : null,
   );
 }
 
@@ -366,5 +369,11 @@ export async function deleteRegionWithStorage(region: AnnotationRegionRow): Prom
   const { error: storageError } = await supabase.storage.from(MASK_BUCKET).remove([region.mask_path]);
   if (!storageError) return;
 
-  throw new RegionPersistenceError("Limpieza pendiente de la capa eliminada. Conserva el identificador de la capa para reintentar.", region.id, true);
+  throw new RegionPersistenceError("Limpieza pendiente de la capa eliminada. Conserva el identificador de la capa para reintentar.", region.id, true, region.mask_path);
+}
+
+export async function retryMaskCleanup(storagePath: string): Promise<void> {
+  await ensureSession();
+  const { error } = await supabase.storage.from(MASK_BUCKET).remove([storagePath]);
+  if (error) throw new Error("No se pudo completar la limpieza pendiente.");
 }

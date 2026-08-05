@@ -2,6 +2,8 @@ import { ensureAnonymousSession } from "@/modules/auth/client";
 import { supabase } from "@/lib/supabase/client";
 import type { Database } from "@/types/supabase";
 
+const VALID_REGION_CLASSIFICATIONS = ["lichen", "bark", "moss", "algae", "shadow", "glare", "unknown"] as const;
+
 export type AnnotationSetRow = Database["public"]["Tables"]["annotation_sets"]["Row"];
 export type MorphotypeRow = Database["public"]["Tables"]["morphotypes"]["Row"];
 export type AnnotationPointRow = Database["public"]["Tables"]["annotation_points"]["Row"];
@@ -14,9 +16,43 @@ export type AnnotationPointConfidenceLevel = "low" | "medium" | "high";
 
 export interface AccessibleImageRecord {
   id: string;
+  tree_sample_id: string;
   original_filename: string;
   created_at: string;
   storage_path: string;
+}
+
+export type ImageEvaluationStatus = "not_started" | "draft" | "completed";
+
+export interface AnnotationImageContext {
+  treeSampleId: string;
+  treeId: string;
+  treeCode: string;
+  samplingEventId: string;
+  samplingEventName: string;
+  sampledAt: string;
+  siteId: string;
+  siteName: string;
+  projectId: string;
+  projectName: string;
+}
+
+export interface AnnotationImageListItem extends AccessibleImageRecord {
+  annotationSetId: string | null;
+  annotationStatus: ImageEvaluationStatus;
+  completedAt: string | null;
+  context: AnnotationImageContext;
+  regionCount: number;
+  evaluatedRegionCount: number;
+  lichenRegionCount: number;
+  morphotypeLabels: string[];
+  provisionalCoveragePercent: number | null;
+}
+
+export interface AnnotationCompletionResult {
+  annotationSet: AnnotationSetRow;
+  regions: Database["public"]["Tables"]["annotation_regions"]["Row"][];
+  morphotypes: MorphotypeRow[];
 }
 
 export interface AnnotationSetDraft {
@@ -92,7 +128,7 @@ export async function listAccessibleImages(): Promise<AccessibleImageRecord[]> {
 
   const { data, error } = await supabase
     .from("images")
-    .select("id, original_filename, created_at, storage_path")
+    .select("id, tree_sample_id, original_filename, created_at, storage_path")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -100,6 +136,125 @@ export async function listAccessibleImages(): Promise<AccessibleImageRecord[]> {
   }
 
   return (data ?? []) as AccessibleImageRecord[];
+}
+
+export async function listAnnotationImages(): Promise<AnnotationImageListItem[]> {
+  const images = await listAccessibleImages();
+  if (images.length === 0) return [];
+
+  const imageIds = images.map((image) => image.id);
+  const treeSampleIds = [...new Set(images.map((image) => image.tree_sample_id))];
+  const [{ data: annotationSets, error: annotationSetsError }, { data: treeSamples, error: treeSamplesError }] = await Promise.all([
+    supabase
+      .from("annotation_sets")
+      .select("id, image_id, status, completed_at")
+      .eq("version", 1)
+      .in("image_id", imageIds),
+    supabase
+      .from("tree_samples")
+      .select("id, tree_id, sampling_event_id, site_id")
+      .in("id", treeSampleIds),
+  ]);
+  if (annotationSetsError) throw annotationSetsError;
+  if (treeSamplesError) throw treeSamplesError;
+
+  const samples = treeSamples ?? [];
+  const treeIds = [...new Set(samples.map((sample) => sample.tree_id))];
+  const eventIds = [...new Set(samples.map((sample) => sample.sampling_event_id))];
+  const siteIds = [...new Set(samples.map((sample) => sample.site_id))];
+  const annotationSetIds = (annotationSets ?? []).map((annotationSet) => annotationSet.id);
+  const [
+    { data: trees, error: treesError },
+    { data: events, error: eventsError },
+    { data: sites, error: sitesError },
+    regionsResult,
+    morphotypesResult,
+  ] = await Promise.all([
+    supabase.from("trees").select("id, code").in("id", treeIds),
+    supabase.from("sampling_events").select("id, name, sampled_at").in("id", eventIds),
+    supabase.from("sites").select("id, name, project_id").in("id", siteIds),
+    annotationSetIds.length > 0
+      ? supabase
+        .from("annotation_regions")
+        .select("id, annotation_set_id, classification, morphotype_id, region_role, area_pixels, status")
+        .in("annotation_set_id", annotationSetIds)
+      : Promise.resolve({ data: [], error: null }),
+    annotationSetIds.length > 0
+      ? supabase
+        .from("morphotypes")
+        .select("id, annotation_set_id, label")
+        .in("annotation_set_id", annotationSetIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (treesError) throw treesError;
+  if (eventsError) throw eventsError;
+  if (sitesError) throw sitesError;
+  if (regionsResult.error) throw regionsResult.error;
+  if (morphotypesResult.error) throw morphotypesResult.error;
+
+  const projectIds = [...new Set((sites ?? []).map((site) => site.project_id))];
+  const { data: projects, error: projectsError } = projectIds.length > 0
+    ? await supabase.from("projects").select("id, name").in("id", projectIds)
+    : { data: [], error: null };
+  if (projectsError) throw projectsError;
+
+  const annotationSetByImageId = new Map((annotationSets ?? []).map((annotationSet) => [annotationSet.image_id, annotationSet]));
+  const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
+  const treeById = new Map((trees ?? []).map((tree) => [tree.id, tree]));
+  const eventById = new Map((events ?? []).map((event) => [event.id, event]));
+  const siteById = new Map((sites ?? []).map((site) => [site.id, site]));
+  const projectById = new Map((projects ?? []).map((project) => [project.id, project]));
+  const morphotypeById = new Map((morphotypesResult.data ?? []).map((morphotype) => [morphotype.id, morphotype]));
+
+  return images.flatMap((image) => {
+    const sample = sampleById.get(image.tree_sample_id);
+    const tree = sample ? treeById.get(sample.tree_id) : null;
+    const event = sample ? eventById.get(sample.sampling_event_id) : null;
+    const site = sample ? siteById.get(sample.site_id) : null;
+    const project = site ? projectById.get(site.project_id) : null;
+    if (!sample || !tree || !event || !site || !project) return [];
+
+    const annotationSet = annotationSetByImageId.get(image.id) ?? null;
+    const acceptedRegions = annotationSet
+      ? (regionsResult.data ?? []).filter((region) => region.annotation_set_id === annotationSet.id && region.status === "accepted")
+      : [];
+    const evaluatedRegions = acceptedRegions.filter((region) => region.region_role !== "trunk");
+    const lichenRegions = evaluatedRegions.filter((region) => region.classification === "lichen");
+    const trunkArea = acceptedRegions.find((region) => region.region_role === "trunk")?.area_pixels ?? null;
+    const lichenArea = lichenRegions.reduce((total, region) => total + region.area_pixels, 0);
+    const morphotypeLabels = [...new Set(lichenRegions.flatMap((region) => {
+      if (!region.morphotype_id) return [];
+      const morphotype = morphotypeById.get(region.morphotype_id);
+      return morphotype ? [morphotype.label] : [];
+    }))];
+    const isCompleted = annotationSet?.status === "completed" && Boolean(annotationSet.completed_at);
+
+    return [{
+      ...image,
+      annotationSetId: annotationSet?.id ?? null,
+      annotationStatus: isCompleted ? "completed" : annotationSet ? "draft" : "not_started",
+      completedAt: isCompleted ? annotationSet.completed_at : null,
+      context: {
+        treeSampleId: sample.id,
+        treeId: tree.id,
+        treeCode: tree.code,
+        samplingEventId: event.id,
+        samplingEventName: event.name,
+        sampledAt: event.sampled_at,
+        siteId: site.id,
+        siteName: site.name,
+        projectId: project.id,
+        projectName: project.name,
+      },
+      regionCount: acceptedRegions.length,
+      evaluatedRegionCount: evaluatedRegions.length,
+      lichenRegionCount: lichenRegions.length,
+      morphotypeLabels,
+      provisionalCoveragePercent: trunkArea && trunkArea > 0
+        ? Math.min(100, lichenArea / trunkArea * 100)
+        : null,
+    }];
+  });
 }
 
 export async function getSignedImageUrl(storagePath: string): Promise<string> {
@@ -116,7 +271,7 @@ export async function getSignedImageUrl(storagePath: string): Promise<string> {
 export async function getImageRecord(imageId: string): Promise<AccessibleImageRecord | null> {
   await ensureSession();
 
-  const { data, error } = await supabase.from("images").select("id, original_filename, created_at, storage_path").eq("id", imageId).maybeSingle();
+  const { data, error } = await supabase.from("images").select("id, tree_sample_id, original_filename, created_at, storage_path").eq("id", imageId).maybeSingle();
   if (error) {
     throw error;
   }
@@ -339,5 +494,88 @@ export async function completeAnnotationSet(annotationSetId: string): Promise<An
     throw error;
   }
 
+  return data as AnnotationSetRow;
+}
+
+export async function finalizeAnnotationSet(annotationSetId: string, imageId: string): Promise<AnnotationCompletionResult> {
+  await ensureSession();
+
+  const [
+    { data: image, error: imageError },
+    { data: annotationSet, error: annotationSetError },
+    { data: regions, error: regionsError },
+    { data: morphotypes, error: morphotypesError },
+  ] = await Promise.all([
+    supabase.from("images").select("id").eq("id", imageId).maybeSingle(),
+    supabase
+      .from("annotation_sets")
+      .select("*")
+      .eq("id", annotationSetId)
+      .eq("image_id", imageId)
+      .eq("version", 1)
+      .maybeSingle(),
+    supabase.from("annotation_regions").select("*").eq("annotation_set_id", annotationSetId),
+    supabase.from("morphotypes").select("*").eq("annotation_set_id", annotationSetId),
+  ]);
+  if (imageError || !image) throw new Error("La imagen guardada no está disponible.");
+  if (annotationSetError || !annotationSet) throw new Error("El conjunto de anotación no está disponible.");
+  if (regionsError) throw new Error("No se pudieron verificar las regiones guardadas.");
+  if (morphotypesError) throw new Error("No se pudieron verificar los morfotipos.");
+  if (annotationSet.status !== "draft" || annotationSet.completed_at) {
+    throw new Error("La evaluación no está en estado borrador.");
+  }
+
+  const pendingRegions = (regions ?? []).filter((region) => region.status === "draft");
+  if (pendingRegions.length > 0) throw new Error("Hay regiones pendientes de confirmar.");
+  const acceptedRegions = (regions ?? []).filter((region) => region.status === "accepted");
+  const trunk = acceptedRegions.find((region) => region.region_role === "trunk");
+  if (!trunk) throw new Error("Confirma el tronco antes de finalizar.");
+  const evaluatedRegions = acceptedRegions.filter((region) => region.region_role !== "trunk");
+  if (evaluatedRegions.length === 0) throw new Error("Evalúa al menos una región antes de finalizar.");
+
+  const morphotypeIds = new Set((morphotypes ?? []).map((morphotype) => morphotype.id));
+  if (evaluatedRegions.some((region) => !VALID_REGION_CLASSIFICATIONS.includes(region.classification))) {
+    throw new Error("Todas las regiones deben tener una clasificación válida.");
+  }
+  if (evaluatedRegions.some((region) => region.classification === "lichen" && (!region.morphotype_id || !morphotypeIds.has(region.morphotype_id)))) {
+    throw new Error("Todas las regiones de liquen deben tener un morfotipo.");
+  }
+
+  await Promise.all(acceptedRegions.map(async (region) => {
+    const { data, error } = await supabase.storage.from(region.mask_bucket).download(region.mask_path);
+    if (error || !data || data.size === 0) {
+      throw new Error("No se pudieron verificar todas las máscaras guardadas.");
+    }
+  }));
+
+  const completedAt = new Date().toISOString();
+  const { data: completed, error: completionError } = await supabase
+    .from("annotation_sets")
+    .update({ status: "completed", completed_at: completedAt })
+    .eq("id", annotationSetId)
+    .eq("image_id", imageId)
+    .eq("status", "draft")
+    .select("*")
+    .single();
+  if (completionError) throw new Error("No se pudo finalizar la evaluación. El borrador se conserva.");
+
+  return {
+    annotationSet: completed as AnnotationSetRow,
+    regions: acceptedRegions,
+    morphotypes: (morphotypes ?? []) as MorphotypeRow[],
+  };
+}
+
+export async function reopenAnnotationSet(annotationSetId: string, imageId: string): Promise<AnnotationSetRow> {
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("annotation_sets")
+    .update({ status: "draft", completed_at: null })
+    .eq("id", annotationSetId)
+    .eq("image_id", imageId)
+    .eq("status", "completed")
+    .select("*")
+    .single();
+  if (error) throw new Error("No se pudo reabrir la evaluación.");
   return data as AnnotationSetRow;
 }

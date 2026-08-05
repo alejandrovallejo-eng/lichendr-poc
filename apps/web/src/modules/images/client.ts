@@ -18,6 +18,8 @@ const ALLOWED_MIME_TYPES = new Set([
 
 export type ImageRecordRow = Database["public"]["Tables"]["images"]["Row"];
 export type ImageMetadataRow = Database["public"]["Tables"]["image_metadata"]["Row"];
+export type StoredImageAnnotationStatus = "not_started" | "draft" | "completed";
+export type ImageRecordWithAnnotationStatus = ImageRecordRow & { annotationStatus: StoredImageAnnotationStatus };
 export interface ImageSavePayload {
   treeSampleId: string;
   storagePath: string;
@@ -185,7 +187,7 @@ function normalizeMetadataForSave(metadata: ExtractedImageMetadata): ImageSavePa
   };
 }
 
-export async function getImagesForTreeSample(treeSampleId: string): Promise<ImageRecordRow[]> {
+export async function getImagesForTreeSample(treeSampleId: string): Promise<ImageRecordWithAnnotationStatus[]> {
   const { data, error } = await supabase
     .from("images")
     .select("*")
@@ -197,7 +199,26 @@ export async function getImagesForTreeSample(treeSampleId: string): Promise<Imag
     throw error;
   }
 
-  return data ?? [];
+  const images = data ?? [];
+  if (images.length === 0) return [];
+
+  const { data: annotationSets, error: annotationSetsError } = await supabase
+    .from("annotation_sets")
+    .select("image_id, status, completed_at")
+    .eq("version", 1)
+    .in("image_id", images.map((image) => image.id));
+  if (annotationSetsError) throw annotationSetsError;
+  const annotationSetByImageId = new Map((annotationSets ?? []).map((annotationSet) => [annotationSet.image_id, annotationSet]));
+
+  return images.map((image) => {
+    const annotationSet = annotationSetByImageId.get(image.id);
+    const annotationStatus: StoredImageAnnotationStatus = annotationSet?.status === "completed" && annotationSet.completed_at
+      ? "completed"
+      : annotationSet
+        ? "draft"
+        : "not_started";
+    return { ...image, annotationStatus };
+  });
 }
 
 export async function getImageMetadataForImage(imageId: string): Promise<ImageMetadataRow | null> {

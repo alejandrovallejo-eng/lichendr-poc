@@ -245,3 +245,17 @@ La migración `202608050001_extend_annotation_regions_for_visual_editor.sql` amp
 - `region_role` identifica opcionalmente el `trunk`; una restricción exige clasificación `bark` y un índice parcial permite un solo tronco aceptado por `annotation_set`.
 
 La selección por color convierte sRGB a CIELAB con iluminante D65 y usa Delta E 1976 (distancia euclidiana en L\*a\*b\*) como ayuda visual. No clasifica especies ni categorías automáticamente. La migración reutiliza el trigger `updated_at` existente y no cambia RLS ni las políticas de Storage.
+
+## Métricas persistidas para Análisis
+
+La migración aditiva `202608050002_create_annotation_metrics.sql` crea `public.annotation_metrics`. No modifica migraciones históricas ni ejecuta cálculos remotos.
+
+- Mantiene una fila por `annotation_set_id`, con borrado en cascada.
+- Guarda áreas de máscara, cobertura, conteos, método, versión, alertas de calidad y fechas de auditoría.
+- Restringe áreas y conteos a valores no negativos y `coverage_percent` al intervalo 0–100 o nulo.
+- Exige `quality_flags` como array u objeto JSON y textos no vacíos para método y versión.
+- Reutiliza `public.set_updated_at()` y habilita RLS.
+- Las políticas `SELECT`, `INSERT`, `UPDATE` y `DELETE` para `authenticated` siguen `annotation_metrics → annotation_sets → images → tree_samples → sites → projects → owner_id = auth.uid()`.
+- No concede privilegios a `anon`.
+
+Las consultas del panel parten de `annotation_sets` con `status = 'completed'` y `completed_at is not null`, y después consultan métricas persistidas. Las agregaciones no descargan máscaras. El recálculo de un resumen anterior obtiene URLs firmadas temporales para las máscaras de esa única evaluación.

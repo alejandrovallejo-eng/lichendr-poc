@@ -26,6 +26,7 @@ import {
   reopenAnnotationSet,
   upsertMorphotype,
   type AnnotationImageContext,
+  type AnnotationMetricsRow,
   type AnnotationSetRow,
   type MorphotypeDraft,
 } from "@/modules/annotations/client";
@@ -196,6 +197,7 @@ interface AnnotationStudioProps {
   completedAt: string | null;
   imageContext: AnnotationImageContext;
   initialMorphotypes: MorphotypeRow[];
+  initialMetrics: AnnotationMetricsRow | null;
   roi: { x: number | null; y: number | null; width: number | null; height: number | null };
   initialTool?: "ai" | "layers" | "manual";
   onChooseAnotherImage: () => void;
@@ -229,7 +231,7 @@ const CLASS_COLORS: Record<AnnotationRegionClassification, [number, number, numb
 const SOURCE_LABELS: Record<AnnotationRegionSource, string> = {
   mobile_sam: "MobileSAM",
   manual: "Manual",
-  color_assisted: "Color asistido",
+  color_assisted: "Asistida por color",
 };
 
 const TOOL_LABELS: Array<{ value: StudioTool; label: string }> = [
@@ -406,6 +408,7 @@ export default function AnnotationStudio({
   completedAt,
   imageContext,
   initialMorphotypes,
+  initialMetrics,
   roi,
   initialTool = "manual",
   onChooseAnotherImage,
@@ -477,6 +480,7 @@ export default function AnnotationStudio({
   const [layers, setLayers] = useState<StudioLayer[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [morphotypes, setMorphotypes] = useState(initialMorphotypes);
+  const [storedMetrics, setStoredMetrics] = useState(initialMetrics);
   const [classification, setClassification] = useState<AnnotationRegionClassification>("lichen");
   const [morphotypeId, setMorphotypeId] = useState<string | null>(initialMorphotypes[0]?.id ?? null);
   const [showNewMorphotype, setShowNewMorphotype] = useState(false);
@@ -2168,6 +2172,7 @@ export default function AnnotationStudio({
         morphotypeLabels: result.morphotypes.filter((morphotype) => usedMorphotypeIds.has(morphotype.id)).map((morphotype) => morphotype.label),
         coveragePercent: result.metrics.coverage_percent,
       });
+      setStoredMetrics(result.metrics);
       setLastSavedMessage("Evaluación guardada correctamente");
       setStudioState("reviewing-layers");
       setActiveTool("select");
@@ -2776,6 +2781,14 @@ export default function AnnotationStudio({
             })}
           </div>
           <p className="mt-3 text-sm font-semibold">Cobertura provisional: {coverage.coveragePercent == null ? "Sin datos" : `${coverage.coveragePercent.toFixed(1)}%`}</p>
+          {storedMetrics ? (
+            <dl className="mt-3 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[max-content_1fr]">
+              <dt className="font-semibold">Método del cálculo</dt><dd>{storedMetrics.calculation_method}</dd>
+              <dt className="font-semibold">Versión del cálculo</dt><dd>{storedMetrics.calculation_version}</dd>
+              <dt className="font-semibold">Fecha del cálculo</dt><dd>{new Date(storedMetrics.calculated_at).toLocaleString()}</dd>
+            </dl>
+          ) : <p className="mt-3 text-sm font-semibold text-amber-800">Resumen pendiente de cálculo</p>}
+          <p className="mt-3 text-xs font-semibold">Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.</p>
         </section>
       ) : null}
     </div>

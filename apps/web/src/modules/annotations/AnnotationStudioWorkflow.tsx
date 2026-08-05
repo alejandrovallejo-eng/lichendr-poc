@@ -10,6 +10,7 @@ import {
   listAnnotationImages,
   loadAnnotationState,
   type AnnotationImageListItem,
+  type AnnotationMetricsRow,
   type AnnotationSetRow,
   type MorphotypeRow,
 } from "@/modules/annotations/client";
@@ -28,6 +29,7 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [annotationSet, setAnnotationSet] = useState<AnnotationSetRow | null>(null);
   const [morphotypes, setMorphotypes] = useState<MorphotypeRow[]>([]);
+  const [metrics, setMetrics] = useState<AnnotationMetricsRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,6 +67,7 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
       setImageUrl(signedUrl);
       setAnnotationSet(activeSet);
       setMorphotypes(state.morphotypes);
+      setMetrics(state.metrics);
     } catch {
       if (requestId === requestIdRef.current) {
         setError("No se pudo cargar la imagen o su conjunto de anotación.");
@@ -123,6 +126,7 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
       completedAt={annotationSet.completed_at}
       imageContext={image.context}
       initialMorphotypes={morphotypes}
+      initialMetrics={metrics}
       roi={{
         x: annotationSet.roi_x,
         y: annotationSet.roi_y,

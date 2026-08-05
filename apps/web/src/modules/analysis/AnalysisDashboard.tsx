@@ -86,7 +86,10 @@ export default function AnalysisDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recalculatingId, setRecalculatingId] = useState<string | null>(null);
-  const [recalculationErrors, setRecalculationErrors] = useState<Record<string, string>>({});
+  const [recalculationErrors, setRecalculationErrors] = useState<Record<string, {
+    message: string;
+    signedMaskUnavailable: boolean;
+  }>>({});
   const [projectId, setProjectId] = useState(searchParams.get("projectId") ?? "");
   const [siteId, setSiteId] = useState(searchParams.get("siteId") ?? "");
   const [samplingEventId, setSamplingEventId] = useState(searchParams.get("samplingEventId") ?? "");
@@ -98,8 +101,6 @@ export default function AnalysisDashboard() {
     const controller = new AbortController();
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    setLoading(true);
-    setError(null);
     void listAnalysisEvaluations(controller.signal)
       .then((result) => {
         if (requestId === requestIdRef.current) setEvaluations(result);
@@ -166,7 +167,7 @@ export default function AnalysisDashboard() {
   const morphotypeNames = new Set(filtered.flatMap((item) => item.morphotypes.map((morphotype) => morphotype.label.toLocaleLowerCase())));
   const flagsFor = (evaluation: AnalysisEvaluation): AnnotationQualityFlag[] => {
     const flags = evaluationQualityFlags(evaluation);
-    return recalculationErrors[evaluation.annotationSetId]
+    return recalculationErrors[evaluation.annotationSetId]?.signedMaskUnavailable
       ? [...new Set([...flags, "signed_mask_unavailable" as const])]
       : flags;
   };
@@ -249,9 +250,13 @@ export default function AnalysisDashboard() {
       )));
     } catch (reason) {
       if ((reason as { name?: string }).name !== "AbortError") {
+        const message = reason instanceof Error ? reason.message : "No se pudo calcular el resumen.";
         setRecalculationErrors((current) => ({
           ...current,
-          [evaluation.annotationSetId]: reason instanceof Error ? reason.message : "No se pudo calcular el resumen.",
+          [evaluation.annotationSetId]: {
+            message,
+            signedMaskUnavailable: message.includes("máscara firmada temporal"),
+          },
         }));
       }
     } finally {
@@ -365,7 +370,7 @@ export default function AnalysisDashboard() {
                       {recalculatingId === evaluation.annotationSetId ? "Calculando…" : "Calcular resumen"}
                     </button>
                   ) : null}
-                  {recalculationErrors[evaluation.annotationSetId] ? <p className="text-sm text-red-700 md:col-span-4">{recalculationErrors[evaluation.annotationSetId]}</p> : null}
+                  {recalculationErrors[evaluation.annotationSetId] ? <p className="text-sm text-red-700 md:col-span-4">{recalculationErrors[evaluation.annotationSetId].message}</p> : null}
                 </article>
               ))}
             </div>

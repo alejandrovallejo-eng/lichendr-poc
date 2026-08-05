@@ -47,8 +47,12 @@ const QUALITY_FLAGS = new Set<AnnotationQualityFlag>([
 ]);
 
 function normalizeQualityFlags(value: AnnotationMetricsRow["quality_flags"]): AnnotationQualityFlag[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((flag): flag is AnnotationQualityFlag => (
+  const candidates = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? Object.entries(value).flatMap(([flag, enabled]) => enabled === true ? [flag] : [])
+      : [];
+  return candidates.filter((flag): flag is AnnotationQualityFlag => (
     typeof flag === "string" && QUALITY_FLAGS.has(flag as AnnotationQualityFlag)
   ));
 }

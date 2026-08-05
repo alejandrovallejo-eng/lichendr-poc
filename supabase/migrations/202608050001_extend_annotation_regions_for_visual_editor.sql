@@ -21,13 +21,14 @@ alter table public.annotation_regions
   );
 
 alter table public.annotation_regions
-  drop constraint if exists annotation_regions_color_tolerance_non_negative;
+  drop constraint if exists annotation_regions_color_tolerance_non_negative,
+  drop constraint if exists annotation_regions_color_tolerance_range;
 
 alter table public.annotation_regions
-  add constraint annotation_regions_color_tolerance_non_negative
+  add constraint annotation_regions_color_tolerance_range
   check (
     color_tolerance_delta_e is null
-    or color_tolerance_delta_e >= 0
+    or color_tolerance_delta_e between 0 and 50
   );
 
 alter table public.annotation_regions

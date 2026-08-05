@@ -1067,7 +1067,7 @@ export default function AnnotationStudio({
     } else {
       setBusy("save");
       try {
-        const region = await saveAcceptedRegion(entry.saveInput);
+        const region = await saveAcceptedRegion({ ...entry.saveInput, overwriteExistingMask: true });
         const layer = { ...entry.layer, region };
         refreshLayerCanvases(sortLayers([...layers, layer]), region.id);
       } catch {

@@ -48,6 +48,7 @@ export interface RegionSaveInput {
   representativeColorHex?: string | null;
   colorToleranceDeltaE?: number | null;
   regionRole?: "trunk" | null;
+  overwriteExistingMask?: boolean;
 }
 
 export class RegionPersistenceError extends Error {
@@ -192,7 +193,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   if (representativeColorHex && !/^#[0-9A-Fa-f]{6}$/.test(representativeColorHex)) {
     throw new Error("El color representativo debe usar formato #RRGGBB.");
   }
-  if (colorToleranceDeltaE !== null && (!Number.isFinite(colorToleranceDeltaE) || colorToleranceDeltaE < 0)) {
+  if (colorToleranceDeltaE !== null && (!Number.isFinite(colorToleranceDeltaE) || colorToleranceDeltaE < 0 || colorToleranceDeltaE > 50)) {
     throw new Error("La tolerancia de color no es válida.");
   }
   if (regionRole === "trunk" && input.classification !== "bark") {
@@ -206,7 +207,10 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   const user = userData.user;
   if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");
   const maskPath = `${user.id}/annotations/${annotationSetId}/${regionId}.png`;
-  const { error: uploadError } = await supabase.storage.from(MASK_BUCKET).upload(maskPath, input.mask, { contentType: "image/png", upsert: false });
+  const { error: uploadError } = await supabase.storage.from(MASK_BUCKET).upload(maskPath, input.mask, {
+    contentType: "image/png",
+    upsert: input.overwriteExistingMask ?? false,
+  });
   if (uploadError) throw new RegionPersistenceError("No se pudo subir la máscara. Puedes reintentar.", regionId, false);
 
   const { data, error } = await supabase

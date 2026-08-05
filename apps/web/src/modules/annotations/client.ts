@@ -378,13 +378,14 @@ export async function upsertAnnotationSet(payload: AnnotationSetDraft): Promise<
   };
 
   if (existing.data) {
-    if (existing.data.status === "completed" && basePayload.status !== "completed") {
+    if (existing.data.status === "completed") {
       throw new Error("Reabre la evaluación antes de modificarla.");
     }
     const { data, error } = await supabase
       .from("annotation_sets")
       .update(basePayload)
       .eq("id", existing.data.id)
+      .eq("status", "draft")
       .select("*")
       .single();
 

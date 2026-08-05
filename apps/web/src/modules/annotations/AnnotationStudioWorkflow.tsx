@@ -155,9 +155,9 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
             };
             const priorityDifference = priority(left) - priority(right);
             if (priorityDifference !== 0) return priorityDifference;
-            if (left.context.treeSampleId === right.context.treeSampleId && left.image_order !== right.image_order) {
-              return left.image_order - right.image_order;
-            }
+            const sampleDifference = left.context.treeSampleId.localeCompare(right.context.treeSampleId);
+            if (sampleDifference !== 0) return sampleDifference;
+            if (left.image_order !== right.image_order) return left.image_order - right.image_order;
             return left.created_at.localeCompare(right.created_at);
           });
         const next = pending[0];

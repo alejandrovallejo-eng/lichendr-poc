@@ -18,6 +18,7 @@ export interface AccessibleImageRecord {
   id: string;
   tree_sample_id: string;
   original_filename: string;
+  image_order: number;
   created_at: string;
   storage_path: string;
 }
@@ -123,12 +124,23 @@ async function ensureSession() {
   }
 }
 
+async function assertDraftAnnotationSet(annotationSetId: string): Promise<void> {
+  const { data, error } = await supabase
+    .from("annotation_sets")
+    .select("id")
+    .eq("id", annotationSetId)
+    .eq("status", "draft")
+    .is("completed_at", null)
+    .maybeSingle();
+  if (error || !data) throw new Error("Reabre la evaluación antes de modificarla.");
+}
+
 export async function listAccessibleImages(): Promise<AccessibleImageRecord[]> {
   await ensureSession();
 
   const { data, error } = await supabase
     .from("images")
-    .select("id, tree_sample_id, original_filename, created_at, storage_path")
+    .select("id, tree_sample_id, original_filename, image_order, created_at, storage_path")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -271,7 +283,7 @@ export async function getSignedImageUrl(storagePath: string): Promise<string> {
 export async function getImageRecord(imageId: string): Promise<AccessibleImageRecord | null> {
   await ensureSession();
 
-  const { data, error } = await supabase.from("images").select("id, tree_sample_id, original_filename, created_at, storage_path").eq("id", imageId).maybeSingle();
+  const { data, error } = await supabase.from("images").select("id, tree_sample_id, original_filename, image_order, created_at, storage_path").eq("id", imageId).maybeSingle();
   if (error) {
     throw error;
   }
@@ -366,6 +378,9 @@ export async function upsertAnnotationSet(payload: AnnotationSetDraft): Promise<
   };
 
   if (existing.data) {
+    if (existing.data.status === "completed" && basePayload.status !== "completed") {
+      throw new Error("Reabre la evaluación antes de modificarla.");
+    }
     const { data, error } = await supabase
       .from("annotation_sets")
       .update(basePayload)
@@ -390,6 +405,7 @@ export async function upsertAnnotationSet(payload: AnnotationSetDraft): Promise<
 
 export async function upsertMorphotype(payload: MorphotypeDraft): Promise<MorphotypeRow> {
   await ensureSession();
+  await assertDraftAnnotationSet(payload.annotationSetId);
 
   if (payload.id) {
     const { data, error } = await supabase
@@ -433,6 +449,13 @@ export async function upsertMorphotype(payload: MorphotypeDraft): Promise<Morpho
 
 export async function deleteMorphotype(morphotypeId: string): Promise<void> {
   await ensureSession();
+  const { data: morphotype, error: morphotypeError } = await supabase
+    .from("morphotypes")
+    .select("annotation_set_id")
+    .eq("id", morphotypeId)
+    .maybeSingle();
+  if (morphotypeError || !morphotype) throw new Error("El morfotipo no está disponible.");
+  await assertDraftAnnotationSet(morphotype.annotation_set_id);
 
   const { error } = await supabase.from("morphotypes").delete().eq("id", morphotypeId);
   if (error) {
@@ -442,6 +465,7 @@ export async function deleteMorphotype(morphotypeId: string): Promise<void> {
 
 export async function upsertAnnotationPoint(payload: AnnotationPointDraft): Promise<AnnotationPointRow> {
   await ensureSession();
+  await assertDraftAnnotationSet(payload.annotationSetId);
 
   const pointPayload = {
     annotation_set_id: payload.annotationSetId,
@@ -473,6 +497,13 @@ export async function upsertAnnotationPoint(payload: AnnotationPointDraft): Prom
 
 export async function deleteAnnotationPoint(pointId: string): Promise<void> {
   await ensureSession();
+  const { data: point, error: pointError } = await supabase
+    .from("annotation_points")
+    .select("annotation_set_id")
+    .eq("id", pointId)
+    .maybeSingle();
+  if (pointError || !point) throw new Error("El punto no está disponible.");
+  await assertDraftAnnotationSet(point.annotation_set_id);
 
   const { error } = await supabase.from("annotation_points").delete().eq("id", pointId);
   if (error) {

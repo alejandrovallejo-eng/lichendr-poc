@@ -153,7 +153,12 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
               if (item.context.siteId === image.context.siteId) return 2;
               return 3;
             };
-            return priority(left) - priority(right) || left.created_at.localeCompare(right.created_at);
+            const priorityDifference = priority(left) - priority(right);
+            if (priorityDifference !== 0) return priorityDifference;
+            if (left.context.treeSampleId === right.context.treeSampleId && left.image_order !== right.image_order) {
+              return left.image_order - right.image_order;
+            }
+            return left.created_at.localeCompare(right.created_at);
           });
         const next = pending[0];
         if (!next) return false;

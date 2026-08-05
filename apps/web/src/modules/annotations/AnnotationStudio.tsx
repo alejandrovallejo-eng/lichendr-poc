@@ -1714,6 +1714,10 @@ export default function AnnotationStudio({
 
   const handleRedo = useCallback(async () => {
     if (busy) return;
+    if (pendingCleanupPaths.length > 0) {
+      setError("Completa la limpieza pendiente antes de rehacer una capa.");
+      return;
+    }
     const entry = redoRef.current.pop();
     if (!entry) return;
     if (entry.kind === "mask") {
@@ -1746,7 +1750,7 @@ export default function AnnotationStudio({
     historyRef.current.push(entry);
     historyBytesRef.current += historyEntryBytes(entry);
     bumpHistory();
-  }, [bumpHistory, busy, layers, refreshLayerCanvases, renderCandidate, scheduleSegment]);
+  }, [bumpHistory, busy, layers, pendingCleanupPaths.length, refreshLayerCanvases, renderCandidate, scheduleSegment]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2702,6 +2706,39 @@ export default function AnnotationStudio({
         </aside>
       </div>
       </fieldset>
+      {isReadOnly ? (
+        <section className="rounded border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}>
+          <h2 className="font-semibold">Capas de la evaluación</h2>
+          <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Puedes inspeccionar las capas sin modificar los datos guardados.</p>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            {layers.map((layer) => {
+              const morphotype = morphotypes.find((item) => item.id === layer.region.morphotype_id);
+              return (
+                <div key={layer.region.id} className="rounded border p-3 text-sm" style={{ borderColor: selectedLayerId === layer.region.id ? "var(--ld-text)" : "var(--ld-border)" }}>
+                  <button type="button" onClick={() => selectLayer(layer)} className="w-full text-left font-semibold">{layer.title}</button>
+                  <p className="mt-1">{CLASS_LABELS[layer.region.classification]}{morphotype ? ` · ${morphotype.label}` : ""}</p>
+                  {layer.region.representative_color_hex ? (
+                    <p className="mt-1 flex items-center gap-2">
+                      <span className="h-4 w-4 rounded border" style={{ background: layer.region.representative_color_hex, borderColor: "var(--ld-border)" }} />
+                      Color representativo
+                    </p>
+                  ) : null}
+                  <div className="mt-2 flex items-center gap-3">
+                    <button type="button" onClick={() => {
+                      const next = layers.map((item) => item.region.id === layer.region.id ? { ...item, visible: !item.visible } : item);
+                      refreshLayerCanvases(next);
+                    }} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>{layer.visible ? "Ocultar" : "Mostrar"}</button>
+                    <label className="flex-1 text-xs">Opacidad
+                      <input className="w-full" type="range" min={0.1} max={0.9} step={0.05} value={layer.opacity} onChange={(event) => updateLayerOpacity(layer.region.id, Number(event.target.value))} />
+                    </label>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-3 text-sm font-semibold">Cobertura provisional: {coverage.coveragePercent == null ? "Sin datos" : `${coverage.coveragePercent.toFixed(1)}%`}</p>
+        </section>
+      ) : null}
     </div>
   );
 }

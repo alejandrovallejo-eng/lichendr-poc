@@ -90,6 +90,17 @@ async function ensureSession(): Promise<void> {
   if (result.error || !result.session) throw new Error(result.error ?? "No se pudo validar la sesión.");
 }
 
+async function assertDraftAnnotationSet(annotationSetId: string): Promise<void> {
+  const { data, error } = await supabase
+    .from("annotation_sets")
+    .select("id")
+    .eq("id", annotationSetId)
+    .eq("status", "draft")
+    .is("completed_at", null)
+    .maybeSingle();
+  if (error || !data) throw new Error("Reabre la evaluación antes de modificar sus regiones.");
+}
+
 async function assertPngMask(mask: Blob): Promise<void> {
   if (mask.type !== "image/png" || mask.size === 0 || mask.size > MAX_MASK_BYTES) {
     throw new Error("La máscara PNG no cumple el tamaño permitido.");
@@ -156,6 +167,7 @@ export async function createMorphotypeForAnnotationSet(
   if (!trimmedLabel || trimmedLabel.length > 80) throw new Error("El nombre del morfotipo no es válido.");
   if (colorHex && !/^#[0-9A-Fa-f]{6}$/.test(colorHex)) throw new Error("El color debe usar formato #RRGGBB.");
   await ensureSession();
+  await assertDraftAnnotationSet(annotationSetId);
   const { data: existingMorphotypes, error: duplicateError } = await supabase
     .from("morphotypes")
     .select("label")
@@ -206,6 +218,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   assertNormalizedPoints(input.negativePoints);
   await assertPngMask(input.mask);
   await ensureSession();
+  await assertDraftAnnotationSet(annotationSetId);
   const { data: userData, error: userError } = await supabase.auth.getUser();
   const user = userData.user;
   if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");
@@ -274,6 +287,7 @@ export async function replaceAcceptedTrunkRegion(
   assertNormalizedPoints(input.negativePoints);
   await assertPngMask(input.mask);
   await ensureSession();
+  await assertDraftAnnotationSet(input.annotationSetId);
   const { data: userData, error: userError } = await supabase.auth.getUser();
   const user = userData.user;
   if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");
@@ -326,6 +340,7 @@ export async function updateRegionClassification(
   const normalizedMorphotypeId = classification === "lichen" ? morphotypeId : null;
   if (classification === "lichen" && !normalizedMorphotypeId) throw new Error("Selecciona un morfotipo para la capa de líquen.");
   await ensureSession();
+  await assertDraftAnnotationSet(annotationSetId);
   if (normalizedMorphotypeId) {
     assertUuid(normalizedMorphotypeId, "El morfotipo");
     const { data, error } = await supabase.from("morphotypes").select("id").eq("id", normalizedMorphotypeId).eq("annotation_set_id", annotationSetId).maybeSingle();
@@ -350,6 +365,7 @@ export async function updateRegionNotes(
   assertUuid(regionId, "La capa");
   assertUuid(annotationSetId, "El conjunto de anotación");
   await ensureSession();
+  await assertDraftAnnotationSet(annotationSetId);
   const normalizedNotes = notes?.trim() || null;
   const { data, error } = await supabase
     .from("annotation_regions")
@@ -364,6 +380,7 @@ export async function updateRegionNotes(
 
 export async function deleteRegionWithStorage(region: AnnotationRegionRow): Promise<void> {
   await ensureSession();
+  await assertDraftAnnotationSet(region.annotation_set_id);
   const { error: databaseError } = await supabase.from("annotation_regions").delete().eq("id", region.id).eq("annotation_set_id", region.annotation_set_id);
   if (databaseError) throw new Error("No se pudo eliminar el registro de la capa.");
   const { error: storageError } = await supabase.storage.from(MASK_BUCKET).remove([region.mask_path]);

@@ -5,6 +5,25 @@ export interface CoverageSummary {
   coveragePercent: number | null;
 }
 
+export type AnnotationQualityFlag =
+  | "missing_trunk"
+  | "zero_trunk_area"
+  | "mask_dimension_mismatch"
+  | "lichen_outside_trunk"
+  | "high_lichen_overlap"
+  | "no_lichen_regions"
+  | "summary_pending"
+  | "signed_mask_unavailable";
+
+export interface AnnotationMetricSummary {
+  trunkAreaPixels: number | null;
+  lichenUnionInsideTrunkPixels: number | null;
+  lichenOutsideTrunkPixels: number | null;
+  overlappingLichenPixels: number | null;
+  coveragePercent: number | null;
+  qualityFlags: AnnotationQualityFlag[];
+}
+
 export interface MaskBounds {
   x: number;
   y: number;
@@ -93,5 +112,70 @@ export function calculateCoverage(trunk: Uint8Array | null, lichenMasks: readonl
     lichenArea,
     overlapPixels: Math.max(0, summedArea - lichenArea),
     coveragePercent: (lichenArea / evaluableArea) * 100,
+  };
+}
+
+export function calculateAnnotationMetricSummary(
+  trunk: Uint8Array | null,
+  lichenMasks: readonly Uint8Array[],
+): AnnotationMetricSummary {
+  const qualityFlags: AnnotationQualityFlag[] = [];
+  if (lichenMasks.length === 0) qualityFlags.push("no_lichen_regions");
+  if (!trunk) {
+    qualityFlags.push("missing_trunk");
+    return {
+      trunkAreaPixels: null,
+      lichenUnionInsideTrunkPixels: null,
+      lichenOutsideTrunkPixels: null,
+      overlappingLichenPixels: null,
+      coveragePercent: null,
+      qualityFlags,
+    };
+  }
+
+  const trunkAreaPixels = calculateMaskArea(trunk);
+  if (lichenMasks.some((mask) => mask.length !== trunk.length)) {
+    qualityFlags.push("mask_dimension_mismatch");
+    return {
+      trunkAreaPixels,
+      lichenUnionInsideTrunkPixels: null,
+      lichenOutsideTrunkPixels: null,
+      overlappingLichenPixels: null,
+      coveragePercent: null,
+      qualityFlags,
+    };
+  }
+
+  const lichenUnion = unionMasks(lichenMasks, trunk.length);
+  const lichenUnionArea = calculateMaskArea(lichenUnion);
+  const lichenUnionInsideTrunkPixels = calculateMaskArea(intersectMasks(lichenUnion, trunk));
+  const lichenOutsideTrunkPixels = lichenUnionArea - lichenUnionInsideTrunkPixels;
+  const summedLichenAreaInsideTrunk = lichenMasks.reduce(
+    (sum, mask) => sum + calculateMaskArea(intersectMasks(mask, trunk)),
+    0,
+  );
+  const overlappingLichenPixels = Math.max(
+    0,
+    summedLichenAreaInsideTrunk - lichenUnionInsideTrunkPixels,
+  );
+
+  if (trunkAreaPixels === 0) qualityFlags.push("zero_trunk_area");
+  if (lichenOutsideTrunkPixels > 0) qualityFlags.push("lichen_outside_trunk");
+  if (
+    summedLichenAreaInsideTrunk > 0
+    && overlappingLichenPixels / summedLichenAreaInsideTrunk >= 0.2
+  ) {
+    qualityFlags.push("high_lichen_overlap");
+  }
+
+  return {
+    trunkAreaPixels,
+    lichenUnionInsideTrunkPixels,
+    lichenOutsideTrunkPixels,
+    overlappingLichenPixels,
+    coveragePercent: trunkAreaPixels > 0
+      ? lichenUnionInsideTrunkPixels / trunkAreaPixels * 100
+      : null,
+    qualityFlags,
   };
 }

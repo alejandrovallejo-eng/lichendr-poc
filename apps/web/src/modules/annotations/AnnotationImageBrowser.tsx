@@ -169,7 +169,7 @@ export default function AnnotationImageBrowser({ images, initialTab, initialTool
                   <p>Capas/regiones: {image.regionCount}</p>
                   <p>Regiones de liquen: {image.lichenRegionCount}</p>
                   <p>Morfotipos: {image.morphotypeLabels.join(", ") || "Ninguno"}</p>
-                  <p>Cobertura provisional: {image.provisionalCoveragePercent == null ? "Sin datos" : `${image.provisionalCoveragePercent.toFixed(1)}%`}</p>
+                  <p>Cobertura provisional: {!image.hasMetrics ? "Resumen pendiente de cálculo" : image.provisionalCoveragePercent == null ? "Datos insuficientes" : `${image.provisionalCoveragePercent.toFixed(1)}%`}</p>
                 </div>
               ) : null}
               <button type="button" onClick={() => openImage(image)} className="studio-primary mt-3 w-full rounded border px-3 py-2 font-semibold">

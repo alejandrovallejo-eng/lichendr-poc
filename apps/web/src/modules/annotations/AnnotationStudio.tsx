@@ -26,6 +26,7 @@ import {
   reopenAnnotationSet,
   upsertMorphotype,
   type AnnotationImageContext,
+  type AnnotationMetricsRow,
   type AnnotationSetRow,
   type MorphotypeDraft,
 } from "@/modules/annotations/client";
@@ -44,7 +45,13 @@ import {
   type MaskPoint,
   type WorkingImage,
 } from "@/modules/annotations/studio-browser-utils";
-import { calculateCoverage, calculateMaskArea, calculateMaskBounds, clipMask } from "@/modules/annotations/studio-mask-utils";
+import {
+  calculateAnnotationMetricSummary,
+  calculateCoverage,
+  calculateMaskArea,
+  calculateMaskBounds,
+  clipMask,
+} from "@/modules/annotations/studio-mask-utils";
 import type {
   ColorAnalysisStage,
   ColorPaletteCandidate,
@@ -190,12 +197,14 @@ interface AnnotationStudioProps {
   completedAt: string | null;
   imageContext: AnnotationImageContext;
   initialMorphotypes: MorphotypeRow[];
+  initialMetrics: AnnotationMetricsRow | null;
   roi: { x: number | null; y: number | null; width: number | null; height: number | null };
   initialTool?: "ai" | "layers" | "manual";
   onChooseAnotherImage: () => void;
   onMorphotypesChange: (morphotypes: MorphotypeRow[]) => void;
   onAnnotationSetChange: (annotationSet: AnnotationSetRow) => void;
   onViewEvaluated: () => void;
+  onGoToAnalysis: () => void;
   onEvaluateNext: () => Promise<boolean>;
 }
 
@@ -220,9 +229,9 @@ const CLASS_COLORS: Record<AnnotationRegionClassification, [number, number, numb
 };
 
 const SOURCE_LABELS: Record<AnnotationRegionSource, string> = {
-  mobile_sam: "AI",
+  mobile_sam: "MobileSAM",
   manual: "Manual",
-  color_assisted: "Color asistido",
+  color_assisted: "Asistida por color",
 };
 
 const TOOL_LABELS: Array<{ value: StudioTool; label: string }> = [
@@ -399,12 +408,14 @@ export default function AnnotationStudio({
   completedAt,
   imageContext,
   initialMorphotypes,
+  initialMetrics,
   roi,
   initialTool = "manual",
   onChooseAnotherImage,
   onMorphotypesChange,
   onAnnotationSetChange,
   onViewEvaluated,
+  onGoToAnalysis,
   onEvaluateNext,
 }: AnnotationStudioProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -469,6 +480,7 @@ export default function AnnotationStudio({
   const [layers, setLayers] = useState<StudioLayer[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [morphotypes, setMorphotypes] = useState(initialMorphotypes);
+  const [storedMetrics, setStoredMetrics] = useState(initialMetrics);
   const [classification, setClassification] = useState<AnnotationRegionClassification>("lichen");
   const [morphotypeId, setMorphotypeId] = useState<string | null>(initialMorphotypes[0]?.id ?? null);
   const [showNewMorphotype, setShowNewMorphotype] = useState(false);
@@ -2120,7 +2132,36 @@ export default function AnnotationStudio({
     setBusy("complete");
     setError(null);
     try {
-      const result = await finalizeAnnotationSet(annotationSetId, imageId);
+      const acceptedLayers = layers.filter((layer) => layer.region.status === "accepted");
+      const trunk = acceptedLayers.find(isTrunkLayer) ?? null;
+      const trunkMask = trunk ? layerMasksRef.current.get(trunk.region.id) ?? null : null;
+      const lichenLayers = acceptedLayers.filter((layer) => layer.region.classification === "lichen");
+      const lichenMasks = lichenLayers.map((layer) => layerMasksRef.current.get(layer.region.id) ?? null);
+      if ((trunk && !trunkMask) || lichenMasks.some((mask) => !mask)) {
+        throw new Error("No se pudieron leer todas las máscaras guardadas. El borrador se conserva.");
+      }
+      const metricSummary = calculateAnnotationMetricSummary(
+        trunkMask,
+        lichenMasks.filter((mask): mask is Uint8Array => Boolean(mask)),
+      );
+      const calculatedMorphotypeIds = new Set(lichenLayers.flatMap((layer) => (
+        layer.region.morphotype_id ? [layer.region.morphotype_id] : []
+      )));
+      const result = await finalizeAnnotationSet(annotationSetId, imageId, {
+        annotation_set_id: annotationSetId,
+        trunk_area_pixels: metricSummary.trunkAreaPixels,
+        lichen_union_area_pixels: metricSummary.lichenUnionInsideTrunkPixels,
+        lichen_outside_trunk_pixels: metricSummary.lichenOutsideTrunkPixels,
+        overlapping_lichen_pixels: metricSummary.overlappingLichenPixels,
+        coverage_percent: metricSummary.coveragePercent,
+        accepted_region_count: acceptedLayers.length,
+        lichen_region_count: lichenLayers.length,
+        morphotype_count: calculatedMorphotypeIds.size,
+        calculation_method: "mask_union_intersection",
+        calculation_version: "1.1.0",
+        quality_flags: metricSummary.qualityFlags,
+        calculated_at: new Date().toISOString(),
+      });
       const evaluatedRegions = result.regions.filter((region) => region.region_role !== "trunk");
       const lichenRegions = evaluatedRegions.filter((region) => region.classification === "lichen");
       const usedMorphotypeIds = new Set(lichenRegions.flatMap((region) => region.morphotype_id ? [region.morphotype_id] : []));
@@ -2129,8 +2170,9 @@ export default function AnnotationStudio({
         evaluatedRegionCount: evaluatedRegions.length,
         lichenRegionCount: lichenRegions.length,
         morphotypeLabels: result.morphotypes.filter((morphotype) => usedMorphotypeIds.has(morphotype.id)).map((morphotype) => morphotype.label),
-        coveragePercent: coverage.coveragePercent,
+        coveragePercent: result.metrics.coverage_percent,
       });
+      setStoredMetrics(result.metrics);
       setLastSavedMessage("Evaluación guardada correctamente");
       setStudioState("reviewing-layers");
       setActiveTool("select");
@@ -2242,6 +2284,7 @@ export default function AnnotationStudio({
           </dl>
           <div className="mt-4 flex flex-wrap gap-2">
             <button type="button" onClick={onViewEvaluated} className="rounded border bg-white px-3 py-2 font-semibold" style={{ borderColor: "var(--ld-border)" }}>Ver imágenes evaluadas</button>
+            <button type="button" onClick={onGoToAnalysis} className="rounded border bg-white px-3 py-2 font-semibold" style={{ borderColor: "var(--ld-border)" }}>Ir al análisis</button>
             <button type="button" disabled={Boolean(busy)} onClick={() => void evaluateNextImage()} className="studio-primary rounded border px-3 py-2 font-semibold disabled:opacity-50">Evaluar siguiente imagen</button>
           </div>
           {noPendingImages ? <p className="mt-3 font-semibold">No quedan imágenes pendientes en este sitio.</p> : null}
@@ -2702,6 +2745,7 @@ export default function AnnotationStudio({
               </div>
             )}
             <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Unión de regiones de liquen confirmadas, recortada al tronco evaluable. Las ayudas IA y de color son anotaciones confirmadas por la persona usuaria, no identificación automática de especies.</p>
+            <p className="mt-2 text-xs font-semibold">Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.</p>
           </section>
         </aside>
       </div>
@@ -2737,6 +2781,14 @@ export default function AnnotationStudio({
             })}
           </div>
           <p className="mt-3 text-sm font-semibold">Cobertura provisional: {coverage.coveragePercent == null ? "Sin datos" : `${coverage.coveragePercent.toFixed(1)}%`}</p>
+          {storedMetrics ? (
+            <dl className="mt-3 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[max-content_1fr]">
+              <dt className="font-semibold">Método del cálculo</dt><dd>{storedMetrics.calculation_method}</dd>
+              <dt className="font-semibold">Versión del cálculo</dt><dd>{storedMetrics.calculation_version}</dd>
+              <dt className="font-semibold">Fecha del cálculo</dt><dd>{new Date(storedMetrics.calculated_at).toLocaleString()}</dd>
+            </dl>
+          ) : <p className="mt-3 text-sm font-semibold text-amber-800">Resumen pendiente de cálculo</p>}
+          <p className="mt-3 text-xs font-semibold">Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.</p>
         </section>
       ) : null}
     </div>

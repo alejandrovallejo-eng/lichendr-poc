@@ -620,6 +620,67 @@ export type Database = {
           }
         ];
       };
+      annotation_metrics: {
+        Row: {
+          annotation_set_id: string;
+          trunk_area_pixels: number | null;
+          lichen_union_area_pixels: number | null;
+          lichen_outside_trunk_pixels: number | null;
+          overlapping_lichen_pixels: number | null;
+          coverage_percent: number | null;
+          accepted_region_count: number;
+          lichen_region_count: number;
+          morphotype_count: number;
+          calculation_method: string;
+          calculation_version: string;
+          quality_flags: unknown[] | Record<string, unknown>;
+          calculated_at: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          annotation_set_id: string;
+          trunk_area_pixels?: number | null;
+          lichen_union_area_pixels?: number | null;
+          lichen_outside_trunk_pixels?: number | null;
+          overlapping_lichen_pixels?: number | null;
+          coverage_percent?: number | null;
+          accepted_region_count?: number;
+          lichen_region_count?: number;
+          morphotype_count?: number;
+          calculation_method: string;
+          calculation_version: string;
+          quality_flags?: unknown[] | Record<string, unknown>;
+          calculated_at?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          annotation_set_id?: string;
+          trunk_area_pixels?: number | null;
+          lichen_union_area_pixels?: number | null;
+          lichen_outside_trunk_pixels?: number | null;
+          overlapping_lichen_pixels?: number | null;
+          coverage_percent?: number | null;
+          accepted_region_count?: number;
+          lichen_region_count?: number;
+          morphotype_count?: number;
+          calculation_method?: string;
+          calculation_version?: string;
+          quality_flags?: unknown[] | Record<string, unknown>;
+          calculated_at?: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "annotation_metrics_annotation_set_id_fkey";
+            columns: ["annotation_set_id"];
+            referencedRelation: "annotation_sets";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

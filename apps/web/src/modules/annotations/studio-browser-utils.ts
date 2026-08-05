@@ -110,10 +110,13 @@ export function readWorkingImagePixels(image: WorkingImage): Uint8ClampedArray {
   }
 }
 
-export async function loadMaskFromUrl(source: string, width: number, height: number): Promise<Uint8Array> {
+export async function loadMaskFromUrl(source: string, width: number, height: number, signal?: AbortSignal): Promise<Uint8Array> {
   const pixelCount = validateRasterDimensions(width, height);
-  const loaded = await loadBlobBackedImage(source);
+  const loaded = await loadBlobBackedImage(source, signal);
   try {
+    if (loaded.element.naturalWidth !== width || loaded.element.naturalHeight !== height) {
+      throw new Error("La máscara guardada no coincide con las dimensiones registradas.");
+    }
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;

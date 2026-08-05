@@ -73,3 +73,18 @@ Relaciones:
 Las políticas actuales de `lichen-images` permiten leer, crear, actualizar y eliminar una máscara PNG con una ruta que comience por el UID autenticado. Las capas de MobileSAM usan `{auth_uid}/annotations/{annotation_set_id}/{region_id}.png`. No validan los directorios posteriores ni la relación con la imagen; esta fase no modifica esas políticas ni crea objetos en Storage.
 
 El editor visual conserva capas confirmadas por el usuario separadas de las anotaciones por puntos. La cobertura provisional usa la unión de las máscaras de liquen, recortada por la máscara confirmada de tronco, para evitar doble conteo entre máscaras solapadas.
+
+## Métricas descriptivas de anotación
+
+- `AnnotationMetric`: resumen reproducible 1:1 de un `AnnotationSet`; la clave primaria y foránea `annotation_set_id` usa `ON DELETE CASCADE`.
+- `trunk_area_pixels`: píxeles únicos distintos de cero de la máscara de tronco confirmada.
+- `lichen_union_area_pixels`: píxeles únicos de la unión de máscaras `lichen` aceptadas que están dentro del tronco. Este es el numerador de cobertura.
+- `lichen_outside_trunk_pixels`: píxeles de la unión de liquen fuera del tronco.
+- `overlapping_lichen_pixels`: solapamiento calculado exclusivamente dentro del tronco: `Σ popcount(Li AND T) − popcount(union(Li) AND T)`. Los píxeles solapados no se vuelven a contar en cobertura.
+- El solapamiento o área fuera del tronco no se mezcla con esa métrica; `lichen_outside_trunk_pixels` registra por separado la unión de liquen fuera de `T`.
+- `coverage_percent`: `lichen_union_area_pixels / trunk_area_pixels × 100`; queda nulo si el tronco falta, tiene área cero o las dimensiones son incompatibles.
+- `accepted_region_count`, `lichen_region_count` y `morphotype_count`: conteos descriptivos de la evaluación.
+- `calculation_method`, `calculation_version` y `calculated_at`: trazabilidad del algoritmo ejecutado.
+- `quality_flags`: array u objeto JSON con alertas de integridad o suficiencia.
+
+Las agregaciones de Análisis incluyen únicamente conjuntos con `status = 'completed'` y `completed_at` no nulo. Una métrica conservada tras reabrir una evaluación no se presenta mientras el conjunto sea `draft`.

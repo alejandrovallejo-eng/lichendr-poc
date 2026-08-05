@@ -9,6 +9,7 @@ import {
   createTemporaryUrl,
   deleteRegionWithStorage,
   loadAiAnnotationState,
+  replaceAcceptedTrunkRegion,
   RegionPersistenceError,
   saveAcceptedRegion,
   updateRegionClassification,
@@ -33,8 +34,9 @@ import {
   type MaskPoint,
   type WorkingImage,
 } from "@/modules/annotations/studio-browser-utils";
-import { calculateCoverage, calculateMaskArea } from "@/modules/annotations/studio-mask-utils";
+import { calculateCoverage, calculateMaskArea, calculateMaskBounds, clipMask } from "@/modules/annotations/studio-mask-utils";
 import type {
+  ColorPaletteCandidate,
   ColorWorkerRequest,
   ColorWorkerResponse,
   SimilarColorComponent,
@@ -51,6 +53,21 @@ const COLOR_WORKER_URL = new URL("./color-selection.worker.ts", import.meta.url)
 
 type StudioTool = "select" | "ai" | "lasso" | "brush" | "eraser" | "eyedropper" | "similar";
 type CandidateTarget = "trunk" | "region";
+type StudioState =
+  | "loading-image"
+  | "selecting-trunk"
+  | "proposing-trunk"
+  | "reviewing-trunk"
+  | "trunk-confirmed"
+  | "analyzing-colors"
+  | "exploring-candidates"
+  | "proposing-region"
+  | "reviewing-region"
+  | "classifying-region"
+  | "saving-region"
+  | "ready-for-next-region"
+  | "reviewing-layers"
+  | "error";
 
 interface PointPrompt {
   x: number;
@@ -177,6 +194,45 @@ const TOOL_LABELS: Array<{ value: StudioTool; label: string }> = [
   { value: "similar", label: "Colores similares" },
 ];
 
+const STEP_LABELS = [
+  "Confirmar corteza",
+  "Buscar líquenes",
+  "Clasificar regiones",
+  "Revisar y guardar",
+] as const;
+
+const STATE_STATUS: Record<StudioState, string> = {
+  "loading-image": "Cargando imagen",
+  "selecting-trunk": "Pulsa la corteza para iniciar la propuesta",
+  "proposing-trunk": "Analizando la corteza…",
+  "reviewing-trunk": "Propuesta de corteza lista para confirmar",
+  "trunk-confirmed": "Corteza confirmada",
+  "analyzing-colors": "Analizando colores del tronco",
+  "exploring-candidates": "Pulsa una zona que quieras revisar",
+  "proposing-region": "Analizando la región…",
+  "reviewing-region": "Región propuesta pendiente de confirmación",
+  "classifying-region": "Región lista para clasificar",
+  "saving-region": "Guardando región",
+  "ready-for-next-region": "Región guardada",
+  "reviewing-layers": "Revisa las capas guardadas",
+  error: "La operación necesita atención",
+};
+
+function stepForState(state: StudioState): number {
+  if (["loading-image", "selecting-trunk", "proposing-trunk", "reviewing-trunk"].includes(state)) return 1;
+  if (state === "classifying-region" || state === "saving-region") return 3;
+  if (state === "reviewing-layers") return 4;
+  return 2;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  return [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
+  ];
+}
+
 function sanitizeMessage(value: string): string {
   return value.replace(/[\r\n\t]/g, " ").slice(0, 240);
 }
@@ -218,6 +274,7 @@ function paintMaskCircle(
   radius: number,
   value: 0 | 1,
   before: Map<number, number>,
+  boundary?: Uint8Array | null,
 ): void {
   const minX = Math.max(0, Math.floor(center.x - radius));
   const maxX = Math.min(width - 1, Math.ceil(center.x + radius));
@@ -227,6 +284,7 @@ function paintMaskCircle(
     for (let x = minX; x <= maxX; x += 1) {
       if (Math.hypot(x - center.x, y - center.y) > radius) continue;
       const index = y * width + x;
+      if (boundary && boundary[index] === 0) continue;
       if (mask[index] === value) continue;
       if (!before.has(index)) before.set(index, mask[index]);
       mask[index] = value;
@@ -334,6 +392,7 @@ export default function AnnotationStudio({
   const [sampleConfirmed, setSampleConfirmed] = useState(false);
   const [colorTolerance, setColorTolerance] = useState(12);
   const [minimumArea, setMinimumArea] = useState(40);
+  const [colorPalette, setColorPalette] = useState<ColorPaletteCandidate[]>([]);
   const [colorComponents, setColorComponents] = useState<SimilarColorComponent[]>([]);
   const [excludedComponents, setExcludedComponents] = useState<Set<number>>(new Set());
   const [layers, setLayers] = useState<StudioLayer[]>([]);
@@ -348,7 +407,9 @@ export default function AnnotationStudio({
     notes: "",
   });
   const [notes, setNotes] = useState("");
-  const [status, setStatus] = useState("Cargando espacio de anotación…");
+  const [studioState, setStudioState] = useState<StudioState>("loading-image");
+  const [lastSavedMessage, setLastSavedMessage] = useState<string | null>(null);
+  const [clickFeedback, setClickFeedback] = useState<MaskPoint | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"loading" | "prepare" | "segment" | "save" | "delete" | null>("loading");
   const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
@@ -359,7 +420,7 @@ export default function AnnotationStudio({
     : 1;
   const displayScale = fitScale * view.zoom;
   const trunkLayer = layers.find(isTrunkLayer) ?? null;
-  const phase = trunkLayer ? (layers.some((layer) => !isTrunkLayer(layer)) ? 3 : 2) : 1;
+  const currentStep = stepForState(studioState);
   const selectedLayer = layers.find((layer) => layer.region.id === selectedLayerId) ?? null;
 
   const bumpHistory = useCallback(() => {
@@ -507,6 +568,54 @@ export default function AnnotationStudio({
     setView({ x: 0, y: 0, zoom: 1 });
   }, []);
 
+  const focusMask = useCallback((mask: Uint8Array) => {
+    const image = workingImageRef.current;
+    if (!image) return;
+    const bounds = calculateMaskBounds(mask, image.width, image.height);
+    if (!bounds) return;
+    const baseScale = Math.min(stageSize.width / image.width, stageSize.height / image.height);
+    const paddedWidth = Math.max(1, bounds.width * 1.14);
+    const paddedHeight = Math.max(1, bounds.height * 1.14);
+    const targetScale = Math.min(stageSize.width / paddedWidth, stageSize.height / paddedHeight);
+    const zoom = Math.max(0.5, Math.min(6, targetScale / baseScale));
+    const display = baseScale * zoom;
+    const centerX = bounds.x + bounds.width / 2;
+    const centerY = bounds.y + bounds.height / 2;
+    setView({
+      zoom,
+      x: (image.width / 2 - centerX) * display,
+      y: (image.height / 2 - centerY) * display,
+    });
+  }, [stageSize.height, stageSize.width]);
+
+  const analyzeTrunkColors = useCallback((trunkMask: Uint8Array) => {
+    const worker = colorWorkerRef.current;
+    const image = workingImageRef.current;
+    if (!worker || !image) return;
+    const rgba = image.canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, image.width, image.height).data;
+    if (!rgba) return;
+    const requestId = colorRequestRef.current + 1;
+    colorRequestRef.current = requestId;
+    latestColorRequestRef.current = requestId;
+    setColorPalette([]);
+    setStudioState("analyzing-colors");
+    const rgbaBuffer = rgba.slice().buffer;
+    const scopeBuffer = trunkMask.slice().buffer;
+    worker.postMessage({
+      type: "configure",
+      width: image.width,
+      height: image.height,
+      rgba: rgbaBuffer,
+      scopeMask: scopeBuffer,
+    } satisfies ColorWorkerRequest, [rgbaBuffer, scopeBuffer]);
+    worker.postMessage({
+      type: "palette",
+      requestId,
+      maximumColors: 8,
+      minimumPercentage: 0.35,
+    } satisfies ColorWorkerRequest);
+  }, []);
+
   const updateCoverage = useCallback((nextLayers: StudioLayer[]) => {
     const nextTrunk = nextLayers.find(isTrunkLayer);
     const trunkMask = nextTrunk ? layerMasksRef.current.get(nextTrunk.region.id) ?? null : null;
@@ -550,6 +659,12 @@ export default function AnnotationStudio({
       if (!mountedRef.current || response.requestId !== latestColorRequestRef.current) return;
       if (response.type === "error") {
         setError(response.message);
+        setStudioState("error");
+        return;
+      }
+      if (response.type === "palette") {
+        setColorPalette(response.candidates);
+        setStudioState("exploring-candidates");
         return;
       }
       const requestMetadata = colorRequestMetadataRef.current.get(response.requestId);
@@ -567,7 +682,7 @@ export default function AnnotationStudio({
       });
       setColorComponents(response.components);
       renderCandidate(mask);
-      setStatus("Vista previa por color lista. Incluye o excluye componentes y corrige con pincel o borrador.");
+      setStudioState("exploring-candidates");
     };
     return () => {
       mountedRef.current = false;
@@ -585,7 +700,7 @@ export default function AnnotationStudio({
     const load = async () => {
       setBusy("loading");
       setError(null);
-      setStatus("Cargando imagen y capas guardadas…");
+      setStudioState("loading-image");
       const colorCancelId = colorRequestRef.current + 1;
       colorRequestRef.current = colorCancelId;
       latestColorRequestRef.current = colorCancelId;
@@ -635,17 +750,26 @@ export default function AnnotationStudio({
         setLayers(sorted);
         setSelectedLayerId(initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
         setCandidateTarget(sorted.some(isTrunkLayer) ? "region" : "trunk");
-        setStatus(sorted.some(isTrunkLayer)
-          ? "Tronco evaluable cargado. Marca regiones y confirma cada capa."
-          : "Empieza definiendo el tronco evaluable.");
+        const loadedTrunk = sorted.find(isTrunkLayer);
+        setStudioState(loadedTrunk ? "trunk-confirmed" : "selecting-trunk");
+        setActiveTool("ai");
         updateCoverage(sorted);
         setBusy(null);
-        window.setTimeout(() => renderLayers(sorted, initialTool === "layers" ? sorted[0]?.region.id ?? null : null), 0);
+        window.setTimeout(() => {
+          renderLayers(sorted, initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
+          if (loadedTrunk) {
+            const mask = layerMasksRef.current.get(loadedTrunk.region.id);
+            if (mask) {
+              focusMask(mask);
+              analyzeTrunkColors(mask);
+            }
+          }
+        }, 0);
       } catch (reason) {
         if (!cancelled) {
           setBusy(null);
           setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo abrir el editor.");
-          setStatus("No se pudo cargar la imagen o sus píxeles.");
+          setStudioState("error");
         }
       }
     };
@@ -655,7 +779,7 @@ export default function AnnotationStudio({
       cancelVisionRequest();
       clearVisionSession();
     };
-  }, [annotationSetId, bumpHistory, cancelVisionRequest, clearVisionSession, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
+  }, [analyzeTrunkColors, annotationSetId, bumpHistory, cancelVisionRequest, clearVisionSession, focusMask, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
 
   const pointFromEvent = useCallback((event: KonvaEventObject<PointerEvent | MouseEvent | TouchEvent>): MaskPoint | null => {
     const image = workingImageRef.current;
@@ -680,7 +804,7 @@ export default function AnnotationStudio({
     const controller = new AbortController();
     visionAbortRef.current = controller;
     setBusy("prepare");
-    setStatus("Preparando imagen para MobileSAM…");
+    setStudioState(candidateTarget === "trunk" ? "proposing-trunk" : "proposing-region");
     setError(null);
     try {
       const blob = await new Promise<Blob>((resolve, reject) => {
@@ -703,14 +827,18 @@ export default function AnnotationStudio({
       }
       return null;
     }
-  }, [cancelVisionRequest, clearVisionSession]);
+  }, [cancelVisionRequest, candidateTarget, clearVisionSession]);
 
   const applyMobileSamCandidate = useCallback(async (nextIndex: number, nextCandidates = candidates) => {
     const selected = nextCandidates[nextIndex];
     const image = workingImageRef.current;
     if (!selected || !image) return;
     try {
-      const mask = await loadMaskFromUrl(selected.maskDataUrl, image.width, image.height);
+      let mask = await loadMaskFromUrl(selected.maskDataUrl, image.width, image.height);
+      if (candidateTarget === "region" && trunkLayer) {
+        const trunkMask = layerMasksRef.current.get(trunkLayer.region.id);
+        if (trunkMask) mask = clipMask(mask, trunkMask);
+      }
       setCandidateIndex(nextIndex);
       setCandidate(mask, {
         source: "mobile_sam",
@@ -723,7 +851,7 @@ export default function AnnotationStudio({
     } catch {
       setError("No se pudo leer la máscara propuesta.");
     }
-  }, [candidates, sampledRgb, setCandidate]);
+  }, [candidateTarget, candidates, sampledRgb, setCandidate, trunkLayer]);
 
   const segment = useCallback(async (nextPoints: PointPrompt[]) => {
     if (nextPoints.length === 0) {
@@ -739,7 +867,7 @@ export default function AnnotationStudio({
     const controller = new AbortController();
     visionAbortRef.current = controller;
     setBusy("segment");
-    setStatus("MobileSAM está proponiendo tres límites visuales…");
+    setStudioState(candidateTarget === "trunk" ? "proposing-trunk" : "proposing-region");
     try {
       const response = await fetch("/api/vision/segment", {
         method: "POST",
@@ -759,14 +887,15 @@ export default function AnnotationStudio({
       setCandidates(result.candidates);
       await applyMobileSamCandidate(result.recommendedIndex, result.candidates);
       setBusy(null);
-      setStatus("MobileSAM propone límites visuales; selecciona uno y confirma qué representa.");
+      setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "reviewing-region");
     } catch (reason) {
       if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current) {
         setBusy(null);
         setError("No se pudo generar la selección IA.");
+        setStudioState("error");
       }
     }
-  }, [applyMobileSamCandidate, candidateMetadata?.source, prepareVision, setCandidate]);
+  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, prepareVision, setCandidate]);
 
   const scheduleSegment = useCallback((nextPoints: PointPrompt[]) => {
     if (segmentationTimerRef.current) clearTimeout(segmentationTimerRef.current);
@@ -803,8 +932,11 @@ export default function AnnotationStudio({
         colorToleranceDeltaE: null,
       });
     }
-    paintMaskCircle(mask, image.width, image.height, center, brushSize / 2, value, before);
-  }, [brushSize, sampledRgb]);
+    const trunkMask = candidateTarget === "region" && trunkLayer
+      ? layerMasksRef.current.get(trunkLayer.region.id)
+      : null;
+    paintMaskCircle(mask, image.width, image.height, center, brushSize / 2, value, before, trunkMask);
+  }, [brushSize, candidateTarget, sampledRgb, trunkLayer]);
 
   const applyBrushLine = useCallback((from: MaskPoint, to: MaskPoint, value: 0 | 1, before: Map<number, number>) => {
     const distance = Math.hypot(to.x - from.x, to.y - from.y);
@@ -837,7 +969,11 @@ export default function AnnotationStudio({
       setError("El polígono debe tener al menos tres vértices y un área mayor que cero.");
       return;
     }
-    const next = rasterizePolygon(polygonPoints, image.width, image.height);
+    let next = rasterizePolygon(polygonPoints, image.width, image.height);
+    if (candidateTarget === "region" && trunkLayer) {
+      const trunkMask = layerMasksRef.current.get(trunkLayer.region.id);
+      if (trunkMask) next = clipMask(next, trunkMask);
+    }
     const previous = candidateMaskRef.current ?? new Uint8Array(next.length);
     const changedIndices: number[] = [];
     const beforeValues: number[] = [];
@@ -867,8 +1003,8 @@ export default function AnnotationStudio({
       after: Uint8Array.from(afterValues),
     });
     setPolygonPoints([]);
-    setStatus("Polígono cerrado. Corrige con pincel o borrador antes de guardar.");
-  }, [polygonPoints, pushHistory, sampledRgb, setCandidate]);
+    setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "reviewing-region");
+  }, [candidateTarget, polygonPoints, pushHistory, sampledRgb, setCandidate, trunkLayer]);
 
   const sampleColor = useCallback((point: MaskPoint) => {
     const image = workingImageRef.current;
@@ -880,11 +1016,11 @@ export default function AnnotationStudio({
       setColorComponents([]);
       setExcludedComponents(new Set());
       setError(null);
-      setStatus("Color seleccionado con la mediana de un parche de 7 × 7 píxeles.");
+      setStudioState("exploring-candidates");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "No se pudo muestrear el color.");
     }
-  }, [setColorComponents, setError, setExcludedComponents, setSampleConfirmed, setSampledRgb, setStatus]);
+  }, [setColorComponents, setError, setExcludedComponents, setSampleConfirmed, setSampledRgb]);
 
   const requestSimilarColors = useCallback(() => {
     const worker = colorWorkerRef.current;
@@ -929,10 +1065,8 @@ export default function AnnotationStudio({
       toleranceDeltaE: colorTolerance,
       minimumArea,
     } satisfies ColorWorkerRequest);
-    setStatus(trunkMask
-      ? "Calculando componentes de color dentro del tronco evaluable…"
-      : "Calculando componentes de color dentro del ROI actual…");
-  }, [colorTolerance, minimumArea, roi, sampledRgb, setColorComponents, setError, setExcludedComponents, setStatus, trunkLayer]);
+    setStudioState("analyzing-colors");
+  }, [colorTolerance, minimumArea, roi, sampledRgb, setColorComponents, setError, setExcludedComponents, trunkLayer]);
 
   useEffect(() => {
     const requestId = colorRequestRef.current + 1;
@@ -969,11 +1103,78 @@ export default function AnnotationStudio({
     } satisfies ColorWorkerRequest);
   }, [excludedComponents, setExcludedComponents]);
 
+  const selectColorCandidate = useCallback((candidate: ColorPaletteCandidate) => {
+    resetCandidate();
+    setCandidateTarget("region");
+    setSampledRgb(candidate.rgb);
+    setSampleConfirmed(true);
+    setActiveTool("similar");
+    setStudioState("analyzing-colors");
+  }, [resetCandidate]);
+
+  const discardRegionCandidate = useCallback(() => {
+    resetCandidate();
+    setActiveTool("ai");
+    setCandidateTarget("region");
+    setStudioState("exploring-candidates");
+  }, [resetCandidate]);
+
+  const retryTrunkProposal = useCallback(() => {
+    resetCandidate();
+    setCandidateTarget("trunk");
+    setActiveTool("ai");
+    setStudioState("selecting-trunk");
+    fitToScreen();
+  }, [fitToScreen, resetCandidate]);
+
+  const editTrunk = useCallback(() => {
+    if (!trunkLayer) return;
+    const regionCount = layers.filter((layer) => !isTrunkLayer(layer)).length;
+    if (regionCount > 0 && !window.confirm("Ya existen regiones guardadas. ¿Quieres editar la corteza manteniendo esas regiones?")) return;
+    const mask = layerMasksRef.current.get(trunkLayer.region.id);
+    if (!mask) return;
+    setCandidateTarget("trunk");
+    setCandidate(mask.slice(), {
+      source: trunkLayer.region.source,
+      score: trunkLayer.region.score,
+      modelName: trunkLayer.region.model_name,
+      modelVersion: trunkLayer.region.model_version,
+      representativeColorHex: trunkLayer.region.representative_color_hex,
+      colorToleranceDeltaE: trunkLayer.region.color_tolerance_delta_e,
+    });
+    setActiveTool("brush");
+    setStudioState("reviewing-trunk");
+  }, [layers, setCandidate, trunkLayer]);
+
   const handleCanvasPointerDown = useCallback((event: KonvaEventObject<PointerEvent>) => {
     if (busy || event.target.name() === "guide-point") return;
     const point = pointFromEvent(event);
     if (!point) return;
+    setClickFeedback(point);
+    window.setTimeout(() => setClickFeedback(null), 450);
+    const trunkMask = trunkLayer ? layerMasksRef.current.get(trunkLayer.region.id) : null;
+    if (candidateTarget === "region" && trunkMask) {
+      const index = Math.floor(point.y) * (workingImageRef.current?.width ?? 0) + Math.floor(point.x);
+      if (trunkMask[index] === 0) {
+        setError("Pulsa dentro de la corteza confirmada.");
+        return;
+      }
+    }
     if (activeTool === "ai") {
+      if (trunkLayer && ["exploring-candidates", "ready-for-next-region", "trunk-confirmed"].includes(studioState)) {
+        const image = workingImageRef.current;
+        if (!image) return;
+        sampleColor(point);
+        setSampleConfirmed(true);
+        setCandidateTarget("region");
+        setClassification("lichen");
+        const before = points;
+        const after = [...points, { x: point.x / image.width, y: point.y / image.height, label: 1 as const }];
+        setPoints(after);
+        pushHistory({ kind: "points", before, after });
+        scheduleSegment(after);
+        return;
+      }
       addGuidePoint(point);
       return;
     }
@@ -993,7 +1194,7 @@ export default function AnnotationStudio({
       applyBrushCircle(point, value, stroke.before);
       renderCandidate();
     }
-  }, [activeTool, addGuidePoint, applyBrushCircle, busy, pointFromEvent, renderCandidate, sampleColor]);
+  }, [activeTool, addGuidePoint, applyBrushCircle, busy, candidateTarget, pointFromEvent, points, pushHistory, renderCandidate, sampleColor, scheduleSegment, studioState, trunkLayer]);
 
   const handleCanvasPointerMove = useCallback((event: KonvaEventObject<PointerEvent>) => {
     const stroke = strokeRef.current;
@@ -1097,7 +1298,7 @@ export default function AnnotationStudio({
       }
       if (event.key === "Escape") {
         setPolygonPoints([]);
-        setStatus("Polígono cancelado.");
+        setStudioState(trunkLayer ? "exploring-candidates" : "selecting-trunk");
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -1107,14 +1308,18 @@ export default function AnnotationStudio({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleRedo, handleUndo]);
+  }, [handleRedo, handleUndo, trunkLayer]);
 
   const persistCandidate = async () => {
     const image = workingImageRef.current;
     const mask = candidateMaskRef.current;
     const metadata = candidateMetadata;
     if (!image || !mask || !metadata || busy) return;
-    const areaPixels = calculateMaskArea(mask);
+    const trunkBoundary = candidateTarget === "region" && trunkLayer
+      ? layerMasksRef.current.get(trunkLayer.region.id)
+      : null;
+    const persistedMask = trunkBoundary ? clipMask(mask, trunkBoundary) : mask;
+    const areaPixels = calculateMaskArea(persistedMask);
     if (areaPixels === 0) {
       setError("La máscara candidata está vacía.");
       return;
@@ -1147,7 +1352,7 @@ export default function AnnotationStudio({
 
     setBusy("save");
     setError(null);
-    setStatus("Guardando máscara en la capa privada…");
+    setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "saving-region");
     try {
       if (nextClassification === "lichen" && sampledRgb) {
         const selectedColor = rgbToHex(sampledRgb);
@@ -1183,8 +1388,9 @@ export default function AnnotationStudio({
           }
         }
       }
-      const id = crypto.randomUUID();
-      const blob = await maskToPngBlob(mask, image.width, image.height);
+      const replacingTrunk = candidateTarget === "trunk" ? trunkLayer : null;
+      const id = replacingTrunk?.region.id ?? crypto.randomUUID();
+      const blob = await maskToPngBlob(persistedMask, image.width, image.height);
       const saveInput: RegionSaveInput = {
         id,
         annotationSetId,
@@ -1209,33 +1415,49 @@ export default function AnnotationStudio({
         colorToleranceDeltaE: metadata.colorToleranceDeltaE,
         regionRole: candidateTarget === "trunk" ? "trunk" : null,
       };
-      const region = await saveAcceptedRegion(saveInput);
+      const region = replacingTrunk
+        ? await replaceAcceptedTrunkRegion(replacingTrunk.region, saveInput)
+        : await saveAcceptedRegion(saveInput);
       if (!mountedRef.current) return;
-      layerMasksRef.current.set(region.id, mask.slice());
+      layerMasksRef.current.set(region.id, persistedMask.slice());
       const layer: StudioLayer = {
         region,
         visible: true,
         opacity: nextClassification === "bark" ? 0.28 : 0.45,
         title: defaultLayerTitle(region, nextMorphotypes),
       };
-      const nextLayers = sortLayers([...layers, layer]);
+      const nextLayers = replacingTrunk
+        ? sortLayers(layers.map((item) => item.region.id === region.id ? layer : item))
+        : sortLayers([...layers, layer]);
       setMorphotypes(nextMorphotypes);
       onMorphotypesChange(nextMorphotypes);
       setSelectedLayerId(region.id);
       refreshLayerCanvases(nextLayers, region.id);
-      pushHistory({ kind: "layer-add", layer, saveInput });
+      if (!replacingTrunk) pushHistory({ kind: "layer-add", layer, saveInput });
       setCandidateTarget("region");
       resetCandidate();
       setShowNewMorphotype(false);
       setNewMorphotype({ label: "", growthForm: "unknown", notes: "" });
       setBusy(null);
-      setStatus(candidateTarget === "trunk"
-        ? "Tronco evaluable confirmado. Ahora marca regiones."
-        : "Capa confirmada y guardada.");
+      setActiveTool("ai");
+      if (candidateTarget === "trunk") {
+        focusMask(persistedMask);
+        analyzeTrunkColors(persistedMask);
+      } else {
+        const morphotypeLabel = nextClassification === "lichen"
+          ? nextMorphotypes.find((item) => item.id === selectedMorphotypeId)?.label
+          : null;
+        setLastSavedMessage(`Región guardada como ${CLASS_LABELS[nextClassification]}${morphotypeLabel ? ` — ${morphotypeLabel}` : ""}.`);
+        setStudioState("ready-for-next-region");
+        window.setTimeout(() => {
+          if (mountedRef.current) setStudioState("exploring-candidates");
+        }, 1800);
+      }
     } catch (reason) {
       if (mountedRef.current) {
         setBusy(null);
         setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo guardar la capa.");
+        setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "classifying-region");
       }
     }
   };
@@ -1254,6 +1476,7 @@ export default function AnnotationStudio({
     setSelectedLayerId(layer.region.id);
     setClassification(layer.region.classification);
     setMorphotypeId(layer.region.morphotype_id);
+    setStudioState("reviewing-layers");
     renderLayers(layers, layer.region.id);
   }, [layers, renderLayers, setClassification, setMorphotypeId, setSelectedLayerId]);
 
@@ -1275,7 +1498,7 @@ export default function AnnotationStudio({
         ? { ...layer, region, title: defaultLayerTitle(region, morphotypes) }
         : layer);
       refreshLayerCanvases(sortLayers(next), region.id);
-      setStatus("Clasificación de la capa actualizada.");
+      setLastSavedMessage("Clasificación de la capa actualizada.");
       setBusy(null);
     } catch {
       setBusy(null);
@@ -1296,7 +1519,7 @@ export default function AnnotationStudio({
       );
       const next = layers.map((item) => item.region.id === region.id ? { ...item, region, title: name } : item);
       refreshLayerCanvases(next, region.id);
-      setStatus("Nombre de capa actualizado.");
+      setLastSavedMessage("Nombre de capa actualizado.");
       setBusy(null);
     } catch {
       setBusy(null);
@@ -1328,7 +1551,7 @@ export default function AnnotationStudio({
       setMorphotypes(nextMorphotypes);
       onMorphotypesChange(nextMorphotypes);
       refreshLayerCanvases(nextLayers, selectedLayer.region.id);
-      setStatus("Morfotipo actualizado.");
+      setLastSavedMessage("Morfotipo actualizado.");
       setBusy(null);
     } catch {
       setBusy(null);
@@ -1357,9 +1580,10 @@ export default function AnnotationStudio({
       refreshLayerCanvases(next, null);
       if (isTrunkLayer(layer)) {
         setCandidateTarget("trunk");
-        setStatus("Se eliminó el tronco evaluable. Define uno nuevo antes de calcular cobertura.");
+        setStudioState("selecting-trunk");
+        fitToScreen();
       } else {
-        setStatus("Capa eliminada.");
+        setLastSavedMessage("Capa eliminada.");
       }
       if (cleanupPending) setError("La capa se eliminó, pero la limpieza del archivo de máscara quedó pendiente.");
       historyRef.current = [];
@@ -1379,7 +1603,7 @@ export default function AnnotationStudio({
   } : { x: 0, y: 0 };
 
   return (
-    <div className="space-y-3" style={{ color: "var(--ld-text)" }}>
+    <div className="annotation-studio space-y-3" style={{ color: "var(--ld-text)" }}>
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Annotation Studio</h1>
@@ -1390,20 +1614,22 @@ export default function AnnotationStudio({
         </button>
       </header>
 
-      <ol className="grid gap-2 text-sm sm:grid-cols-3" aria-label="Flujo de trabajo">
-        {[
-          [1, "Definir tronco"],
-          [2, "Marcar regiones"],
-          [3, "Revisar y guardar"],
-        ].map(([step, label]) => (
-          <li key={step} className="rounded border px-3 py-2 font-medium" style={{
-            borderColor: phase === step ? "var(--ld-text)" : "var(--ld-border)",
-            background: phase === step ? "var(--ld-sand)" : "var(--ld-card)",
-          }}>
-            {step}. {label}
-          </li>
-        ))}
-      </ol>
+      <div className="sticky top-0 z-20 rounded border bg-white p-3 shadow-sm" style={{ borderColor: "var(--ld-border)" }}>
+        <p className="text-base font-semibold">Paso {currentStep} de 4 — {STEP_LABELS[currentStep - 1]}</p>
+        <ol className="mt-2 grid gap-2 text-xs sm:grid-cols-4" aria-label="Flujo de trabajo">
+          {STEP_LABELS.map((label, index) => {
+            const step = index + 1;
+            return (
+              <li key={label} aria-current={currentStep === step ? "step" : undefined} className="rounded border px-2 py-2 font-medium" style={{
+                borderColor: currentStep === step ? "var(--ld-text)" : "var(--ld-border)",
+                background: currentStep === step ? "var(--ld-sand)" : "var(--ld-card)",
+              }}>
+                {step}. {label}
+              </li>
+            );
+          })}
+        </ol>
+      </div>
 
       <div className="flex flex-wrap gap-2 rounded border bg-white p-2" role="toolbar" aria-label="Herramientas de dibujo" style={{ borderColor: "var(--ld-border)" }}>
         {TOOL_LABELS.map((tool) => {
@@ -1420,21 +1646,25 @@ export default function AnnotationStudio({
                 setExcludedComponents(new Set());
                 if (tool.value === "ai" || tool.value === "lasso") setCandidateTarget(trunkLayer ? "region" : "trunk");
               }}
-              className="rounded border px-3 py-2 text-sm font-medium focus-visible:outline-2 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded border px-3 py-2 text-sm font-medium"
               style={{
                 borderColor: activeTool === tool.value ? "var(--ld-text)" : "var(--ld-border)",
                 background: activeTool === tool.value ? "var(--ld-sand)" : "#fff",
               }}
             >
-              {tool.label}
+              {activeTool === tool.value ? "✓ " : ""}{tool.label}
             </button>
           );
         })}
-        <button type="button" disabled={historyCounts.undo === 0 || Boolean(busy)} onClick={() => void handleUndo()} className="rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Deshacer</button>
-        <button type="button" disabled={historyCounts.redo === 0 || Boolean(busy)} onClick={() => void handleRedo()} className="rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Rehacer</button>
-        <button type="button" onClick={fitToScreen} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Ajustar imagen a pantalla</button>
+        <button type="button" disabled={historyCounts.undo === 0 || Boolean(busy)} onClick={() => void handleUndo()} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Deshacer</button>
+        <button type="button" disabled={historyCounts.redo === 0 || Boolean(busy)} onClick={() => void handleRedo()} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Rehacer</button>
+        <button type="button" onClick={fitToScreen} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Ver imagen completa</button>
+        {trunkLayer ? <button type="button" disabled={Boolean(busy)} onClick={editTrunk} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Editar corteza</button> : null}
         <span className="sr-only" aria-live="polite">Deshacer {historyCounts.undo}; rehacer {historyCounts.redo}</span>
       </div>
+      <p className="rounded border bg-white px-3 py-2 text-sm font-medium" aria-live="polite" style={{ borderColor: "var(--ld-border)" }}>
+        Herramienta activa: {activeTool === "ai" ? (candidateTarget === "trunk" ? "Seleccionar corteza" : "Buscar liquen") : TOOL_LABELS.find((tool) => tool.value === activeTool)?.label}
+      </p>
 
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_320px]">
         <main className="min-w-0 rounded border bg-slate-100 p-2" style={{ borderColor: "var(--ld-border)" }}>
@@ -1472,7 +1702,12 @@ export default function AnnotationStudio({
             ) : null}
           </div>
 
-          <div ref={hostRef} className="overflow-hidden rounded bg-slate-900" aria-label="Lienzo de anotación">
+          <div
+            ref={hostRef}
+            className="overflow-hidden rounded bg-slate-900"
+            aria-label="Lienzo de anotación"
+            style={{ cursor: busy ? "wait" : activeTool === "select" ? "grab" : activeTool === "eraser" ? "cell" : "crosshair" }}
+          >
             <Stage
               width={stageSize.width}
               height={stageSize.height}
@@ -1542,6 +1777,16 @@ export default function AnnotationStudio({
                       }}
                     />
                   ))}
+                  {clickFeedback ? (
+                    <Circle
+                      x={clickFeedback.x}
+                      y={clickFeedback.y}
+                      radius={12 / displayScale}
+                      stroke="#facc15"
+                      strokeWidth={3 / displayScale}
+                      listening={false}
+                    />
+                  ) : null}
                 </Group>
               </Layer>
             </Stage>
@@ -1549,21 +1794,68 @@ export default function AnnotationStudio({
           <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>
             La IA propone un límite visual; la persona usuaria confirma si representa tronco, liquen u otra categoría.
           </p>
-          {status ? <p className="mt-2 rounded border bg-white p-2 text-sm" aria-live="polite" style={{ borderColor: "var(--ld-border)" }}>{status}</p> : null}
+          <p className="mt-2 flex items-center gap-2 rounded border bg-white p-2 text-sm font-medium" aria-live="polite" style={{ borderColor: "var(--ld-border)" }}>
+            {busy ? <span className="studio-spinner" aria-hidden="true" /> : null}
+            {STATE_STATUS[studioState]}
+          </p>
+          {lastSavedMessage ? <p className="mt-2 rounded border border-green-200 bg-green-50 p-2 text-sm text-green-800" aria-live="polite">{lastSavedMessage}</p> : null}
           {error ? <p className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700" role="alert">{error}</p> : null}
         </main>
 
         <aside className="space-y-3">
-          {!trunkLayer ? (
+          <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+            <h2 className="font-semibold">Qué hacer ahora</h2>
+            <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
+              {currentStep === 1
+                ? candidateMetadata
+                  ? "La IA ha propuesto la corteza. Revisa el área naranja y pulsa Confirmar corteza."
+                  : "Pulsa un punto de la corteza para que MobileSAM proponga su límite."
+                : currentStep === 2
+                  ? "Pulsa una zona diferente de la corteza o selecciona uno de los colores encontrados."
+                  : currentStep === 3
+                    ? "Confirma qué contiene la región y elige un morfotipo si es liquen."
+                    : "Revisa las capas guardadas y continúa buscando regiones o finaliza."}
+            </p>
+          </section>
+          {currentStep === 1 ? (
             <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-              <h2 className="font-semibold">1. Tronco evaluable</h2>
-              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Define el límite que se usará como denominador de cobertura.</p>
-              <button type="button" onClick={() => { setCandidateTarget("trunk"); setActiveTool("ai"); }} className="mt-3 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Sugerir tronco con IA</button>
-              <button type="button" onClick={() => { setCandidateTarget("trunk"); setActiveTool("lasso"); }} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Dibujar tronco manualmente</button>
+              <h2 className="font-semibold">Confirmar corteza</h2>
+              {studioState === "proposing-trunk" ? (
+                <p className="mt-3 flex items-center gap-2 text-sm"><span className="studio-spinner" aria-hidden="true" />Analizando la corteza…</p>
+              ) : null}
+
+              {currentStep === 2 ? (
+                <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+                  <h2 className="font-semibold">Buscar líquenes</h2>
+                  <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>La aplicación encontró colores y regiones visualmente diferentes dentro de la corteza. Pulsa una zona para revisarla. Tú decides si realmente es un liquen.</p>
+                  {!candidateMetadata && layers.some((layer) => !isTrunkLayer(layer)) ? <button type="button" onClick={() => setStudioState("reviewing-layers")} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Revisar capas y guardar</button> : null}
+                </section>
+              ) : null}
+
+              {currentStep === 4 ? (
+                <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+                  <h2 className="font-semibold">Revisión final</h2>
+                  <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Las capas mostradas abajo ya están guardadas en este conjunto de anotación.</p>
+                  <button type="button" onClick={() => { setStudioState("exploring-candidates"); setActiveTool("ai"); }} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Continuar buscando regiones</button>
+                </section>
+              ) : null}
+              {candidateMetadata && candidateTarget === "trunk" ? (
+                <>
+                  <button type="button" aria-busy={busy === "save"} disabled={Boolean(busy)} onClick={() => void persistCandidate()} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">
+                    {busy === "save" ? "Guardando corteza…" : "Confirmar corteza y continuar"}
+                  </button>
+                  <button type="button" disabled={Boolean(busy)} onClick={() => setActiveTool("brush")} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Corregir selección</button>
+                  <button type="button" disabled={Boolean(busy)} onClick={retryTrunkProposal} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Volver a intentar</button>
+                </>
+              ) : (
+                <button type="button" disabled={Boolean(busy)} aria-pressed={activeTool === "ai"} onClick={() => { setCandidateTarget("trunk"); setActiveTool("ai"); }} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">
+                  {busy ? "Analizando la corteza…" : "Seleccionar corteza"}
+                </button>
+              )}
             </section>
           ) : null}
 
-          {candidates.length > 0 ? (
+          {candidates.length > 1 && candidateMetadata ? (
             <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
               <h2 className="font-semibold">Propuestas MobileSAM</h2>
               <div className="mt-2 grid grid-cols-3 gap-2">
@@ -1576,43 +1868,63 @@ export default function AnnotationStudio({
             </section>
           ) : null}
 
-          {sampledRgb ? (
+          {trunkLayer && currentStep === 2 ? (
             <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-              <h2 className="font-semibold">Color seleccionado</h2>
-              <div className="mt-2 flex items-center gap-3">
-                <span className="h-14 w-14 rounded border" aria-label={`Muestra ${rgbToHex(sampledRgb)}`} style={{ background: rgbToHex(sampledRgb), borderColor: "var(--ld-border)" }} />
-                <div className="text-sm">
-                  <p>{rgbToHex(sampledRgb)}</p>
-                  <p className="text-xs" style={{ color: "var(--ld-text-secondary)" }}>RGB {sampledRgb.join(", ")}</p>
-                </div>
+              <h2 className="font-semibold">Colores encontrados</h2>
+              <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Regiones visualmente diferentes; ninguna está identificada automáticamente como liquen.</p>
+              {studioState === "analyzing-colors" && colorPalette.length === 0 ? <p className="mt-3 flex items-center gap-2 text-sm"><span className="studio-spinner" />Analizando colores del tronco</p> : null}
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {colorPalette.map((candidate) => (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    aria-pressed={sampledRgb ? rgbToHex(sampledRgb) === rgbToHex(candidate.rgb) : false}
+                    disabled={Boolean(busy)}
+                    onClick={() => selectColorCandidate(candidate)}
+                    className="rounded border p-2 text-left text-xs"
+                    style={{ borderColor: "var(--ld-border)" }}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="h-8 w-8 shrink-0 rounded border" style={{ background: rgbToHex(candidate.rgb), borderColor: "var(--ld-border)" }} />
+                      <strong>{candidate.percentage.toFixed(1)}% del tronco</strong>
+                    </span>
+                    <span className="relative mt-2 block h-5 rounded bg-slate-100" aria-label="Ubicación aproximada">
+                      <span className="absolute h-2 w-2 rounded-full bg-slate-900" style={{ left: `${candidate.centroidX * 100}%`, top: `${candidate.centroidY * 100}%`, transform: "translate(-50%, -50%)" }} />
+                    </span>
+                  </button>
+                ))}
               </div>
-              <button type="button" onClick={() => setSampleConfirmed(true)} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: sampleConfirmed ? "#15803d" : "var(--ld-border)" }}>
-                {sampleConfirmed ? "Color confirmado" : "Usar este color"}
-              </button>
-              <button type="button" onClick={() => setActiveTool("eyedropper")} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Muestrear de nuevo</button>
+            </section>
+          ) : null}
+
+          {sampledRgb && candidateTarget === "region" ? (
+            <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+              <h2 className="font-semibold">Muestra de color</h2>
+              <div className="mt-2 flex items-center gap-3">
+                <span className="h-20 w-20 rounded border" aria-label="Color muestreado" style={{ background: rgbToHex(sampledRgb), borderColor: "var(--ld-border)" }} />
+                {studioState === "classifying-region" && classification === "lichen" ? (
+                  <label className="text-sm">Ajustar color
+                    <input className="mt-1 block h-11 w-20" type="color" value={rgbToHex(sampledRgb)} onChange={(event) => { setSampledRgb(hexToRgb(event.target.value)); setSampleConfirmed(true); }} />
+                  </label>
+                ) : null}
+              </div>
+              <details className="mt-2 text-xs"><summary>Opciones avanzadas</summary><p className="mt-1">HEX {rgbToHex(sampledRgb)} · RGB {sampledRgb.join(", ")}</p></details>
             </section>
           ) : null}
 
           {activeTool === "similar" && sampledRgb ? (
             <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-              <h2 className="font-semibold">Colores similares</h2>
-              <label className="mt-3 block text-sm">
-                Tolerancia Delta E: {colorTolerance}
-                <input className="w-full" type="range" min={1} max={50} value={colorTolerance} onChange={(event) => {
-                  setColorTolerance(Number(event.target.value));
-                  setColorComponents([]);
-                  setExcludedComponents(new Set());
-                }} />
-              </label>
-              <label className="mt-3 block text-sm">
-                Área mínima: {minimumArea} px
-                <input className="w-full" type="range" min={1} max={1000} value={minimumArea} onChange={(event) => {
-                  setMinimumArea(Number(event.target.value));
-                  setColorComponents([]);
-                  setExcludedComponents(new Set());
-                }} />
-              </label>
-              <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>CIELAB D65 y Delta E 1976. La búsqueda se limita {trunkLayer ? "al tronco confirmado" : "al ROI actual"}.</p>
+              <h2 className="font-semibold">Regiones candidatas</h2>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button type="button" disabled={colorTolerance <= 1 || Boolean(busy)} onClick={() => setColorTolerance((value) => Math.max(1, value - 2))} className="rounded border px-2 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Menos parecido</button>
+                <button type="button" disabled={colorTolerance >= 50 || Boolean(busy)} onClick={() => setColorTolerance((value) => Math.min(50, value + 2))} className="rounded border px-2 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Más parecido</button>
+              </div>
+              <details className="mt-3 text-xs">
+                <summary>Opciones avanzadas</summary>
+                <label className="mt-2 block">Delta E: {colorTolerance}<input className="w-full" type="range" min={1} max={50} value={colorTolerance} onChange={(event) => setColorTolerance(Number(event.target.value))} /></label>
+                <label className="mt-2 block">Área mínima: {minimumArea} px<input className="w-full" type="range" min={1} max={1000} value={minimumArea} onChange={(event) => setMinimumArea(Number(event.target.value))} /></label>
+                <p className="mt-2">CIELAB D65 · Delta E 1976</p>
+              </details>
               <div className="mt-2 max-h-40 space-y-1 overflow-auto">
                 {colorComponents.map((component, index) => (
                   <label key={component.id} className="flex items-center justify-between gap-2 text-sm">
@@ -1621,26 +1933,39 @@ export default function AnnotationStudio({
                   </label>
                 ))}
               </div>
+              {candidateMetadata?.source === "color_assisted" ? <button type="button" disabled={Boolean(busy)} onClick={() => setStudioState("reviewing-region")} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Revisar esta región</button> : null}
             </section>
           ) : null}
 
-          {candidateMetadata ? (
+          {candidateMetadata && candidateTarget === "region" && studioState === "reviewing-region" ? (
             <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
-              <h2 className="font-semibold">{candidateTarget === "trunk" ? "Confirmar tronco" : "Clasificar región"}</h2>
-              {candidateTarget === "region" ? (
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  {ANNOTATION_REGION_CLASSES.map((item) => (
-                    <button key={item} type="button" aria-pressed={classification === item} onClick={() => setClassification(item)} className="rounded border px-2 py-2 text-sm" style={{ borderColor: classification === item ? "var(--ld-text)" : "var(--ld-border)" }}>{CLASS_LABELS[item]}</button>
-                  ))}
-                </div>
-              ) : null}
-              {candidateTarget === "region" && classification === "lichen" ? (
+              <h2 className="font-semibold">¿Esta región corresponde a un liquen?</h2>
+              <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>MobileSAM y el color solo proponen el límite. Tú decides qué contiene.</p>
+              <button type="button" disabled={Boolean(busy)} onClick={() => { setClassification("lichen"); setStudioState("classifying-region"); setActiveTool("select"); }} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">Sí, clasificar</button>
+              <button type="button" disabled={Boolean(busy)} onClick={discardRegionCandidate} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>No, descartar</button>
+            </section>
+          ) : null}
+
+          {candidateMetadata && candidateTarget === "region" && ["classifying-region", "saving-region"].includes(studioState) ? (
+            <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
+              <h2 className="font-semibold">¿Qué encontraste?</h2>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {ANNOTATION_REGION_CLASSES.map((item) => (
+                  <button key={item} type="button" aria-pressed={classification === item} onClick={() => setClassification(item)} className="rounded border px-2 py-3 text-sm font-medium" style={{ borderColor: classification === item ? "var(--ld-text)" : "var(--ld-border)" }}>{classification === item ? "✓ " : ""}{CLASS_LABELS[item]}</button>
+                ))}
+              </div>
+              {classification === "lichen" ? (
                 <div className="mt-3 space-y-2">
-                  <select value={morphotypeId ?? ""} disabled={showNewMorphotype} onChange={(event) => setMorphotypeId(event.target.value || null)} className="w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
-                    <option value="">Selecciona morfotipo</option>
-                    {morphotypes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-                  </select>
-                  <label className="block text-sm"><input type="checkbox" checked={showNewMorphotype} onChange={(event) => setShowNewMorphotype(event.target.checked)} /> Crear morfotipo</label>
+                  <h3 className="text-sm font-semibold">Morfotipo</h3>
+                  <div className="space-y-2">
+                    {morphotypes.map((item) => (
+                      <button key={item.id} type="button" disabled={showNewMorphotype} aria-pressed={morphotypeId === item.id && !showNewMorphotype} onClick={() => setMorphotypeId(item.id)} className="flex w-full items-center gap-3 rounded border p-2 text-left text-sm" style={{ borderColor: morphotypeId === item.id && !showNewMorphotype ? "var(--ld-text)" : "var(--ld-border)" }}>
+                        <span className="h-9 w-9 shrink-0 rounded border" style={{ background: item.color_hex ?? "#d1d5db", borderColor: "var(--ld-border)" }} />
+                        <span><strong>{item.label}</strong><span className="block text-xs" style={{ color: "var(--ld-text-secondary)" }}>{item.growth_form}</span></span>
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" aria-pressed={showNewMorphotype} onClick={() => setShowNewMorphotype((value) => !value)} className="w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>{showNewMorphotype ? "✓ " : ""}Crear nuevo morfotipo</button>
                   {showNewMorphotype ? (
                     <>
                       <label className="block text-sm">Nombre<input value={newMorphotype.label} onChange={(event) => setNewMorphotype((current) => ({ ...current, label: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
@@ -1652,11 +1977,8 @@ export default function AnnotationStudio({
                   ) : null}
                 </div>
               ) : null}
-              {candidateTarget === "region" ? <label className="mt-3 block text-sm">Notas de la región<textarea rows={2} value={notes} onChange={(event) => setNotes(event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label> : null}
-              <button type="button" disabled={Boolean(busy)} onClick={() => void persistCandidate()} className="mt-3 w-full rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40" style={{ borderColor: "var(--ld-text)", background: "var(--ld-sand)" }}>
-                {candidateTarget === "trunk" ? "Confirmar como Tronco evaluable" : "Guardar como capa"}
-              </button>
-              <button type="button" disabled={Boolean(busy)} onClick={resetCandidate} className="mt-2 w-full rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Descartar candidato</button>
+              <label className="mt-3 block text-sm">Notas de la región<textarea rows={2} value={notes} onChange={(event) => setNotes(event.target.value)} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
+              <button type="button" aria-busy={busy === "save"} disabled={Boolean(busy)} onClick={() => void persistCandidate()} className="studio-primary mt-3 w-full rounded border px-3 py-2 text-sm font-semibold">{busy === "save" ? "Guardando región…" : "Guardar región"}</button>
             </section>
           ) : null}
 

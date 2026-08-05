@@ -5,6 +5,13 @@ export interface CoverageSummary {
   coveragePercent: number | null;
 }
 
+export interface MaskBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 function assertSameLength(left: Uint8Array, right: Uint8Array): void {
   if (left.length !== right.length) {
     throw new Error("Las máscaras deben tener las mismas dimensiones.");
@@ -44,6 +51,24 @@ export function intersectMasks(left: Uint8Array, right: Uint8Array): Uint8Array 
 
 export function clipMask(mask: Uint8Array, boundary: Uint8Array): Uint8Array {
   return intersectMasks(mask, boundary);
+}
+
+export function calculateMaskBounds(mask: Uint8Array, width: number, height: number): MaskBounds | null {
+  if (mask.length !== width * height) throw new Error("La máscara no coincide con las dimensiones de la imagen.");
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let index = 0; index < mask.length; index += 1) {
+    if (mask[index] === 0) continue;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return maxX < 0 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
 }
 
 export function calculateCoverage(trunk: Uint8Array | null, lichenMasks: readonly Uint8Array[]): CoverageSummary {

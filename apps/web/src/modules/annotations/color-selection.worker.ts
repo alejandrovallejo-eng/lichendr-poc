@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import type {
+  ColorPaletteCandidate,
   ColorWorkerRequest,
   ColorWorkerResponse,
   SimilarColorComponent,
@@ -90,6 +91,8 @@ async function selectSimilarColors(
     if (matches[start] === 0 || labels[start] !== 0) continue;
     let read = 0;
     let write = 1;
+    let sumX = start % imageWidth;
+    let sumY = Math.floor(start / imageWidth);
     queue[0] = start;
     labels[start] = nextLabel;
     while (read < write) {
@@ -107,6 +110,8 @@ async function selectSimilarColors(
         labels[neighbor] = nextLabel;
         queue[write] = neighbor;
         write += 1;
+        sumX += neighbor % imageWidth;
+        sumY += Math.floor(neighbor / imageWidth);
       }
       if (read % 65536 === 0) {
         await yieldToMessages();
@@ -114,11 +119,114 @@ async function selectSimilarColors(
       }
     }
     if (write >= minimumArea) {
-      components.push({ id: nextLabel, areaPixels: write });
+      components.push({
+        id: nextLabel,
+        areaPixels: write,
+        centroidX: sumX / write / imageWidth,
+        centroidY: sumY / write / imageHeight,
+      });
       nextLabel += 1;
     } else {
       for (let queueIndex = 0; queueIndex < write; queueIndex += 1) {
         labels[queue[queueIndex]] = -1;
+      }
+
+      interface PaletteGroup {
+        count: number;
+        red: number;
+        green: number;
+        blue: number;
+        x: number;
+        y: number;
+      }
+
+      async function buildPalette(
+        requestId: number,
+        maximumColors: number,
+        minimumPercentage: number,
+      ): Promise<void> {
+        const rgba = imageRgba;
+        const scope = scopeMask;
+        if (!rgba || !scope || imageWidth <= 0 || imageHeight <= 0) {
+          post({ type: "error", requestId, message: "La imagen de trabajo no está preparada." });
+          return;
+        }
+
+        const scopedPixels = scope.reduce((sum, value) => sum + (value === 0 ? 0 : 1), 0);
+        if (scopedPixels === 0) {
+          post({ type: "palette", requestId, candidates: [] });
+          return;
+        }
+
+        const stride = Math.max(1, Math.ceil(Math.sqrt(scopedPixels / 60_000)));
+        const buckets = new Map<string, PaletteGroup>();
+        let sampledPixels = 0;
+        for (let y = 0; y < imageHeight; y += stride) {
+          for (let x = 0; x < imageWidth; x += stride) {
+            const index = y * imageWidth + x;
+            if (scope[index] === 0) continue;
+            const rgbaIndex = index * 4;
+            const red = rgba[rgbaIndex];
+            const green = rgba[rgbaIndex + 1];
+            const blue = rgba[rgbaIndex + 2];
+            const [lightness, a, b] = rgbToLab(red, green, blue);
+            const key = `${Math.round(lightness / 8)}:${Math.round(a / 12)}:${Math.round(b / 12)}`;
+            const bucket = buckets.get(key) ?? { count: 0, red: 0, green: 0, blue: 0, x: 0, y: 0 };
+            bucket.count += 1;
+            bucket.red += red;
+            bucket.green += green;
+            bucket.blue += blue;
+            bucket.x += x;
+            bucket.y += y;
+            buckets.set(key, bucket);
+            sampledPixels += 1;
+          }
+          if (y % (stride * 32) === 0) {
+            await yieldToMessages();
+            if (isStale(requestId)) return;
+          }
+        }
+
+        const merged: PaletteGroup[] = [];
+        for (const bucket of [...buckets.values()].sort((left, right) => right.count - left.count)) {
+          const bucketRgb: [number, number, number] = [
+            bucket.red / bucket.count,
+            bucket.green / bucket.count,
+            bucket.blue / bucket.count,
+          ];
+          const bucketLab = rgbToLab(...bucketRgb);
+          const close = merged.find((group) => {
+            const groupLab = rgbToLab(group.red / group.count, group.green / group.count, group.blue / group.count);
+            return deltaE76(bucketLab, groupLab) < 10;
+          });
+          if (close) {
+            close.count += bucket.count;
+            close.red += bucket.red;
+            close.green += bucket.green;
+            close.blue += bucket.blue;
+            close.x += bucket.x;
+            close.y += bucket.y;
+          } else {
+            merged.push({ ...bucket });
+          }
+        }
+
+        const candidates: ColorPaletteCandidate[] = merged
+          .filter((group) => group.count / sampledPixels * 100 >= minimumPercentage)
+          .sort((left, right) => right.count - left.count)
+          .slice(0, Math.max(1, Math.min(10, maximumColors)))
+          .map((group, index) => ({
+            id: index + 1,
+            rgb: [
+              Math.round(group.red / group.count),
+              Math.round(group.green / group.count),
+              Math.round(group.blue / group.count),
+            ],
+            percentage: group.count / sampledPixels * 100,
+            centroidX: group.x / group.count / imageWidth,
+            centroidY: group.y / group.count / imageHeight,
+          }));
+        post({ type: "palette", requestId, candidates });
       }
     }
   }
@@ -170,6 +278,14 @@ self.onmessage = (event: MessageEvent<ColorWorkerRequest>) => {
       request.sampleRgb,
       request.toleranceDeltaE,
       request.minimumArea,
+    );
+    return;
+  }
+  if (request.type === "palette") {
+    void buildPalette(
+      request.requestId,
+      request.maximumColors,
+      request.minimumPercentage,
     );
     return;
   }

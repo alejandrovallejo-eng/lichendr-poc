@@ -1,6 +1,16 @@
 export interface SimilarColorComponent {
   id: number;
   areaPixels: number;
+  centroidX: number;
+  centroidY: number;
+}
+
+export interface ColorPaletteCandidate {
+  id: number;
+  rgb: [number, number, number];
+  percentage: number;
+  centroidX: number;
+  centroidY: number;
 }
 
 export type ColorWorkerRequest =
@@ -19,6 +29,12 @@ export type ColorWorkerRequest =
       minimumArea: number;
     }
   | {
+      type: "palette";
+      requestId: number;
+      maximumColors: number;
+      minimumPercentage: number;
+    }
+  | {
       type: "components";
       requestId: number;
       excludedComponentIds: number[];
@@ -34,6 +50,11 @@ export type ColorWorkerResponse =
       requestId: number;
       mask: ArrayBuffer;
       components: SimilarColorComponent[];
+    }
+  | {
+      type: "palette";
+      requestId: number;
+      candidates: ColorPaletteCandidate[];
     }
   | {
       type: "error";

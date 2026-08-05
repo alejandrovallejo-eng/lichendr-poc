@@ -187,6 +187,67 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   if (!["mobile_sam", "manual", "color_assisted"].includes(source)) {
     throw new Error("La procedencia de la máscara no es válida.");
   }
+
+  export async function replaceAcceptedTrunkRegion(
+    existing: AnnotationRegionRow,
+    input: RegionSaveInput,
+  ): Promise<AnnotationRegionRow> {
+    assertUuid(existing.id, "La capa");
+    assertUuid(input.annotationSetId, "El conjunto de anotación");
+    if (
+      existing.annotation_set_id !== input.annotationSetId
+      || existing.region_role !== "trunk"
+      || input.classification !== "bark"
+      || input.regionRole !== "trunk"
+    ) {
+      throw new Error("La capa de corteza no es válida.");
+    }
+    if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || input.width <= 0 || input.height <= 0 || !Number.isInteger(input.areaPixels) || input.areaPixels <= 0) {
+      throw new Error("Los metadatos de la máscara no son válidos.");
+    }
+    assertNormalizedPoints(input.positivePoints);
+    assertNormalizedPoints(input.negativePoints);
+    await assertPngMask(input.mask);
+    await ensureSession();
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    const user = userData.user;
+    if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");
+    const replacementPath = `${user.id}/annotations/${input.annotationSetId}/${existing.id}-${crypto.randomUUID()}.png`;
+    const { error: uploadError } = await supabase.storage.from(MASK_BUCKET).upload(replacementPath, input.mask, {
+      contentType: "image/png",
+      upsert: false,
+    });
+    if (uploadError) throw new RegionPersistenceError("No se pudo subir la máscara corregida.", existing.id, false);
+
+    const { data, error } = await supabase
+      .from("annotation_regions")
+      .update({
+        source: input.source ?? "mobile_sam",
+        model_name: input.modelName.trim(),
+        model_version: input.modelVersion,
+        mask_path: replacementPath,
+        mask_width_px: input.width,
+        mask_height_px: input.height,
+        area_pixels: input.areaPixels,
+        score: input.score,
+        representative_color_hex: input.representativeColorHex ?? null,
+        color_tolerance_delta_e: input.colorToleranceDeltaE ?? null,
+        positive_points: input.positivePoints,
+        negative_points: input.negativePoints,
+        notes: input.notes,
+      })
+      .eq("id", existing.id)
+      .eq("annotation_set_id", input.annotationSetId)
+      .eq("region_role", "trunk")
+      .select("*")
+      .single();
+    if (error) {
+      await supabase.storage.from(MASK_BUCKET).remove([replacementPath]);
+      throw error;
+    }
+    await supabase.storage.from(MASK_BUCKET).remove([existing.mask_path]);
+    return data;
+  }
   if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || input.width <= 0 || input.height <= 0 || !Number.isInteger(input.areaPixels) || input.areaPixels <= 0 || (input.score !== null && (!Number.isFinite(input.score) || input.score < 0)) || !input.modelName.trim()) {
     throw new Error("Los metadatos de la máscara no son válidos.");
   }

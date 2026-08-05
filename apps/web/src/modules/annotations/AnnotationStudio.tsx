@@ -2158,7 +2158,7 @@ export default function AnnotationStudio({
         lichen_region_count: lichenLayers.length,
         morphotype_count: calculatedMorphotypeIds.size,
         calculation_method: "mask_union_intersection",
-        calculation_version: "1.0.0",
+        calculation_version: "1.1.0",
         quality_flags: metricSummary.qualityFlags,
         calculated_at: new Date().toISOString(),
       });

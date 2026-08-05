@@ -3,6 +3,7 @@ import { supabase } from "@/lib/supabase/client";
 import { loadMaskFromUrl } from "@/modules/annotations/studio-browser-utils";
 import {
   calculateAnnotationMetricSummary,
+  type AnnotationMetricSummary,
   type AnnotationQualityFlag,
 } from "@/modules/annotations/studio-mask-utils";
 import type { Database } from "@/types/supabase";
@@ -241,7 +242,7 @@ export async function recalculateEvaluationMetrics(
     region.morphotype_id ? [region.morphotype_id] : []
   )));
 
-  let metricSummary;
+  let metricSummary: AnnotationMetricSummary;
   const dimensionsMatch = !trunk || lichenRegions.every((region) => (
     region.mask_width_px === trunk.mask_width_px && region.mask_height_px === trunk.mask_height_px
   ));
@@ -264,27 +265,50 @@ export async function recalculateEvaluationMetrics(
     }
   } else {
     const maskRegions = [trunk, ...lichenRegions];
-    let signedUrls: string[];
+    let signedUrls: string[] | null = null;
     try {
       signedUrls = await Promise.all(maskRegions.map(async (region) => {
         const { data, error } = await supabase.storage.from(region.mask_bucket).createSignedUrl(region.mask_path, 5 * 60);
         if (error || !data?.signedUrl) throw new Error("signed_mask_unavailable");
         return data.signedUrl;
       }));
-    } catch {
-      throw new Error("No se pudo obtener una máscara firmada temporal. Intenta de nuevo.");
-    }
-    signal?.throwIfAborted();
-    let masks: Uint8Array[];
-    try {
-      masks = await Promise.all(maskRegions.map((region, index) => (
-        loadMaskFromUrl(signedUrls[index], region.mask_width_px, region.mask_height_px, signal)
-      )));
     } catch (reason) {
-      if ((reason as { name?: string }).name === "AbortError") throw reason;
-      throw new Error("No se pudo leer una máscara firmada temporal. Intenta de nuevo.");
+      signal?.throwIfAborted();
+      metricSummary = {
+        trunkAreaPixels: null,
+        lichenUnionInsideTrunkPixels: null,
+        lichenOutsideTrunkPixels: null,
+        overlappingLichenPixels: null,
+        coveragePercent: null,
+        qualityFlags: [
+          ...(lichenRegions.length === 0 ? ["no_lichen_regions" as const] : []),
+          "signed_mask_unavailable",
+        ],
+      };
     }
-    metricSummary = calculateAnnotationMetricSummary(masks[0], masks.slice(1));
+    if (signedUrls) {
+      signal?.throwIfAborted();
+      try {
+        const masks = await Promise.all(maskRegions.map((region, index) => (
+          loadMaskFromUrl(signedUrls[index], region.mask_width_px, region.mask_height_px, signal)
+        )));
+        metricSummary = calculateAnnotationMetricSummary(masks[0], masks.slice(1));
+      } catch (reason) {
+        if ((reason as { name?: string }).name === "AbortError") throw reason;
+        const incompatibleDimensions = reason instanceof Error && reason.message.includes("dimensiones");
+        metricSummary = {
+          trunkAreaPixels: null,
+          lichenUnionInsideTrunkPixels: null,
+          lichenOutsideTrunkPixels: null,
+          overlappingLichenPixels: null,
+          coveragePercent: null,
+          qualityFlags: [
+            ...(lichenRegions.length === 0 ? ["no_lichen_regions" as const] : []),
+            incompatibleDimensions ? "mask_dimension_mismatch" : "signed_mask_unavailable",
+          ],
+        };
+      }
+    }
   }
 
   const payload: Database["public"]["Tables"]["annotation_metrics"]["Insert"] = {
@@ -298,7 +322,7 @@ export async function recalculateEvaluationMetrics(
     lichen_region_count: lichenRegions.length,
     morphotype_count: Math.min(usedMorphotypeIds.size, morphotypes?.length ?? 0),
     calculation_method: "mask_union_intersection",
-    calculation_version: "1.0.0",
+    calculation_version: "1.1.0",
     quality_flags: metricSummary.qualityFlags,
     calculated_at: new Date().toISOString(),
   };

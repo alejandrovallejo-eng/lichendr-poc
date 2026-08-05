@@ -1,7 +1,6 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PageHeader from "@/components/PageHeader";
 import {
@@ -145,9 +144,6 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
           <section className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="font-semibold">{image.original_filename}</h2>
-              <Link href={`/vision-lab?imageId=${encodeURIComponent(imageId)}`} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
-                Refinar en Laboratorio IA
-              </Link>
             </div>
             <div className="relative mt-4 overflow-hidden rounded border" style={{ borderColor: "var(--ld-border)" }}>
               <Image src={imageUrl} alt={image.original_filename} width={1200} height={800} className="block w-full object-contain" unoptimized />
@@ -164,7 +160,7 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
                 />
               ))}
             </div>
-            {regions.length === 0 ? <p className="mt-4 text-sm" style={{ color: "var(--ld-text-secondary)" }}>No hay capas IA aceptadas. Refina esta imagen en el Laboratorio IA para crear una.</p> : null}
+            {regions.length === 0 ? <p className="mt-4 text-sm" style={{ color: "var(--ld-text-secondary)" }}>No hay capas IA aceptadas. Abre la pestaña Asistencia IA para crear una.</p> : null}
           </section>
           <section className="space-y-4">
             <div className="rounded border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>

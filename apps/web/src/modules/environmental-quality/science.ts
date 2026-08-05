@@ -1,4 +1,4 @@
-import { calculateWeightedCoverage } from "../analysis/metrics.ts";
+import { calculateWeightedCoverage } from "../analysis/metrics";
 
 export type ReadinessStatus = "Completo" | "Parcial" | "Faltante" | "No aplica";
 

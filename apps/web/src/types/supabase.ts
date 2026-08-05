@@ -681,6 +681,162 @@ export type Database = {
           }
         ];
       };
+      site_environmental_contexts: {
+        Row: {
+          site_id: string;
+          land_use_classification: string | null;
+          is_reference_candidate: boolean | null;
+          measured_at: string | null;
+          provenance: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          site_id: string;
+          land_use_classification?: string | null;
+          is_reference_candidate?: boolean | null;
+          measured_at?: string | null;
+          provenance?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          site_id?: string;
+          land_use_classification?: string | null;
+          is_reference_candidate?: boolean | null;
+          measured_at?: string | null;
+          provenance?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "site_environmental_contexts_site_id_fkey";
+            columns: ["site_id"];
+            referencedRelation: "sites";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      tree_sample_scientific_contexts: {
+        Row: {
+          tree_sample_id: string;
+          sampled_width_cm: number | null;
+          sampled_height_cm: number | null;
+          dbh_cm: number | null;
+          bark_ph: number | null;
+          bark_texture: string | null;
+          canopy_cover_percent: number | null;
+          air_temperature_c: number | null;
+          relative_humidity_percent: number | null;
+          measured_at: string | null;
+          provenance: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          tree_sample_id: string;
+          sampled_width_cm?: number | null;
+          sampled_height_cm?: number | null;
+          dbh_cm?: number | null;
+          bark_ph?: number | null;
+          bark_texture?: string | null;
+          canopy_cover_percent?: number | null;
+          air_temperature_c?: number | null;
+          relative_humidity_percent?: number | null;
+          measured_at?: string | null;
+          provenance?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          tree_sample_id?: string;
+          sampled_width_cm?: number | null;
+          sampled_height_cm?: number | null;
+          dbh_cm?: number | null;
+          bark_ph?: number | null;
+          bark_texture?: string | null;
+          canopy_cover_percent?: number | null;
+          air_temperature_c?: number | null;
+          relative_humidity_percent?: number | null;
+          measured_at?: string | null;
+          provenance?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "tree_sample_scientific_contexts_tree_sample_id_fkey";
+            columns: ["tree_sample_id"];
+            referencedRelation: "tree_samples";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      pollutant_measurements: {
+        Row: {
+          id: string;
+          site_id: string;
+          sampling_event_id: string | null;
+          measured_at: string;
+          pollutant_code: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
+          value: number;
+          unit: string;
+          averaging_period: string | null;
+          instrument_method: string | null;
+          data_source: string;
+          qa_qc_status: "not_assessed" | "provisional" | "validated" | "rejected";
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          site_id: string;
+          sampling_event_id?: string | null;
+          measured_at: string;
+          pollutant_code: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
+          value: number;
+          unit: string;
+          averaging_period?: string | null;
+          instrument_method?: string | null;
+          data_source: string;
+          qa_qc_status?: "not_assessed" | "provisional" | "validated" | "rejected";
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          site_id?: string;
+          sampling_event_id?: string | null;
+          measured_at?: string;
+          pollutant_code?: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
+          value?: number;
+          unit?: string;
+          averaging_period?: string | null;
+          instrument_method?: string | null;
+          data_source?: string;
+          qa_qc_status?: "not_assessed" | "provisional" | "validated" | "rejected";
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "pollutant_measurements_site_id_fkey";
+            columns: ["site_id"];
+            referencedRelation: "sites";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "pollutant_measurements_sampling_event_site_fk";
+            columns: ["sampling_event_id", "site_id"];
+            referencedRelation: "sampling_events";
+            referencedColumns: ["id", "site_id"];
+          }
+        ];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

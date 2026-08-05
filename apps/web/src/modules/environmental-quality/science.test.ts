@@ -7,7 +7,7 @@ import {
   selectCompletedEvaluations,
   type EnvironmentalEvaluation,
   type ReadinessInput,
-} from "./science.ts";
+} from "./science";
 
 const completeReadiness: ReadinessInput = {
   completedAnnotations: 2,

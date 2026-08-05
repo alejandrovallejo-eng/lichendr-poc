@@ -82,9 +82,12 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
   }, []);
 
   useEffect(() => {
-    if (initialImageId) void loadImage(initialImageId);
-    else void loadImages();
+    const timeout = window.setTimeout(() => {
+      if (initialImageId) void loadImage(initialImageId);
+      else void loadImages();
+    }, 0);
     return () => {
+      window.clearTimeout(timeout);
       requestIdRef.current += 1;
     };
   }, [initialImageId, loadImage, loadImages]);

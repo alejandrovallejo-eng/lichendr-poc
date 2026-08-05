@@ -267,6 +267,26 @@ export async function updateRegionClassification(
   return data;
 }
 
+export async function updateRegionNotes(
+  regionId: string,
+  annotationSetId: string,
+  notes: string | null,
+): Promise<AnnotationRegionRow> {
+  assertUuid(regionId, "La capa");
+  assertUuid(annotationSetId, "El conjunto de anotación");
+  await ensureSession();
+  const normalizedNotes = notes?.trim() || null;
+  const { data, error } = await supabase
+    .from("annotation_regions")
+    .update({ notes: normalizedNotes })
+    .eq("id", regionId)
+    .eq("annotation_set_id", annotationSetId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 export async function deleteRegionWithStorage(region: AnnotationRegionRow): Promise<void> {
   await ensureSession();
   const { error: databaseError } = await supabase.from("annotation_regions").delete().eq("id", region.id).eq("annotation_set_id", region.annotation_set_id);

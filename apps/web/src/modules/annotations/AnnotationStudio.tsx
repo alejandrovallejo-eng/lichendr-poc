@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Circle, Group, Image as KonvaImage, Layer, Line, Stage } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
 import {
@@ -9,15 +9,17 @@ import {
   createTemporaryUrl,
   deleteRegionWithStorage,
   loadAiAnnotationState,
+  RegionPersistenceError,
   saveAcceptedRegion,
   updateRegionClassification,
+  updateRegionNotes,
   type AnnotationRegionClassification,
   type AnnotationRegionRow,
   type AnnotationRegionSource,
   type MorphotypeRow,
   type RegionSaveInput,
 } from "@/modules/annotations/regions";
-import { upsertMorphotype } from "@/modules/annotations/client";
+import { upsertMorphotype, type MorphotypeDraft } from "@/modules/annotations/client";
 import {
   createRoiMask,
   createWorkingImage,
@@ -45,6 +47,7 @@ const COLOR_DEBOUNCE_MS = 250;
 const MAX_HISTORY_ENTRIES = 25;
 const MAX_HISTORY_BYTES = 12 * 1024 * 1024;
 const TRUNK_NOTE = "Tronco evaluable";
+const LAYER_NAME_PREFIX = "Nombre de capa: ";
 const COLOR_WORKER_URL = new URL("./color-selection.worker.ts", import.meta.url);
 
 type StudioTool = "select" | "ai" | "lasso" | "brush" | "eraser" | "eyedropper" | "similar";
@@ -170,16 +173,55 @@ function sanitizeMessage(value: string): string {
 
 function defaultLayerTitle(region: AnnotationRegionRow, morphotypes: MorphotypeRow[]): string {
   if (region.classification === "bark" && region.notes?.includes(TRUNK_NOTE)) return TRUNK_NOTE;
+  const storedName = region.notes
+    ?.split("\n")
+    .find((line) => line.startsWith(LAYER_NAME_PREFIX))
+    ?.slice(LAYER_NAME_PREFIX.length)
+    .trim();
+  if (storedName) return storedName;
   if (region.classification === "lichen") {
     return morphotypes.find((item) => item.id === region.morphotype_id)?.label ?? "Liquen sin morfotipo";
   }
   return CLASS_LABELS[region.classification];
 }
 
+function notesWithLayerName(notes: string | null, name: string): string {
+  const remaining = (notes ?? "")
+    .split("\n")
+    .filter((line) => !line.startsWith(LAYER_NAME_PREFIX))
+    .join("\n")
+    .trim();
+  return `${LAYER_NAME_PREFIX}${name}${remaining ? `\n${remaining}` : ""}`;
+}
+
 function historyEntryBytes(entry: HistoryEntry): number {
   if (entry.kind === "mask") return entry.indices.byteLength + entry.before.byteLength + entry.after.byteLength;
   if (entry.kind === "layer-add") return entry.saveInput.mask.size;
   return 256;
+}
+
+function paintMaskCircle(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  center: MaskPoint,
+  radius: number,
+  value: 0 | 1,
+  before: Map<number, number>,
+): void {
+  const minX = Math.max(0, Math.floor(center.x - radius));
+  const maxX = Math.min(width - 1, Math.ceil(center.x + radius));
+  const minY = Math.max(0, Math.floor(center.y - radius));
+  const maxY = Math.min(height - 1, Math.ceil(center.y + radius));
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (Math.hypot(x - center.x, y - center.y) > radius) continue;
+      const index = y * width + x;
+      if (mask[index] === value) continue;
+      if (!before.has(index)) before.set(index, mask[index]);
+      mask[index] = value;
+    }
+  }
 }
 
 function isTrunkLayer(layer: StudioLayer): boolean {
@@ -224,6 +266,10 @@ export default function AnnotationStudio({
   const colorWorkerRef = useRef<Worker | null>(null);
   const colorRequestRef = useRef(0);
   const latestColorRequestRef = useRef(0);
+  const sampledRgbRef = useRef<[number, number, number] | null>(null);
+  const colorToleranceRef = useRef(12);
+  const candidateOpacityRef = useRef(0.55);
+  const candidateTargetRef = useRef<CandidateTarget>("trunk");
 
   const [workingImage, setWorkingImage] = useState<WorkingImage | null>(null);
   const [candidateCanvas, setCandidateCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -262,8 +308,8 @@ export default function AnnotationStudio({
   const [status, setStatus] = useState("Cargando espacio de anotación…");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"loading" | "prepare" | "segment" | "save" | "delete" | null>("loading");
-  const [historyRevision, setHistoryRevision] = useState(0);
-  const [coverageRevision, setCoverageRevision] = useState(0);
+  const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
+  const [coverage, setCoverage] = useState(() => calculateCoverage(null, []));
 
   const fitScale = workingImage
     ? Math.min(stageSize.width / workingImage.width, stageSize.height / workingImage.height)
@@ -273,16 +319,9 @@ export default function AnnotationStudio({
   const phase = trunkLayer ? (layers.some((layer) => !isTrunkLayer(layer)) ? 3 : 2) : 1;
   const selectedLayer = layers.find((layer) => layer.region.id === selectedLayerId) ?? null;
 
-  const coverage = useMemo(() => {
-    const trunkMask = trunkLayer ? layerMasksRef.current.get(trunkLayer.region.id) ?? null : null;
-    const lichenMasks = layers
-      .filter((layer) => layer.region.classification === "lichen")
-      .map((layer) => layerMasksRef.current.get(layer.region.id))
-      .filter((mask): mask is Uint8Array => Boolean(mask));
-    return calculateCoverage(trunkMask, lichenMasks);
-  }, [coverageRevision, layers, trunkLayer]);
-
-  const bumpHistory = useCallback(() => setHistoryRevision((current) => current + 1), []);
+  const bumpHistory = useCallback(() => {
+    setHistoryCounts({ undo: historyRef.current.length, redo: redoRef.current.length });
+  }, []);
 
   const pushHistory = useCallback((entry: HistoryEntry) => {
     const bytes = historyEntryBytes(entry);
@@ -314,29 +353,33 @@ export default function AnnotationStudio({
     if (segmentationTimerRef.current) clearTimeout(segmentationTimerRef.current);
   }, []);
 
-  const renderCandidate = useCallback((mask = candidateMaskRef.current) => {
+  const renderCandidate = useCallback((
+    mask = candidateMaskRef.current,
+    opacity = candidateOpacity,
+    target = candidateTarget,
+  ) => {
     const image = workingImageRef.current;
     if (!image || !mask) {
       setCandidateCanvas(null);
       return;
     }
-    const canvas = candidateCanvas ?? document.createElement("canvas");
+    const canvas = document.createElement("canvas");
     drawMask(
       canvas,
       mask,
       image.width,
       image.height,
-      candidateTarget === "trunk" ? [245, 158, 11] : [14, 165, 233],
-      Math.round(candidateOpacity * 255),
+      target === "trunk" ? [245, 158, 11] : [14, 165, 233],
+      Math.round(opacity * 255),
     );
-    if (!candidateCanvas) setCandidateCanvas(canvas);
+    setCandidateCanvas(canvas);
     setCanvasRevision((current) => current + 1);
-  }, [candidateCanvas, candidateOpacity, candidateTarget]);
+  }, [candidateOpacity, candidateTarget]);
 
-  const renderLayers = useCallback((nextLayers = layers, nextSelectedId = selectedLayerId) => {
+  const renderLayers = useCallback((nextLayers: StudioLayer[], nextSelectedId: string | null) => {
     const image = workingImageRef.current;
     if (!image) return;
-    const canvas = layersCanvas ?? document.createElement("canvas");
+    const canvas = document.createElement("canvas");
     canvas.width = image.width;
     canvas.height = image.height;
     const context = canvas.getContext("2d");
@@ -359,9 +402,9 @@ export default function AnnotationStudio({
       }
     }
     context.putImageData(imageData, 0, 0);
-    if (!layersCanvas) setLayersCanvas(canvas);
+    setLayersCanvas(canvas);
     setCanvasRevision((current) => current + 1);
-  }, [layers, layersCanvas, selectedLayerId]);
+  }, []);
 
   const setCandidate = useCallback((mask: Uint8Array | null, metadata: CandidateMetadata | null) => {
     candidateMaskRef.current = mask;
@@ -381,17 +424,27 @@ export default function AnnotationStudio({
     setCandidates([]);
     setPolygonPoints([]);
     setNotes("");
-  }, [setCandidate]);
+  }, [setCandidate, setCandidates, setNotes, setPoints, setPolygonPoints]);
 
   const fitToScreen = useCallback(() => {
     setView({ x: 0, y: 0, zoom: 1 });
   }, []);
 
+  const updateCoverage = useCallback((nextLayers: StudioLayer[]) => {
+    const nextTrunk = nextLayers.find(isTrunkLayer);
+    const trunkMask = nextTrunk ? layerMasksRef.current.get(nextTrunk.region.id) ?? null : null;
+    const lichenMasks = nextLayers
+      .filter((layer) => layer.region.classification === "lichen")
+      .map((layer) => layerMasksRef.current.get(layer.region.id))
+      .filter((mask): mask is Uint8Array => Boolean(mask));
+    setCoverage(calculateCoverage(trunkMask, lichenMasks));
+  }, []);
+
   const refreshLayerCanvases = useCallback((nextLayers: StudioLayer[], nextSelectedId = selectedLayerId) => {
     setLayers(nextLayers);
     renderLayers(nextLayers, nextSelectedId);
-    setCoverageRevision((current) => current + 1);
-  }, [renderLayers, selectedLayerId]);
+    updateCoverage(nextLayers);
+  }, [renderLayers, selectedLayerId, updateCoverage]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -408,6 +461,13 @@ export default function AnnotationStudio({
   }, []);
 
   useEffect(() => {
+    sampledRgbRef.current = sampledRgb;
+    colorToleranceRef.current = colorTolerance;
+    candidateOpacityRef.current = candidateOpacity;
+    candidateTargetRef.current = candidateTarget;
+  }, [candidateOpacity, candidateTarget, colorTolerance, sampledRgb]);
+
+  useEffect(() => {
     mountedRef.current = true;
     colorWorkerRef.current = new Worker(COLOR_WORKER_URL, { type: "module" });
     colorWorkerRef.current.onmessage = (event: MessageEvent<ColorWorkerResponse>) => {
@@ -419,16 +479,30 @@ export default function AnnotationStudio({
       }
       const mask = new Uint8Array(response.mask);
       candidateMaskRef.current = mask;
+      const selectedRgb = sampledRgbRef.current;
       setCandidateMetadata({
         source: "color_assisted",
         score: null,
         modelName: "CIELAB Delta E 1976",
         modelVersion: "D65",
-        representativeColorHex: sampledRgb ? rgbToHex(sampledRgb) : null,
-        colorToleranceDeltaE: colorTolerance,
+        representativeColorHex: selectedRgb ? rgbToHex(selectedRgb) : null,
+        colorToleranceDeltaE: colorToleranceRef.current,
       });
       setColorComponents(response.components);
-      renderCandidate(mask);
+      const image = workingImageRef.current;
+      if (image) {
+        const canvas = document.createElement("canvas");
+        drawMask(
+          canvas,
+          mask,
+          image.width,
+          image.height,
+          candidateTargetRef.current === "trunk" ? [245, 158, 11] : [14, 165, 233],
+          Math.round(candidateOpacityRef.current * 255),
+        );
+        setCandidateCanvas(canvas);
+        setCanvasRevision((current) => current + 1);
+      }
       setStatus("Vista previa por color lista. Incluye o excluye componentes y corrige con pincel o borrador.");
     };
     return () => {
@@ -439,7 +513,7 @@ export default function AnnotationStudio({
       colorWorkerRef.current = null;
       if (colorTimerRef.current) clearTimeout(colorTimerRef.current);
     };
-  }, [cancelVisionRequest, clearVisionSession, colorTolerance, renderCandidate, sampledRgb]);
+  }, [cancelVisionRequest, clearVisionSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -447,7 +521,15 @@ export default function AnnotationStudio({
       setBusy("loading");
       setError(null);
       setStatus("Cargando imagen y capas guardadas…");
-      resetCandidate();
+      candidateMaskRef.current = null;
+      setCandidateMetadata(null);
+      setCandidateCanvas(null);
+      setPoints([]);
+      setCandidates([]);
+      setPolygonPoints([]);
+      setColorComponents([]);
+      setExcludedComponents(new Set());
+      setNotes("");
       layerMasksRef.current = new Map();
       historyRef.current = [];
       redoRef.current = [];
@@ -481,7 +563,7 @@ export default function AnnotationStudio({
         setStatus(sorted.some(isTrunkLayer)
           ? "Tronco evaluable cargado. Marca regiones y confirma cada capa."
           : "Empieza definiendo el tronco evaluable.");
-        setCoverageRevision((current) => current + 1);
+        updateCoverage(sorted);
         setBusy(null);
         window.setTimeout(() => renderLayers(sorted, initialTool === "layers" ? sorted[0]?.region.id ?? null : null), 0);
       } catch (reason) {
@@ -498,11 +580,7 @@ export default function AnnotationStudio({
       cancelVisionRequest();
       clearVisionSession();
     };
-  }, [annotationSetId, bumpHistory, cancelVisionRequest, clearVisionSession, imageUrl, initialTool, onMorphotypesChange, renderLayers, resetCandidate]);
-
-  useEffect(() => {
-    renderCandidate();
-  }, [candidateOpacity, candidateTarget, renderCandidate]);
+  }, [annotationSetId, bumpHistory, cancelVisionRequest, clearVisionSession, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
 
   const pointFromEvent = useCallback((event: KonvaEventObject<PointerEvent | MouseEvent | TouchEvent>): MaskPoint | null => {
     const image = workingImageRef.current;
@@ -650,20 +728,7 @@ export default function AnnotationStudio({
         colorToleranceDeltaE: null,
       });
     }
-    const radius = brushSize / 2;
-    const minX = Math.max(0, Math.floor(center.x - radius));
-    const maxX = Math.min(image.width - 1, Math.ceil(center.x + radius));
-    const minY = Math.max(0, Math.floor(center.y - radius));
-    const maxY = Math.min(image.height - 1, Math.ceil(center.y + radius));
-    for (let y = minY; y <= maxY; y += 1) {
-      for (let x = minX; x <= maxX; x += 1) {
-        if (Math.hypot(x - center.x, y - center.y) > radius) continue;
-        const index = y * image.width + x;
-        if (mask[index] === value) continue;
-        if (!before.has(index)) before.set(index, mask[index]);
-        mask[index] = value;
-      }
-    }
+    paintMaskCircle(mask, image.width, image.height, center, brushSize / 2, value, before);
   }, [brushSize, sampledRgb]);
 
   const applyBrushLine = useCallback((from: MaskPoint, to: MaskPoint, value: 0 | 1, before: Map<number, number>) => {
@@ -742,7 +807,7 @@ export default function AnnotationStudio({
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "No se pudo muestrear el color.");
     }
-  }, []);
+  }, [setError, setSampleConfirmed, setSampledRgb, setStatus]);
 
   const requestSimilarColors = useCallback(() => {
     const worker = colorWorkerRef.current;
@@ -774,7 +839,7 @@ export default function AnnotationStudio({
     worker.postMessage({
       type: "select",
       requestId,
-      sampleRgb,
+      sampleRgb: sampledRgb,
       toleranceDeltaE: colorTolerance,
       minimumArea,
     } satisfies ColorWorkerRequest);
@@ -861,17 +926,22 @@ export default function AnnotationStudio({
       refreshLayerCanvases(next);
     } else {
       setBusy("delete");
+      let cleanupPending = false;
       try {
         await deleteRegionWithStorage(entry.layer.region);
-        refreshLayerCanvases(layers.filter((layer) => layer.region.id !== entry.layer.region.id));
-      } catch {
-        setError("No se pudo deshacer la aceptación de la capa.");
-        historyRef.current.push(entry);
-        historyBytesRef.current += historyEntryBytes(entry);
-        setBusy(null);
-        bumpHistory();
-        return;
+      } catch (reason) {
+        cleanupPending = reason instanceof RegionPersistenceError && reason.cleanupPending;
+        if (!cleanupPending) {
+          setError("No se pudo deshacer la aceptación de la capa.");
+          historyRef.current.push(entry);
+          historyBytesRef.current += historyEntryBytes(entry);
+          setBusy(null);
+          bumpHistory();
+          return;
+        }
       }
+      refreshLayerCanvases(layers.filter((layer) => layer.region.id !== entry.layer.region.id));
+      if (cleanupPending) setError("La capa se eliminó, pero la limpieza del archivo de máscara quedó pendiente.");
       setBusy(null);
     }
     redoRef.current.push(entry);
@@ -929,7 +999,7 @@ export default function AnnotationStudio({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleRedo, handleUndo]);
 
-  const persistCandidate = useCallback(async () => {
+  const persistCandidate = async () => {
     const image = workingImageRef.current;
     const mask = candidateMaskRef.current;
     const metadata = candidateMetadata;
@@ -976,7 +1046,7 @@ export default function AnnotationStudio({
             id: selected.id,
             annotationSetId,
             label: selected.label,
-            growthForm: selected.growth_form,
+            growthForm: selected.growth_form as MorphotypeDraft["growthForm"],
             colorHex: selectedColor,
             notes: selected.notes,
           });
@@ -1043,26 +1113,7 @@ export default function AnnotationStudio({
         setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo guardar la capa.");
       }
     }
-  }, [
-    annotationSetId,
-    busy,
-    candidateMetadata,
-    candidateTarget,
-    classification,
-    layers,
-    morphotypeId,
-    morphotypes,
-    newMorphotype,
-    notes,
-    onMorphotypesChange,
-    points,
-    pushHistory,
-    refreshLayerCanvases,
-    resetCandidate,
-    sampledRgb,
-    sampleConfirmed,
-    showNewMorphotype,
-  ]);
+  };
 
   const toggleLayerVisibility = useCallback((layer: StudioLayer) => {
     const next = layers.map((item) => item.region.id === layer.region.id ? { ...item, visible: !item.visible } : item);
@@ -1079,7 +1130,7 @@ export default function AnnotationStudio({
     setClassification(layer.region.classification);
     setMorphotypeId(layer.region.morphotype_id);
     renderLayers(layers, layer.region.id);
-  }, [layers, renderLayers]);
+  }, [layers, renderLayers, setClassification, setMorphotypeId, setSelectedLayerId]);
 
   const saveSelectedLayerClassification = useCallback(async () => {
     if (!selectedLayer || busy || isTrunkLayer(selectedLayer)) return;
@@ -1107,11 +1158,74 @@ export default function AnnotationStudio({
     }
   }, [annotationSetId, busy, classification, layers, morphotypeId, morphotypes, refreshLayerCanvases, selectedLayer]);
 
-  const deleteLayer = useCallback(async (layer: StudioLayer) => {
+  const renameLayer = async (layer: StudioLayer) => {
+    if (busy || isTrunkLayer(layer)) return;
+    const name = window.prompt("Nuevo nombre de la capa", layer.title)?.trim();
+    if (!name || name === layer.title) return;
+    setBusy("save");
+    try {
+      const region = await updateRegionNotes(
+        layer.region.id,
+        annotationSetId,
+        notesWithLayerName(layer.region.notes, name),
+      );
+      const next = layers.map((item) => item.region.id === region.id ? { ...item, region, title: name } : item);
+      refreshLayerCanvases(next, region.id);
+      setStatus("Nombre de capa actualizado.");
+      setBusy(null);
+    } catch {
+      setBusy(null);
+      setError("No se pudo renombrar la capa.");
+    }
+  };
+
+  const editSelectedMorphotype = async () => {
+    if (!selectedLayer?.region.morphotype_id || busy) return;
+    const morphotype = morphotypes.find((item) => item.id === selectedLayer.region.morphotype_id);
+    if (!morphotype) return;
+    const label = window.prompt("Nombre del morfotipo", morphotype.label)?.trim();
+    if (!label || label === morphotype.label) return;
+    setBusy("save");
+    try {
+      const updated = await upsertMorphotype({
+        id: morphotype.id,
+        annotationSetId,
+        label,
+        growthForm: morphotype.growth_form as MorphotypeDraft["growthForm"],
+        colorHex: morphotype.color_hex,
+        notes: morphotype.notes,
+      });
+      const nextMorphotypes = morphotypes.map((item) => item.id === updated.id ? updated : item);
+      const nextLayers = layers.map((layer) => ({
+        ...layer,
+        title: defaultLayerTitle(layer.region, nextMorphotypes),
+      }));
+      setMorphotypes(nextMorphotypes);
+      onMorphotypesChange(nextMorphotypes);
+      refreshLayerCanvases(nextLayers, selectedLayer.region.id);
+      setStatus("Morfotipo actualizado.");
+      setBusy(null);
+    } catch {
+      setBusy(null);
+      setError("No se pudo editar el morfotipo.");
+    }
+  };
+
+  const deleteLayer = async (layer: StudioLayer) => {
     if (busy || !window.confirm(`¿Eliminar la capa “${layer.title}” y su máscara guardada?`)) return;
     setBusy("delete");
+    let cleanupPending = false;
     try {
       await deleteRegionWithStorage(layer.region);
+    } catch (reason) {
+      cleanupPending = reason instanceof RegionPersistenceError && reason.cleanupPending;
+      if (!cleanupPending) {
+        setBusy(null);
+        setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo eliminar la capa.");
+        return;
+      }
+    }
+    try {
       layerMasksRef.current.delete(layer.region.id);
       const next = layers.filter((item) => item.region.id !== layer.region.id);
       setSelectedLayerId(null);
@@ -1122,16 +1236,17 @@ export default function AnnotationStudio({
       } else {
         setStatus("Capa eliminada.");
       }
+      if (cleanupPending) setError("La capa se eliminó, pero la limpieza del archivo de máscara quedó pendiente.");
       historyRef.current = [];
       redoRef.current = [];
       historyBytesRef.current = 0;
       bumpHistory();
       setBusy(null);
-    } catch (reason) {
+    } catch {
       setBusy(null);
-      setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo eliminar la capa.");
+      setError("La capa se eliminó, pero no se pudo actualizar la vista.");
     }
-  }, [bumpHistory, busy, layers, refreshLayerCanvases]);
+  };
 
   const stageOrigin = workingImage ? {
     x: (stageSize.width - workingImage.width * displayScale) / 2 + view.x,
@@ -1188,10 +1303,10 @@ export default function AnnotationStudio({
             </button>
           );
         })}
-        <button type="button" disabled={historyRef.current.length === 0 || Boolean(busy)} onClick={() => void handleUndo()} className="rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Deshacer</button>
-        <button type="button" disabled={redoRef.current.length === 0 || Boolean(busy)} onClick={() => void handleRedo()} className="rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Rehacer</button>
+        <button type="button" disabled={historyCounts.undo === 0 || Boolean(busy)} onClick={() => void handleUndo()} className="rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Deshacer</button>
+        <button type="button" disabled={historyCounts.redo === 0 || Boolean(busy)} onClick={() => void handleRedo()} className="rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Rehacer</button>
         <button type="button" onClick={fitToScreen} className="rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>Ajustar imagen a pantalla</button>
-        <span className="sr-only" aria-live="polite">Historial {historyRevision}</span>
+        <span className="sr-only" aria-live="polite">Deshacer {historyCounts.undo}; rehacer {historyCounts.redo}</span>
       </div>
 
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -1221,7 +1336,11 @@ export default function AnnotationStudio({
             {candidateMetadata ? (
               <label className="flex items-center gap-2">
                 Opacidad {Math.round(candidateOpacity * 100)}%
-                <input type="range" min={0.15} max={0.9} step={0.05} value={candidateOpacity} onChange={(event) => setCandidateOpacity(Number(event.target.value))} />
+                <input type="range" min={0.15} max={0.9} step={0.05} value={candidateOpacity} onChange={(event) => {
+                  const nextOpacity = Number(event.target.value);
+                  setCandidateOpacity(nextOpacity);
+                  renderCandidate(candidateMaskRef.current, nextOpacity);
+                }} />
               </label>
             ) : null}
           </div>
@@ -1421,6 +1540,7 @@ export default function AnnotationStudio({
                   </button>
                   <div className="mt-2 flex flex-wrap gap-2">
                     <button type="button" onClick={() => toggleLayerVisibility(layer)} className="rounded border px-2 py-1" style={{ borderColor: "var(--ld-border)" }}>{layer.visible ? "Ocultar" : "Mostrar"}</button>
+                    {!isTrunkLayer(layer) ? <button type="button" disabled={Boolean(busy)} onClick={() => void renameLayer(layer)} className="rounded border px-2 py-1 disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Renombrar</button> : null}
                     <button type="button" disabled={Boolean(busy)} onClick={() => void deleteLayer(layer)} className="rounded border px-2 py-1 text-red-700 disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Eliminar</button>
                   </div>
                   <label className="mt-2 block text-xs">Opacidad <input className="w-full" type="range" min={0.1} max={0.9} step={0.05} value={layer.opacity} onChange={(event) => updateLayerOpacity(layer.region.id, Number(event.target.value))} /></label>
@@ -1436,10 +1556,13 @@ export default function AnnotationStudio({
                 {ANNOTATION_REGION_CLASSES.map((item) => <option key={item} value={item}>{CLASS_LABELS[item]}</option>)}
               </select>
               {classification === "lichen" ? (
-                <select value={morphotypeId ?? ""} onChange={(event) => setMorphotypeId(event.target.value || null)} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
-                  <option value="">Selecciona morfotipo</option>
-                  {morphotypes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-                </select>
+                <>
+                  <select value={morphotypeId ?? ""} onChange={(event) => setMorphotypeId(event.target.value || null)} className="mt-2 w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
+                    <option value="">Selecciona morfotipo</option>
+                    {morphotypes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select>
+                  {selectedLayer.region.morphotype_id ? <button type="button" disabled={Boolean(busy)} onClick={() => void editSelectedMorphotype()} className="mt-2 w-full rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Editar morfotipo</button> : null}
+                </>
               ) : null}
               <button type="button" disabled={Boolean(busy)} onClick={() => void saveSelectedLayerClassification()} className="mt-2 w-full rounded border px-3 py-2 text-sm disabled:opacity-40" style={{ borderColor: "var(--ld-border)" }}>Guardar clasificación</button>
             </section>
@@ -1458,7 +1581,6 @@ export default function AnnotationStudio({
               </div>
             )}
             <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Unión de regiones de liquen confirmadas, recortada al tronco evaluable. Las ayudas IA y de color son anotaciones confirmadas por la persona usuaria, no identificación automática de especies.</p>
-            <span className="sr-only">{coverageRevision}</span>
           </section>
         </aside>
       </div>

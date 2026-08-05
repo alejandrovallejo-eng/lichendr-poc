@@ -147,6 +147,7 @@ export interface AnnotationRegion {
   score?: number | null;
   representativeColorHex?: string | null;
   colorToleranceDeltaE?: number | null;
+  regionRole?: "trunk" | null;
   positivePoints: unknown[];
   negativePoints: unknown[];
   status: "draft" | "accepted" | "rejected";

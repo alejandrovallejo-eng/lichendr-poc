@@ -550,6 +550,7 @@ export type Database = {
           score: number | null;
           representative_color_hex: string | null;
           color_tolerance_delta_e: number | null;
+          region_role: "trunk" | null;
           positive_points: unknown[];
           negative_points: unknown[];
           status: "draft" | "accepted" | "rejected";
@@ -573,6 +574,7 @@ export type Database = {
           score?: number | null;
           representative_color_hex?: string | null;
           color_tolerance_delta_e?: number | null;
+          region_role?: "trunk" | null;
           positive_points?: unknown[];
           negative_points?: unknown[];
           status?: "draft" | "accepted" | "rejected";
@@ -595,6 +597,7 @@ export type Database = {
           score?: number | null;
           representative_color_hex?: string | null;
           color_tolerance_delta_e?: number | null;
+          region_role?: "trunk" | null;
           positive_points?: unknown[];
           negative_points?: unknown[];
           status?: "draft" | "accepted" | "rejected";

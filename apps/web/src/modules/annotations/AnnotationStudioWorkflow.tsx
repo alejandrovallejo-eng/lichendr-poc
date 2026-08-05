@@ -112,7 +112,7 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
             <button
               key={item.id}
               type="button"
-              onClick={() => router.push(`/annotations?imageId=${encodeURIComponent(item.id)}`)}
+              onClick={() => router.push(`/annotations?imageId=${encodeURIComponent(item.id)}&tool=${initialTool}`)}
               className="rounded border bg-white p-4 text-left focus-visible:outline-2"
               style={{ borderColor: "var(--ld-border)" }}
             >
@@ -139,7 +139,7 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
         height: annotationSet.roi_height,
       }}
       initialTool={initialTool}
-      onChooseAnotherImage={() => router.push("/annotations")}
+      onChooseAnotherImage={() => router.push(`/annotations?tool=${initialTool}`)}
       onMorphotypesChange={setMorphotypes}
     />
   );

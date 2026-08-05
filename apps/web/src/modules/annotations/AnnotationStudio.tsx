@@ -23,7 +23,6 @@ import { upsertMorphotype, type MorphotypeDraft } from "@/modules/annotations/cl
 import {
   createRoiMask,
   createWorkingImage,
-  drawMask,
   loadCrossOriginImage,
   loadMaskFromUrl,
   maskToPngBlob,
@@ -120,6 +119,17 @@ interface StrokeState {
   previousPoint: MaskPoint;
 }
 
+interface ColorRequestMetadata {
+  sampleRgb: [number, number, number];
+  toleranceDeltaE: number;
+}
+
+interface CandidateRenderRequest {
+  mask: Uint8Array;
+  opacity: number;
+  target: CandidateTarget;
+}
+
 interface AnnotationStudioProps {
   imageUrl: string;
   imageName: string;
@@ -172,7 +182,7 @@ function sanitizeMessage(value: string): string {
 }
 
 function defaultLayerTitle(region: AnnotationRegionRow, morphotypes: MorphotypeRow[]): string {
-  if (region.classification === "bark" && region.notes?.includes(TRUNK_NOTE)) return TRUNK_NOTE;
+  if (region.region_role === "trunk") return TRUNK_NOTE;
   const storedName = region.notes
     ?.split("\n")
     .find((line) => line.startsWith(LAYER_NAME_PREFIX))
@@ -224,8 +234,37 @@ function paintMaskCircle(
   }
 }
 
+function paintReusableMaskCanvas(
+  canvas: HTMLCanvasElement,
+  currentImageData: ImageData | null,
+  request: CandidateRenderRequest,
+  width: number,
+  height: number,
+): ImageData {
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("No se pudo actualizar la vista previa de la máscara.");
+  const imageData = currentImageData?.width === width && currentImageData.height === height
+    ? currentImageData
+    : context.createImageData(width, height);
+  imageData.data.fill(0);
+  const color = request.target === "trunk" ? [245, 158, 11] : [14, 165, 233];
+  const alpha = Math.round(request.opacity * 255);
+  for (let index = 0; index < request.mask.length; index += 1) {
+    if (request.mask[index] === 0) continue;
+    const pixelIndex = index * 4;
+    imageData.data[pixelIndex] = color[0];
+    imageData.data[pixelIndex + 1] = color[1];
+    imageData.data[pixelIndex + 2] = color[2];
+    imageData.data[pixelIndex + 3] = alpha;
+  }
+  context.putImageData(imageData, 0, 0);
+  return imageData;
+}
+
 function isTrunkLayer(layer: StudioLayer): boolean {
-  return layer.region.classification === "bark" && Boolean(layer.region.notes?.includes(TRUNK_NOTE));
+  return layer.region.region_role === "trunk";
 }
 
 function sortLayers(layers: StudioLayer[]): StudioLayer[] {
@@ -266,10 +305,14 @@ export default function AnnotationStudio({
   const colorWorkerRef = useRef<Worker | null>(null);
   const colorRequestRef = useRef(0);
   const latestColorRequestRef = useRef(0);
-  const sampledRgbRef = useRef<[number, number, number] | null>(null);
-  const colorToleranceRef = useRef(12);
   const candidateOpacityRef = useRef(0.55);
   const candidateTargetRef = useRef<CandidateTarget>("trunk");
+  const colorRequestMetadataRef = useRef<Map<number, ColorRequestMetadata>>(new Map());
+  const lastColorMetadataRef = useRef<ColorRequestMetadata | null>(null);
+  const candidateCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const candidateImageDataRef = useRef<ImageData | null>(null);
+  const candidateRenderFrameRef = useRef<number | null>(null);
+  const candidateRenderRequestRef = useRef<CandidateRenderRequest | null>(null);
 
   const [workingImage, setWorkingImage] = useState<WorkingImage | null>(null);
   const [candidateCanvas, setCandidateCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -355,26 +398,44 @@ export default function AnnotationStudio({
 
   const renderCandidate = useCallback((
     mask = candidateMaskRef.current,
-    opacity = candidateOpacity,
-    target = candidateTarget,
+    opacity = candidateOpacityRef.current,
+    target = candidateTargetRef.current,
   ) => {
     const image = workingImageRef.current;
     if (!image || !mask) {
+      if (candidateRenderFrameRef.current !== null) {
+        cancelAnimationFrame(candidateRenderFrameRef.current);
+        candidateRenderFrameRef.current = null;
+      }
+      candidateRenderRequestRef.current = null;
       setCandidateCanvas(null);
       return;
     }
-    const canvas = document.createElement("canvas");
-    drawMask(
-      canvas,
-      mask,
-      image.width,
-      image.height,
-      target === "trunk" ? [245, 158, 11] : [14, 165, 233],
-      Math.round(opacity * 255),
-    );
-    setCandidateCanvas(canvas);
-    setCanvasRevision((current) => current + 1);
-  }, [candidateOpacity, candidateTarget]);
+    candidateRenderRequestRef.current = { mask, opacity, target };
+    if (candidateRenderFrameRef.current !== null) return;
+    candidateRenderFrameRef.current = requestAnimationFrame(() => {
+      candidateRenderFrameRef.current = null;
+      const nextImage = workingImageRef.current;
+      const request = candidateRenderRequestRef.current;
+      if (!nextImage || !request) return;
+      const canvas = candidateCanvasRef.current ?? document.createElement("canvas");
+      try {
+        candidateImageDataRef.current = paintReusableMaskCanvas(
+          canvas,
+          candidateImageDataRef.current,
+          request,
+          nextImage.width,
+          nextImage.height,
+        );
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "No se pudo mostrar la máscara.");
+        return;
+      }
+      candidateCanvasRef.current = canvas;
+      setCandidateCanvas(canvas);
+      setCanvasRevision((current) => current + 1);
+    });
+  }, []);
 
   const renderLayers = useCallback((nextLayers: StudioLayer[], nextSelectedId: string | null) => {
     const image = workingImageRef.current;
@@ -418,13 +479,21 @@ export default function AnnotationStudio({
     renderCandidate(mask);
   }, [renderCandidate]);
 
+  const clearCandidateHistory = useCallback(() => {
+    historyRef.current = historyRef.current.filter((entry) => entry.kind === "layer-add" || entry.kind === "visibility");
+    redoRef.current = redoRef.current.filter((entry) => entry.kind === "layer-add" || entry.kind === "visibility");
+    historyBytesRef.current = historyRef.current.reduce((sum, entry) => sum + historyEntryBytes(entry), 0);
+    bumpHistory();
+  }, [bumpHistory]);
+
   const resetCandidate = useCallback(() => {
     setCandidate(null, null);
     setPoints([]);
     setCandidates([]);
     setPolygonPoints([]);
     setNotes("");
-  }, [setCandidate, setCandidates, setNotes, setPoints, setPolygonPoints]);
+    clearCandidateHistory();
+  }, [clearCandidateHistory, setCandidate, setCandidates, setNotes, setPoints, setPolygonPoints]);
 
   const fitToScreen = useCallback(() => {
     setView({ x: 0, y: 0, zoom: 1 });
@@ -461,11 +530,9 @@ export default function AnnotationStudio({
   }, []);
 
   useEffect(() => {
-    sampledRgbRef.current = sampledRgb;
-    colorToleranceRef.current = colorTolerance;
     candidateOpacityRef.current = candidateOpacity;
     candidateTargetRef.current = candidateTarget;
-  }, [candidateOpacity, candidateTarget, colorTolerance, sampledRgb]);
+  }, [candidateOpacity, candidateTarget]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -477,32 +544,20 @@ export default function AnnotationStudio({
         setError(response.message);
         return;
       }
+      const requestMetadata = colorRequestMetadataRef.current.get(response.requestId);
+      if (!requestMetadata) return;
       const mask = new Uint8Array(response.mask);
       candidateMaskRef.current = mask;
-      const selectedRgb = sampledRgbRef.current;
       setCandidateMetadata({
         source: "color_assisted",
         score: null,
         modelName: "CIELAB Delta E 1976",
         modelVersion: "D65",
-        representativeColorHex: selectedRgb ? rgbToHex(selectedRgb) : null,
-        colorToleranceDeltaE: colorToleranceRef.current,
+        representativeColorHex: rgbToHex(requestMetadata.sampleRgb),
+        colorToleranceDeltaE: requestMetadata.toleranceDeltaE,
       });
       setColorComponents(response.components);
-      const image = workingImageRef.current;
-      if (image) {
-        const canvas = document.createElement("canvas");
-        drawMask(
-          canvas,
-          mask,
-          image.width,
-          image.height,
-          candidateTargetRef.current === "trunk" ? [245, 158, 11] : [14, 165, 233],
-          Math.round(candidateOpacityRef.current * 255),
-        );
-        setCandidateCanvas(canvas);
-        setCanvasRevision((current) => current + 1);
-      }
+      renderCandidate(mask);
       setStatus("Vista previa por color lista. Incluye o excluye componentes y corrige con pincel o borrador.");
     };
     return () => {
@@ -512,8 +567,9 @@ export default function AnnotationStudio({
       colorWorkerRef.current?.terminate();
       colorWorkerRef.current = null;
       if (colorTimerRef.current) clearTimeout(colorTimerRef.current);
+      if (candidateRenderFrameRef.current !== null) cancelAnimationFrame(candidateRenderFrameRef.current);
     };
-  }, [cancelVisionRequest, clearVisionSession]);
+  }, [cancelVisionRequest, clearVisionSession, renderCandidate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -827,6 +883,14 @@ export default function AnnotationStudio({
     const requestId = colorRequestRef.current + 1;
     colorRequestRef.current = requestId;
     latestColorRequestRef.current = requestId;
+    const requestMetadata: ColorRequestMetadata = {
+      sampleRgb: [...sampledRgb],
+      toleranceDeltaE: colorTolerance,
+    };
+    colorRequestMetadataRef.current.clear();
+    colorRequestMetadataRef.current.set(requestId, requestMetadata);
+    lastColorMetadataRef.current = requestMetadata;
+    setExcludedComponents(new Set());
     const rgbaBuffer = rgba.slice().buffer;
     const scopeBuffer = scope.slice().buffer;
     worker.postMessage({
@@ -843,8 +907,18 @@ export default function AnnotationStudio({
       toleranceDeltaE: colorTolerance,
       minimumArea,
     } satisfies ColorWorkerRequest);
-    setStatus("Calculando componentes de color dentro del tronco evaluable…");
+    setStatus(trunkMask
+      ? "Calculando componentes de color dentro del tronco evaluable…"
+      : "Calculando componentes de color dentro del ROI actual…");
   }, [colorTolerance, minimumArea, roi, sampledRgb, trunkLayer]);
+
+  useEffect(() => {
+    const requestId = colorRequestRef.current + 1;
+    colorRequestRef.current = requestId;
+    latestColorRequestRef.current = requestId;
+    colorRequestMetadataRef.current.clear();
+    colorWorkerRef.current?.postMessage({ type: "cancel", requestId } satisfies ColorWorkerRequest);
+  }, [activeTool, candidateTarget, colorTolerance, minimumArea, sampledRgb]);
 
   useEffect(() => {
     if (activeTool !== "similar" || !sampledRgb) return;
@@ -863,6 +937,9 @@ export default function AnnotationStudio({
     const requestId = colorRequestRef.current + 1;
     colorRequestRef.current = requestId;
     latestColorRequestRef.current = requestId;
+    const requestMetadata = lastColorMetadataRef.current;
+    colorRequestMetadataRef.current.clear();
+    if (requestMetadata) colorRequestMetadataRef.current.set(requestId, requestMetadata);
     colorWorkerRef.current?.postMessage({
       type: "components",
       requestId,
@@ -909,8 +986,9 @@ export default function AnnotationStudio({
   const handleCanvasPointerUp = useCallback(() => finishStroke(), [finishStroke]);
 
   const handleUndo = useCallback(async () => {
+    if (busy) return;
     const entry = historyRef.current.pop();
-    if (!entry || busy) return;
+    if (!entry) return;
     historyBytesRef.current -= historyEntryBytes(entry);
     if (entry.kind === "mask") {
       const mask = candidateMaskRef.current;
@@ -949,8 +1027,9 @@ export default function AnnotationStudio({
   }, [bumpHistory, busy, layers, refreshLayerCanvases, renderCandidate, scheduleSegment]);
 
   const handleRedo = useCallback(async () => {
+    if (busy) return;
     const entry = redoRef.current.pop();
-    if (!entry || busy) return;
+    if (!entry) return;
     if (entry.kind === "mask") {
       const mask = candidateMaskRef.current;
       if (mask) {
@@ -985,6 +1064,15 @@ export default function AnnotationStudio({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || target instanceof HTMLElement && target.isContentEditable
+      ) {
+        return;
+      }
       if (event.key === "Escape") {
         setPolygonPoints([]);
         setStatus("Polígono cancelado.");
@@ -1023,15 +1111,6 @@ export default function AnnotationStudio({
           setError("Escribe un nombre para el nuevo morfotipo.");
           return;
         }
-        const created = await createMorphotypeForAnnotationSet(
-          annotationSetId,
-          newMorphotype.label,
-          newMorphotype.growthForm,
-          selectedColor,
-          newMorphotype.notes.trim() || null,
-        );
-        selectedMorphotypeId = created.id;
-        nextMorphotypes = [...morphotypes, created];
       } else {
         const selected = morphotypes.find((item) => item.id === selectedMorphotypeId);
         if (!selected) {
@@ -1041,17 +1120,6 @@ export default function AnnotationStudio({
         if (selected.color_hex && selected.color_hex.toUpperCase() !== selectedColor && !window.confirm(`El morfotipo ${selected.label} ya usa ${selected.color_hex}. ¿Reemplazarlo por ${selectedColor}?`)) {
           return;
         }
-        if (selected.color_hex?.toUpperCase() !== selectedColor) {
-          const updated = await upsertMorphotype({
-            id: selected.id,
-            annotationSetId,
-            label: selected.label,
-            growthForm: selected.growth_form as MorphotypeDraft["growthForm"],
-            colorHex: selectedColor,
-            notes: selected.notes,
-          });
-          nextMorphotypes = morphotypes.map((item) => item.id === updated.id ? updated : item);
-        }
       }
     }
 
@@ -1059,6 +1127,40 @@ export default function AnnotationStudio({
     setError(null);
     setStatus("Guardando máscara en la capa privada…");
     try {
+      if (nextClassification === "lichen" && sampledRgb) {
+        const selectedColor = rgbToHex(sampledRgb);
+        if (showNewMorphotype) {
+          const created = await createMorphotypeForAnnotationSet(
+            annotationSetId,
+            newMorphotype.label,
+            newMorphotype.growthForm,
+            selectedColor,
+            newMorphotype.notes.trim() || null,
+          );
+          selectedMorphotypeId = created.id;
+          nextMorphotypes = [...morphotypes, created];
+          setMorphotypes(nextMorphotypes);
+          onMorphotypesChange(nextMorphotypes);
+          setMorphotypeId(created.id);
+          setShowNewMorphotype(false);
+          setNewMorphotype({ label: "", growthForm: "unknown", notes: "" });
+        } else {
+          const selected = morphotypes.find((item) => item.id === selectedMorphotypeId);
+          if (selected && selected.color_hex?.toUpperCase() !== selectedColor) {
+            const updated = await upsertMorphotype({
+              id: selected.id,
+              annotationSetId,
+              label: selected.label,
+              growthForm: selected.growth_form as MorphotypeDraft["growthForm"],
+              colorHex: selectedColor,
+              notes: selected.notes,
+            });
+            nextMorphotypes = morphotypes.map((item) => item.id === updated.id ? updated : item);
+            setMorphotypes(nextMorphotypes);
+            onMorphotypesChange(nextMorphotypes);
+          }
+        }
+      }
       const id = crypto.randomUUID();
       const blob = await maskToPngBlob(mask, image.width, image.height);
       const saveInput: RegionSaveInput = {
@@ -1083,6 +1185,7 @@ export default function AnnotationStudio({
         source: metadata.source,
         representativeColorHex: sampledRgb ? rgbToHex(sampledRgb) : metadata.representativeColorHex,
         colorToleranceDeltaE: metadata.colorToleranceDeltaE,
+        regionRole: candidateTarget === "trunk" ? "trunk" : null,
       };
       const region = await saveAcceptedRegion(saveInput);
       if (!mountedRef.current) return;
@@ -1282,7 +1385,7 @@ export default function AnnotationStudio({
 
       <div className="flex flex-wrap gap-2 rounded border bg-white p-2" role="toolbar" aria-label="Herramientas de dibujo" style={{ borderColor: "var(--ld-border)" }}>
         {TOOL_LABELS.map((tool) => {
-          const disabled = Boolean(busy) || tool.value === "eraser" && !candidateMetadata || tool.value === "similar" && (!sampledRgb || !trunkLayer);
+          const disabled = Boolean(busy) || tool.value === "eraser" && !candidateMetadata || tool.value === "similar" && !sampledRgb;
           return (
             <button
               key={tool.value}
@@ -1477,7 +1580,7 @@ export default function AnnotationStudio({
                 Área mínima: {minimumArea} px
                 <input className="w-full" type="range" min={1} max={1000} value={minimumArea} onChange={(event) => setMinimumArea(Number(event.target.value))} />
               </label>
-              <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>CIELAB D65 y Delta E 1976. La búsqueda se limita al tronco confirmado.</p>
+              <p className="mt-2 text-xs" style={{ color: "var(--ld-text-secondary)" }}>CIELAB D65 y Delta E 1976. La búsqueda se limita {trunkLayer ? "al tronco confirmado" : "al ROI actual"}.</p>
               <div className="mt-2 max-h-40 space-y-1 overflow-auto">
                 {colorComponents.map((component, index) => (
                   <label key={component.id} className="flex items-center justify-between gap-2 text-sm">

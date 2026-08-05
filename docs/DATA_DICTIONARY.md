@@ -63,6 +63,7 @@ Relaciones:
 - `AnnotationRegion`: representa una máscara aceptada como capa independiente de un `AnnotationSet`.
 - Conserva la clasificación existente (`lichen`, `bark`, `moss`, `algae`, `shadow`, `glare` o `unknown`), el morfotipo opcional, la procedencia (`mobile_sam`, `manual` o `color_assisted`), el nombre y versión del método/modelo, dimensiones, área, score, prompts positivos/negativos, estado y notas.
 - Las selecciones visuales pueden guardar `representative_color_hex` y la tolerancia no negativa `color_tolerance_delta_e`; ambos campos son opcionales y no implican una identificación automática.
+- `region_role = trunk` identifica de forma explícita la única máscara de tronco evaluable aceptada por conjunto; esa región siempre se clasifica como `bark`.
 - `mask_bucket` y `mask_path` identifican el archivo derivado; la ruta es única y no modifica la imagen original.
 - Un morfotipo solo puede asociarse a una capa `lichen` y debe pertenecer al mismo `AnnotationSet`.
 - Las capas admiten los estados `draft`, `accepted` y `rejected`.

@@ -47,6 +47,7 @@ export interface RegionSaveInput {
   source?: AnnotationRegionSource;
   representativeColorHex?: string | null;
   colorToleranceDeltaE?: number | null;
+  regionRole?: "trunk" | null;
 }
 
 export class RegionPersistenceError extends Error {
@@ -181,6 +182,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   const source = input.source ?? "mobile_sam";
   const representativeColorHex = input.representativeColorHex ?? null;
   const colorToleranceDeltaE = input.colorToleranceDeltaE ?? null;
+  const regionRole = input.regionRole ?? null;
   if (!["mobile_sam", "manual", "color_assisted"].includes(source)) {
     throw new Error("La procedencia de la máscara no es válida.");
   }
@@ -192,6 +194,9 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   }
   if (colorToleranceDeltaE !== null && (!Number.isFinite(colorToleranceDeltaE) || colorToleranceDeltaE < 0)) {
     throw new Error("La tolerancia de color no es válida.");
+  }
+  if (regionRole === "trunk" && input.classification !== "bark") {
+    throw new Error("El rol de tronco evaluable requiere clasificación de corteza.");
   }
   assertNormalizedPoints(input.positivePoints);
   assertNormalizedPoints(input.negativePoints);
@@ -222,6 +227,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
       score: input.score,
       representative_color_hex: representativeColorHex,
       color_tolerance_delta_e: colorToleranceDeltaE,
+      region_role: regionRole,
       positive_points: input.positivePoints,
       negative_points: input.negativePoints,
       status: "accepted",

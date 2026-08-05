@@ -1,6 +1,7 @@
 alter table public.annotation_regions
   add column if not exists representative_color_hex text,
-  add column if not exists color_tolerance_delta_e numeric;
+  add column if not exists color_tolerance_delta_e numeric,
+  add column if not exists region_role text;
 
 alter table public.annotation_regions
   drop constraint if exists annotation_regions_source_allowed;
@@ -28,3 +29,21 @@ alter table public.annotation_regions
     color_tolerance_delta_e is null
     or color_tolerance_delta_e >= 0
   );
+
+alter table public.annotation_regions
+  drop constraint if exists annotation_regions_region_role_allowed;
+
+alter table public.annotation_regions
+  add constraint annotation_regions_region_role_allowed
+  check (region_role is null or region_role = 'trunk');
+
+alter table public.annotation_regions
+  drop constraint if exists annotation_regions_trunk_role_requires_bark;
+
+alter table public.annotation_regions
+  add constraint annotation_regions_trunk_role_requires_bark
+  check (region_role is null or classification = 'bark');
+
+create unique index if not exists idx_annotation_regions_one_accepted_trunk
+  on public.annotation_regions(annotation_set_id)
+  where region_role = 'trunk' and status = 'accepted';

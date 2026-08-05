@@ -36,7 +36,9 @@ export async function loadBlobBackedImage(source: string, signal?: AbortSignal):
   if (!response.ok) throw new Error("No se pudo descargar la imagen.");
   const declaredType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
   if (!declaredType.startsWith("image/")) throw new Error("El archivo descargado no es una imagen válida.");
+  signal?.throwIfAborted();
   const blob = await response.blob();
+  signal?.throwIfAborted();
   if (blob.size === 0 || !blob.type.toLowerCase().startsWith("image/")) {
     throw new Error("El archivo descargado no es una imagen válida.");
   }

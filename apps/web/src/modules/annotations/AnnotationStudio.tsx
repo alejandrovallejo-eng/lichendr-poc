@@ -24,18 +24,21 @@ import { upsertMorphotype, type MorphotypeDraft } from "@/modules/annotations/cl
 import {
   createRoiMask,
   createWorkingImage,
-  loadCrossOriginImage,
+  loadBlobBackedImage,
   loadMaskFromUrl,
   maskToPngBlob,
   polygonArea,
   rasterizePolygon,
+  readWorkingImagePixels,
   rgbToHex,
   sampleMedianRgb,
+  validateRasterDimensions,
   type MaskPoint,
   type WorkingImage,
 } from "@/modules/annotations/studio-browser-utils";
 import { calculateCoverage, calculateMaskArea, calculateMaskBounds, clipMask } from "@/modules/annotations/studio-mask-utils";
 import type {
+  ColorAnalysisStage,
   ColorPaletteCandidate,
   ColorWorkerRequest,
   ColorWorkerResponse,
@@ -45,6 +48,7 @@ import type {
 const MAX_WORKING_DIMENSION = 1024;
 const SEGMENT_DEBOUNCE_MS = 250;
 const COLOR_DEBOUNCE_MS = 250;
+const COLOR_ANALYSIS_TIMEOUT_MS = 15_000;
 const MAX_HISTORY_ENTRIES = 25;
 const MAX_HISTORY_BYTES = 12 * 1024 * 1024;
 const TRUNK_NOTE = "Tronco evaluable";
@@ -141,10 +145,32 @@ interface ColorRequestMetadata {
   toleranceDeltaE: number;
 }
 
+type ColorTerminalResponse = Extract<ColorWorkerResponse, { type: "palette" | "result" }>;
+
+interface PendingColorRequest {
+  resolve: (response: ColorTerminalResponse) => void;
+  reject: (reason: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+type ColorAnalysisFeedback =
+  | { kind: "idle"; message: null; pixelReadFailure: false }
+  | { kind: "analyzing" | "success" | "empty" | "cancelled" | "error"; message: string; pixelReadFailure: boolean };
+
 interface CandidateRenderRequest {
   mask: Uint8Array;
   opacity: number;
   target: CandidateTarget;
+}
+
+class ColorAnalysisCancelledError extends Error {}
+
+class ColorAnalysisTimeoutError extends Error {}
+
+function colorStageMessage(stage: ColorAnalysisStage): string {
+  if (stage === "comparing-colors") return "Comparando colores…";
+  if (stage === "grouping-regions") return "Agrupando regiones…";
+  return "Preparando resultados…";
 }
 
 interface AnnotationStudioProps {
@@ -371,15 +397,17 @@ export default function AnnotationStudio({
   const mountedRef = useRef(true);
   const visionSessionRef = useRef<string | null>(null);
   const visionAbortRef = useRef<AbortController | null>(null);
+  const imageLoadAbortRef = useRef<AbortController | null>(null);
+  const imageObjectUrlRef = useRef<string | null>(null);
   const visionRequestRef = useRef(0);
   const segmentationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const colorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const colorWorkerRef = useRef<Worker | null>(null);
   const colorRequestRef = useRef(0);
   const latestColorRequestRef = useRef(0);
+  const pendingColorRequestsRef = useRef<Map<number, PendingColorRequest>>(new Map());
   const candidateOpacityRef = useRef(0.55);
   const candidateTargetRef = useRef<CandidateTarget>("trunk");
-  const colorRequestMetadataRef = useRef<Map<number, ColorRequestMetadata>>(new Map());
   const lastColorMetadataRef = useRef<ColorRequestMetadata | null>(null);
   const candidateCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const candidateImageDataRef = useRef<ImageData | null>(null);
@@ -408,6 +436,11 @@ export default function AnnotationStudio({
   const [colorTolerance, setColorTolerance] = useState(12);
   const [minimumArea, setMinimumArea] = useState(40);
   const [colorPalette, setColorPalette] = useState<ColorPaletteCandidate[]>([]);
+  const [colorAnalysisFeedback, setColorAnalysisFeedback] = useState<ColorAnalysisFeedback>({
+    kind: "idle",
+    message: null,
+    pixelReadFailure: false,
+  });
   const [colorComponents, setColorComponents] = useState<SimilarColorComponent[]>([]);
   const [excludedComponents, setExcludedComponents] = useState<Set<number>>(new Set());
   const [layers, setLayers] = useState<StudioLayer[]>([]);
@@ -604,33 +637,220 @@ export default function AnnotationStudio({
     });
   }, [setView]);
 
-  const analyzeTrunkColors = useCallback((trunkMask: Uint8Array) => {
-    const worker = colorWorkerRef.current;
-    const image = workingImageRef.current;
-    if (!worker || !image) return;
-    const rgba = image.canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, image.width, image.height).data;
-    if (!rgba) return;
+  const nextColorRequestId = useCallback(() => {
     const requestId = colorRequestRef.current + 1;
     colorRequestRef.current = requestId;
+    return requestId;
+  }, []);
+
+  const rejectPendingColorRequests = useCallback((reason: Error) => {
+    for (const pending of pendingColorRequestsRef.current.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(reason);
+    }
+    pendingColorRequestsRef.current.clear();
+  }, []);
+
+  const createColorWorker = useCallback(() => {
+    const worker = new Worker(COLOR_WORKER_URL, { type: "module" });
+    worker.onmessage = (event: MessageEvent<ColorWorkerResponse>) => {
+      const response = event.data;
+      if (!response || !Number.isSafeInteger(response.requestId)) {
+        rejectPendingColorRequests(new Error("El worker devolvió una respuesta inválida."));
+        return;
+      }
+      if (!mountedRef.current || response.requestId !== latestColorRequestRef.current) return;
+      if (response.type === "progress") {
+        setColorAnalysisFeedback({
+          kind: "analyzing",
+          message: colorStageMessage(response.stage),
+          pixelReadFailure: false,
+        });
+        return;
+      }
+      const pending = pendingColorRequestsRef.current.get(response.requestId);
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      pendingColorRequestsRef.current.delete(response.requestId);
+      if (response.type === "error") {
+        pending.reject(new Error(response.message));
+      } else {
+        pending.resolve(response);
+      }
+    };
+    const failWorker = () => {
+      if (colorWorkerRef.current !== worker) return;
+      colorWorkerRef.current = null;
+      worker.terminate();
+      rejectPendingColorRequests(new Error("El análisis de colores se interrumpió."));
+    };
+    worker.onerror = (event) => {
+      event.preventDefault();
+      failWorker();
+    };
+    worker.onmessageerror = failWorker;
+    return worker;
+  }, [rejectPendingColorRequests, setColorAnalysisFeedback]);
+
+  const ensureColorWorker = useCallback(() => {
+    const current = colorWorkerRef.current;
+    if (current) return current;
+    const worker = createColorWorker();
+    colorWorkerRef.current = worker;
+    return worker;
+  }, [createColorWorker]);
+
+  const cancelColorAnalysis = useCallback((announce: boolean) => {
+    const hadPendingRequest = pendingColorRequestsRef.current.size > 0;
+    const hadScheduledRequest = colorTimerRef.current !== null;
+    if (colorTimerRef.current) {
+      clearTimeout(colorTimerRef.current);
+      colorTimerRef.current = null;
+    }
+    const cancelRequestId = nextColorRequestId();
+    latestColorRequestRef.current = cancelRequestId;
+    try {
+      colorWorkerRef.current?.postMessage({
+        type: "cancel",
+        requestId: cancelRequestId,
+      } satisfies ColorWorkerRequest);
+    } catch {
+      colorWorkerRef.current?.terminate();
+      colorWorkerRef.current = null;
+    }
+    rejectPendingColorRequests(new ColorAnalysisCancelledError("Análisis cancelado."));
+    if (announce && (hadPendingRequest || hadScheduledRequest) && mountedRef.current) {
+      setColorAnalysisFeedback({
+        kind: "cancelled",
+        message: "Análisis cancelado. Puedes reintentarlo o seleccionar una zona directamente.",
+        pixelReadFailure: false,
+      });
+      setStudioState("exploring-candidates");
+    }
+  }, [nextColorRequestId, rejectPendingColorRequests, setColorAnalysisFeedback, setStudioState]);
+
+  const sendColorRequest = useCallback((
+    request: Exclude<ColorWorkerRequest, { type: "configure" | "cancel" }>,
+    configuration?: {
+      width: number;
+      height: number;
+      rgba: ArrayBuffer;
+      scopeMask: ArrayBuffer;
+    },
+  ): Promise<ColorTerminalResponse> => {
+    const worker = ensureColorWorker();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const pending = pendingColorRequestsRef.current.get(request.requestId);
+        if (!pending) return;
+        pendingColorRequestsRef.current.delete(request.requestId);
+        const cancelRequestId = nextColorRequestId();
+        latestColorRequestRef.current = cancelRequestId;
+        try {
+          worker.postMessage({ type: "cancel", requestId: cancelRequestId } satisfies ColorWorkerRequest);
+        } catch {
+          worker.terminate();
+          if (colorWorkerRef.current === worker) colorWorkerRef.current = null;
+        }
+        reject(new ColorAnalysisTimeoutError("El análisis de colores superó el tiempo permitido."));
+      }, COLOR_ANALYSIS_TIMEOUT_MS);
+      pendingColorRequestsRef.current.set(request.requestId, { resolve, reject, timeout });
+      try {
+        if (configuration) {
+          worker.postMessage({
+            type: "configure",
+            requestId: request.requestId,
+            width: configuration.width,
+            height: configuration.height,
+            rgba: configuration.rgba,
+            scopeMask: configuration.scopeMask,
+          } satisfies ColorWorkerRequest, [configuration.rgba, configuration.scopeMask]);
+        }
+        worker.postMessage(request);
+      } catch {
+        clearTimeout(timeout);
+        pendingColorRequestsRef.current.delete(request.requestId);
+        reject(new Error("No se pudo iniciar el análisis de colores."));
+      }
+    });
+  }, [ensureColorWorker, nextColorRequestId]);
+
+  const analyzeTrunkColors = useCallback(async (trunkMask: Uint8Array) => {
+    cancelColorAnalysis(false);
+    const requestId = nextColorRequestId();
     latestColorRequestRef.current = requestId;
+    let shouldFinalize = true;
     setColorPalette([]);
+    setError(null);
+    setColorAnalysisFeedback({
+      kind: "analyzing",
+      message: "Preparando píxeles…",
+      pixelReadFailure: false,
+    });
     setStudioState("analyzing-colors");
-    const rgbaBuffer = rgba.slice().buffer;
-    const scopeBuffer = trunkMask.slice().buffer;
-    worker.postMessage({
-      type: "configure",
-      width: image.width,
-      height: image.height,
-      rgba: rgbaBuffer,
-      scopeMask: scopeBuffer,
-    } satisfies ColorWorkerRequest, [rgbaBuffer, scopeBuffer]);
-    worker.postMessage({
-      type: "palette",
-      requestId,
-      maximumColors: 8,
-      minimumPercentage: 0.35,
-    } satisfies ColorWorkerRequest);
-  }, [setColorPalette, setStudioState]);
+    try {
+      const image = workingImageRef.current;
+      if (!image) throw new Error("La imagen de trabajo no está preparada.");
+      const pixelCount = validateRasterDimensions(image.width, image.height, MAX_WORKING_DIMENSION);
+      if (trunkMask.length !== pixelCount) {
+        throw new Error("La máscara del tronco no coincide con las dimensiones de la imagen.");
+      }
+      const rgba = readWorkingImagePixels(image);
+      const rgbaBuffer = rgba.slice().buffer;
+      const scopeBuffer = trunkMask.slice().buffer;
+      const response = await sendColorRequest({
+        type: "palette",
+        requestId,
+        maximumColors: 8,
+        minimumPercentage: 0.35,
+      }, {
+        width: image.width,
+        height: image.height,
+        rgba: rgbaBuffer,
+        scopeMask: scopeBuffer,
+      });
+      if (requestId !== latestColorRequestRef.current || !mountedRef.current) {
+        shouldFinalize = false;
+        return;
+      }
+      if (response.type !== "palette") throw new Error("El worker devolvió un resultado de color inesperado.");
+      setColorPalette(response.candidates);
+      if (response.candidates.length === 0) {
+        setColorAnalysisFeedback({
+          kind: "empty",
+          message: "No encontramos grupos de color claros. Puedes seleccionar una zona manualmente.",
+          pixelReadFailure: false,
+        });
+      } else {
+        setColorAnalysisFeedback({
+          kind: "success",
+          message: `Encontramos ${response.candidates.length} colores para revisar`,
+          pixelReadFailure: false,
+        });
+      }
+    } catch (reason) {
+      if (reason instanceof ColorAnalysisCancelledError) {
+        shouldFinalize = false;
+        return;
+      }
+      const timedOut = reason instanceof ColorAnalysisTimeoutError;
+      if (!timedOut && requestId !== latestColorRequestRef.current) {
+        shouldFinalize = false;
+        return;
+      }
+      const pixelReadFailure = reason instanceof Error
+        && reason.message === "No fue posible leer los colores de esta imagen.";
+      const message = pixelReadFailure
+        ? "No fue posible leer los colores de esta imagen."
+        : reason instanceof Error
+          ? sanitizeMessage(reason.message)
+          : "No se pudo completar el análisis de colores.";
+      setError(message);
+      setColorAnalysisFeedback({ kind: "error", message, pixelReadFailure });
+    } finally {
+      if (shouldFinalize && mountedRef.current) setStudioState("exploring-candidates");
+    }
+  }, [cancelColorAnalysis, nextColorRequestId, sendColorRequest, setColorAnalysisFeedback, setColorPalette, setError, setStudioState]);
 
   const updateCoverage = useCallback((nextLayers: StudioLayer[]) => {
     const nextTrunk = nextLayers.find(isTrunkLayer);
@@ -671,59 +891,42 @@ export default function AnnotationStudio({
 
   useEffect(() => {
     mountedRef.current = true;
-    colorWorkerRef.current = new Worker(COLOR_WORKER_URL, { type: "module" });
-    colorWorkerRef.current.onmessage = (event: MessageEvent<ColorWorkerResponse>) => {
-      const response = event.data;
-      if (!mountedRef.current || response.requestId !== latestColorRequestRef.current) return;
-      if (response.type === "error") {
-        setError(response.message);
-        setStudioState("error");
-        return;
-      }
-      if (response.type === "palette") {
-        setColorPalette(response.candidates);
-        setStudioState("exploring-candidates");
-        return;
-      }
-      const requestMetadata = colorRequestMetadataRef.current.get(response.requestId);
-      if (!requestMetadata) return;
-      const mask = new Uint8Array(response.mask);
-      clearMaskHistory();
-      candidateMaskRef.current = mask;
-      setCandidateMetadata({
-        source: "color_assisted",
-        score: null,
-        modelName: "CIELAB Delta E 1976",
-        modelVersion: "D65",
-        representativeColorHex: rgbToHex(requestMetadata.sampleRgb),
-        colorToleranceDeltaE: requestMetadata.toleranceDeltaE,
-      });
-      setColorComponents(response.components);
-      renderCandidate(mask);
-      setStudioState("exploring-candidates");
-    };
+    try {
+      colorWorkerRef.current = createColorWorker();
+    } catch {
+      colorWorkerRef.current = null;
+    }
     return () => {
       mountedRef.current = false;
+      cancelColorAnalysis(false);
       cancelVisionRequest();
       clearVisionSession();
       colorWorkerRef.current?.terminate();
       colorWorkerRef.current = null;
-      if (colorTimerRef.current) clearTimeout(colorTimerRef.current);
       if (candidateRenderFrameRef.current !== null) cancelAnimationFrame(candidateRenderFrameRef.current);
     };
-  }, [cancelVisionRequest, clearMaskHistory, clearVisionSession, renderCandidate]);
+  }, [cancelColorAnalysis, cancelVisionRequest, clearVisionSession, createColorWorker]);
 
   useEffect(() => {
     let cancelled = false;
+    let renderTimer: number | null = null;
+    let loadedObjectUrl: string | null = null;
+    const controller = new AbortController();
     const load = async () => {
       setBusy("loading");
       setError(null);
       setStudioState("loading-image");
-      const colorCancelId = colorRequestRef.current + 1;
-      colorRequestRef.current = colorCancelId;
-      latestColorRequestRef.current = colorCancelId;
-      colorRequestMetadataRef.current.clear();
-      colorWorkerRef.current?.postMessage({ type: "cancel", requestId: colorCancelId } satisfies ColorWorkerRequest);
+      cancelColorAnalysis(false);
+      imageLoadAbortRef.current?.abort();
+      imageLoadAbortRef.current = controller;
+      if (imageObjectUrlRef.current) {
+        URL.revokeObjectURL(imageObjectUrlRef.current);
+        imageObjectUrlRef.current = null;
+      }
+      workingImageRef.current = null;
+      setWorkingImage(null);
+      setColorPalette([]);
+      setColorAnalysisFeedback({ kind: "idle", message: null, pixelReadFailure: false });
       if (candidateRenderFrameRef.current !== null) {
         cancelAnimationFrame(candidateRenderFrameRef.current);
         candidateRenderFrameRef.current = null;
@@ -744,9 +947,15 @@ export default function AnnotationStudio({
       historyBytesRef.current = 0;
       bumpHistory();
       try {
-        const element = await loadCrossOriginImage(imageUrl);
-        const prepared = createWorkingImage(element, MAX_WORKING_DIMENSION);
-        if (cancelled) return;
+        const loaded = await loadBlobBackedImage(imageUrl, controller.signal);
+        loadedObjectUrl = loaded.objectUrl;
+        if (cancelled) {
+          URL.revokeObjectURL(loaded.objectUrl);
+          loadedObjectUrl = null;
+          return;
+        }
+        imageObjectUrlRef.current = loaded.objectUrl;
+        const prepared = createWorkingImage(loaded.element, MAX_WORKING_DIMENSION);
         workingImageRef.current = prepared;
         setWorkingImage(prepared);
         const state = await loadAiAnnotationState(annotationSetId);
@@ -773,31 +982,46 @@ export default function AnnotationStudio({
         setActiveTool("ai");
         updateCoverage(sorted);
         setBusy(null);
-        window.setTimeout(() => {
+        renderTimer = window.setTimeout(() => {
+          if (cancelled) return;
           renderLayers(sorted, initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
           if (loadedTrunk) {
             const mask = layerMasksRef.current.get(loadedTrunk.region.id);
             if (mask) {
               focusMask(mask);
-              analyzeTrunkColors(mask);
+              void analyzeTrunkColors(mask);
             }
           }
         }, 0);
       } catch (reason) {
-        if (!cancelled) {
+        if (!cancelled && (reason as { name?: string }).name !== "AbortError") {
           setBusy(null);
           setError(reason instanceof Error ? sanitizeMessage(reason.message) : "No se pudo abrir el editor.");
           setStudioState("error");
+          if (loadedObjectUrl) {
+            URL.revokeObjectURL(loadedObjectUrl);
+            if (imageObjectUrlRef.current === loadedObjectUrl) imageObjectUrlRef.current = null;
+            loadedObjectUrl = null;
+          }
         }
       }
     };
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
+      if (imageLoadAbortRef.current === controller) imageLoadAbortRef.current = null;
+      if (renderTimer) clearTimeout(renderTimer);
+      cancelColorAnalysis(false);
       cancelVisionRequest();
       clearVisionSession();
+      if (loadedObjectUrl) {
+        URL.revokeObjectURL(loadedObjectUrl);
+        if (imageObjectUrlRef.current === loadedObjectUrl) imageObjectUrlRef.current = null;
+        loadedObjectUrl = null;
+      }
     };
-  }, [analyzeTrunkColors, annotationSetId, bumpHistory, cancelVisionRequest, clearVisionSession, focusMask, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
+  }, [analyzeTrunkColors, annotationSetId, bumpHistory, cancelColorAnalysis, cancelVisionRequest, clearVisionSession, focusMask, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
 
   const pointFromEvent = useCallback((event: KonvaEventObject<PointerEvent | MouseEvent | TouchEvent>): MaskPoint | null => {
     const image = workingImageRef.current;
@@ -1043,86 +1267,191 @@ export default function AnnotationStudio({
     }
   }, [setColorComponents, setError, setExcludedComponents, setSampleConfirmed, setSampledRgb, setStudioState]);
 
-  const requestSimilarColors = useCallback(() => {
-    const worker = colorWorkerRef.current;
+  const requestSimilarColors = useCallback(async () => {
     const image = workingImageRef.current;
-    if (!worker || !image || !sampledRgb) return;
-    const trunkMask = trunkLayer ? layerMasksRef.current.get(trunkLayer.region.id) : null;
-    const scope = trunkMask ?? createRoiMask(image.width, image.height, roi);
-    const rgba = image.canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, image.width, image.height).data;
-    if (!rgba) {
-      setError("No se pudieron leer los píxeles para la selección por color.");
-      return;
-    }
-    const previousRequestId = latestColorRequestRef.current;
-    if (previousRequestId > 0) {
-      worker.postMessage({ type: "cancel", requestId: previousRequestId } satisfies ColorWorkerRequest);
-    }
-    const requestId = colorRequestRef.current + 1;
-    colorRequestRef.current = requestId;
+    if (!image || !sampledRgb) return;
+    cancelColorAnalysis(false);
+    const requestId = nextColorRequestId();
     latestColorRequestRef.current = requestId;
+    let shouldFinalize = true;
     const requestMetadata: ColorRequestMetadata = {
       sampleRgb: [...sampledRgb],
       toleranceDeltaE: colorTolerance,
     };
-    colorRequestMetadataRef.current.clear();
-    colorRequestMetadataRef.current.set(requestId, requestMetadata);
     lastColorMetadataRef.current = requestMetadata;
     setColorComponents([]);
     setExcludedComponents(new Set());
-    const rgbaBuffer = rgba.slice().buffer;
-    const scopeBuffer = scope.slice().buffer;
-    worker.postMessage({
-      type: "configure",
-      width: image.width,
-      height: image.height,
-      rgba: rgbaBuffer,
-      scopeMask: scopeBuffer,
-    } satisfies ColorWorkerRequest, [rgbaBuffer, scopeBuffer]);
-    worker.postMessage({
-      type: "select",
-      requestId,
-      sampleRgb: sampledRgb,
-      toleranceDeltaE: colorTolerance,
-      minimumArea,
-    } satisfies ColorWorkerRequest);
+    setError(null);
+    setColorAnalysisFeedback({
+      kind: "analyzing",
+      message: "Preparando píxeles…",
+      pixelReadFailure: false,
+    });
     setStudioState("analyzing-colors");
-  }, [colorTolerance, minimumArea, roi, sampledRgb, setColorComponents, setError, setExcludedComponents, setStudioState, trunkLayer]);
-
-  useEffect(() => {
-    const requestId = colorRequestRef.current + 1;
-    colorRequestRef.current = requestId;
-    latestColorRequestRef.current = requestId;
-    colorRequestMetadataRef.current.clear();
-    colorWorkerRef.current?.postMessage({ type: "cancel", requestId } satisfies ColorWorkerRequest);
-  }, [activeTool, candidateTarget, colorTolerance, minimumArea, sampledRgb]);
+    try {
+      const pixelCount = validateRasterDimensions(image.width, image.height, MAX_WORKING_DIMENSION);
+      const trunkMask = trunkLayer ? layerMasksRef.current.get(trunkLayer.region.id) : null;
+      const scope = trunkMask ?? createRoiMask(image.width, image.height, roi);
+      if (scope.length !== pixelCount) {
+        throw new Error("La máscara del tronco no coincide con las dimensiones de la imagen.");
+      }
+      const rgba = readWorkingImagePixels(image);
+      const rgbaBuffer = rgba.slice().buffer;
+      const scopeBuffer = scope.slice().buffer;
+      const response = await sendColorRequest({
+        type: "select",
+        requestId,
+        sampleRgb: requestMetadata.sampleRgb,
+        toleranceDeltaE: requestMetadata.toleranceDeltaE,
+        minimumArea,
+      }, {
+        width: image.width,
+        height: image.height,
+        rgba: rgbaBuffer,
+        scopeMask: scopeBuffer,
+      });
+      if (requestId !== latestColorRequestRef.current || !mountedRef.current) {
+        shouldFinalize = false;
+        return;
+      }
+      if (response.type !== "result") throw new Error("El worker devolvió un resultado de color inesperado.");
+      const mask = new Uint8Array(response.mask);
+      if (mask.length !== pixelCount) {
+        throw new Error("La máscara de color no coincide con las dimensiones de la imagen.");
+      }
+      if (response.components.length === 0 || calculateMaskArea(mask) === 0) {
+        setCandidate(null, null);
+        setColorAnalysisFeedback({
+          kind: "empty",
+          message: "No encontramos grupos de color claros. Puedes seleccionar una zona manualmente.",
+          pixelReadFailure: false,
+        });
+        return;
+      }
+      setCandidate(mask, {
+        source: "color_assisted",
+        score: null,
+        modelName: "CIELAB Delta E 1976",
+        modelVersion: "D65",
+        representativeColorHex: rgbToHex(requestMetadata.sampleRgb),
+        colorToleranceDeltaE: requestMetadata.toleranceDeltaE,
+      });
+      setColorComponents(response.components);
+      setColorAnalysisFeedback({
+        kind: "success",
+        message: "Las regiones de color están listas para revisar.",
+        pixelReadFailure: false,
+      });
+    } catch (reason) {
+      if (reason instanceof ColorAnalysisCancelledError) {
+        shouldFinalize = false;
+        return;
+      }
+      const timedOut = reason instanceof ColorAnalysisTimeoutError;
+      if (!timedOut && requestId !== latestColorRequestRef.current) {
+        shouldFinalize = false;
+        return;
+      }
+      const pixelReadFailure = reason instanceof Error
+        && reason.message === "No fue posible leer los colores de esta imagen.";
+      const message = pixelReadFailure
+        ? "No fue posible leer los colores de esta imagen."
+        : reason instanceof Error
+          ? sanitizeMessage(reason.message)
+          : "No se pudo completar el análisis de colores.";
+      setError(message);
+      setCandidate(null, null);
+      setColorAnalysisFeedback({ kind: "error", message, pixelReadFailure });
+    } finally {
+      if (shouldFinalize && mountedRef.current) setStudioState("exploring-candidates");
+    }
+  }, [cancelColorAnalysis, colorTolerance, minimumArea, nextColorRequestId, roi, sampledRgb, sendColorRequest, setCandidate, setColorAnalysisFeedback, setColorComponents, setError, setExcludedComponents, setStudioState, trunkLayer]);
 
   useEffect(() => {
     if (activeTool !== "similar" || !sampledRgb) return;
+    cancelColorAnalysis(false);
     if (colorTimerRef.current) clearTimeout(colorTimerRef.current);
-    colorTimerRef.current = setTimeout(requestSimilarColors, COLOR_DEBOUNCE_MS);
+    colorTimerRef.current = setTimeout(() => {
+      colorTimerRef.current = null;
+      void requestSimilarColors();
+    }, COLOR_DEBOUNCE_MS);
     return () => {
-      if (colorTimerRef.current) clearTimeout(colorTimerRef.current);
+      if (colorTimerRef.current) {
+        clearTimeout(colorTimerRef.current);
+        colorTimerRef.current = null;
+      }
     };
-  }, [activeTool, colorTolerance, minimumArea, requestSimilarColors, sampledRgb]);
+  }, [activeTool, cancelColorAnalysis, colorTolerance, minimumArea, requestSimilarColors, sampledRgb]);
 
-  const toggleColorComponent = useCallback((componentId: number) => {
+  const toggleColorComponent = useCallback(async (componentId: number) => {
     const nextExcluded = new Set(excludedComponents);
     if (nextExcluded.has(componentId)) nextExcluded.delete(componentId);
     else nextExcluded.add(componentId);
     setExcludedComponents(nextExcluded);
-    const requestId = colorRequestRef.current + 1;
-    colorRequestRef.current = requestId;
-    latestColorRequestRef.current = requestId;
     const requestMetadata = lastColorMetadataRef.current;
-    colorRequestMetadataRef.current.clear();
-    if (requestMetadata) colorRequestMetadataRef.current.set(requestId, requestMetadata);
-    colorWorkerRef.current?.postMessage({
-      type: "components",
-      requestId,
-      excludedComponentIds: [...nextExcluded],
-    } satisfies ColorWorkerRequest);
-  }, [excludedComponents, setExcludedComponents]);
+    if (!requestMetadata) return;
+    cancelColorAnalysis(false);
+    const requestId = nextColorRequestId();
+    latestColorRequestRef.current = requestId;
+    let shouldFinalize = true;
+    setError(null);
+    setColorAnalysisFeedback({
+      kind: "analyzing",
+      message: "Preparando resultados…",
+      pixelReadFailure: false,
+    });
+    setStudioState("analyzing-colors");
+    try {
+      const image = workingImageRef.current;
+      if (!image) throw new Error("La imagen de trabajo no está preparada.");
+      const pixelCount = validateRasterDimensions(image.width, image.height, MAX_WORKING_DIMENSION);
+      const response = await sendColorRequest({
+        type: "components",
+        requestId,
+        excludedComponentIds: [...nextExcluded],
+      });
+      if (requestId !== latestColorRequestRef.current || !mountedRef.current) {
+        shouldFinalize = false;
+        return;
+      }
+      if (response.type !== "result") throw new Error("El worker devolvió un resultado de color inesperado.");
+      const mask = new Uint8Array(response.mask);
+      if (mask.length !== pixelCount) {
+        throw new Error("La máscara de color no coincide con las dimensiones de la imagen.");
+      }
+      setCandidate(mask, {
+        source: "color_assisted",
+        score: null,
+        modelName: "CIELAB Delta E 1976",
+        modelVersion: "D65",
+        representativeColorHex: rgbToHex(requestMetadata.sampleRgb),
+        colorToleranceDeltaE: requestMetadata.toleranceDeltaE,
+      });
+      setColorComponents(response.components);
+      setColorAnalysisFeedback({
+        kind: "success",
+        message: "Las regiones de color están listas para revisar.",
+        pixelReadFailure: false,
+      });
+    } catch (reason) {
+      if (reason instanceof ColorAnalysisCancelledError) {
+        shouldFinalize = false;
+        return;
+      }
+      const timedOut = reason instanceof ColorAnalysisTimeoutError;
+      if (!timedOut && requestId !== latestColorRequestRef.current) {
+        shouldFinalize = false;
+        return;
+      }
+      const message = reason instanceof Error
+        ? sanitizeMessage(reason.message)
+        : "No se pudo actualizar la selección por color.";
+      setError(message);
+      setColorAnalysisFeedback({ kind: "error", message, pixelReadFailure: false });
+    } finally {
+      if (shouldFinalize && mountedRef.current) setStudioState("exploring-candidates");
+    }
+  }, [cancelColorAnalysis, excludedComponents, nextColorRequestId, sendColorRequest, setCandidate, setColorAnalysisFeedback, setColorComponents, setError, setExcludedComponents, setStudioState]);
 
   const selectColorCandidate = useCallback((candidate: ColorPaletteCandidate) => {
     resetCandidate();
@@ -1130,6 +1459,12 @@ export default function AnnotationStudio({
     setSampledRgb(candidate.rgb);
     setSampleConfirmed(true);
     setActiveTool("similar");
+    setError(null);
+    setColorAnalysisFeedback({
+      kind: "analyzing",
+      message: "Preparando píxeles…",
+      pixelReadFailure: false,
+    });
     setStudioState("analyzing-colors");
   }, [resetCandidate, setActiveTool, setCandidateTarget, setSampleConfirmed, setSampledRgb, setStudioState]);
 
@@ -1141,12 +1476,13 @@ export default function AnnotationStudio({
   }, [resetCandidate, setActiveTool, setCandidateTarget, setStudioState]);
 
   const retryTrunkProposal = useCallback(() => {
+    cancelColorAnalysis(false);
     resetCandidate();
     setCandidateTarget("trunk");
     setActiveTool("ai");
     setStudioState("selecting-trunk");
     fitToScreen();
-  }, [fitToScreen, resetCandidate, setActiveTool, setCandidateTarget, setStudioState]);
+  }, [cancelColorAnalysis, fitToScreen, resetCandidate, setActiveTool, setCandidateTarget, setStudioState]);
 
   const editTrunk = useCallback(() => {
     if (!trunkLayer) return;
@@ -1154,6 +1490,7 @@ export default function AnnotationStudio({
     if (regionCount > 0 && !window.confirm("Ya existen regiones guardadas. ¿Quieres editar la corteza manteniendo esas regiones?")) return;
     const mask = layerMasksRef.current.get(trunkLayer.region.id);
     if (!mask) return;
+    cancelColorAnalysis(false);
     resetCandidate();
     setCandidateTarget("trunk");
     setPoints(storedGuidePoints(trunkLayer.region));
@@ -1170,7 +1507,50 @@ export default function AnnotationStudio({
     });
     setActiveTool("brush");
     setStudioState("reviewing-trunk");
-  }, [layers, resetCandidate, setActiveTool, setCandidate, setCandidateTarget, setPoints, setSampleConfirmed, setSampledRgb, setStudioState, trunkLayer]);
+  }, [cancelColorAnalysis, layers, resetCandidate, setActiveTool, setCandidate, setCandidateTarget, setPoints, setSampleConfirmed, setSampledRgb, setStudioState, trunkLayer]);
+
+  const retryColorAnalysis = useCallback(() => {
+    const mask = trunkLayer ? layerMasksRef.current.get(trunkLayer.region.id) : null;
+    if (!mask) {
+      setError("No hay una máscara de tronco válida para analizar.");
+      setColorAnalysisFeedback({
+        kind: "error",
+        message: "No hay una máscara de tronco válida para analizar.",
+        pixelReadFailure: false,
+      });
+      setStudioState("exploring-candidates");
+      return;
+    }
+    void analyzeTrunkColors(mask);
+  }, [analyzeTrunkColors, setColorAnalysisFeedback, setError, setStudioState, trunkLayer]);
+
+  const selectLichenDirectly = useCallback(() => {
+    cancelColorAnalysis(true);
+    resetCandidate();
+    setError(null);
+    setCandidateTarget("region");
+    setActiveTool("ai");
+    setColorAnalysisFeedback({
+      kind: "cancelled",
+      message: "Análisis automático omitido. Pulsa un punto dentro del tronco para usar MobileSAM.",
+      pixelReadFailure: false,
+    });
+    setStudioState("exploring-candidates");
+  }, [cancelColorAnalysis, resetCandidate, setActiveTool, setCandidateTarget, setColorAnalysisFeedback, setError, setStudioState]);
+
+  const continueManually = useCallback(() => {
+    cancelColorAnalysis(true);
+    resetCandidate();
+    setError(null);
+    setCandidateTarget("region");
+    setActiveTool("lasso");
+    setColorAnalysisFeedback({
+      kind: "cancelled",
+      message: "Análisis automático omitido. Dibuja la zona de liquen dentro del tronco.",
+      pixelReadFailure: false,
+    });
+    setStudioState("exploring-candidates");
+  }, [cancelColorAnalysis, resetCandidate, setActiveTool, setCandidateTarget, setColorAnalysisFeedback, setError, setStudioState]);
 
   const handleCanvasPointerDown = useCallback((event: KonvaEventObject<PointerEvent>) => {
     if (busy || event.target.name() === "guide-point") return;
@@ -1323,6 +1703,7 @@ export default function AnnotationStudio({
         return;
       }
       if (event.key === "Escape") {
+        cancelColorAnalysis(true);
         setPolygonPoints([]);
         setStudioState(trunkLayer ? "exploring-candidates" : "selecting-trunk");
       }
@@ -1334,7 +1715,7 @@ export default function AnnotationStudio({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleRedo, handleUndo, trunkLayer]);
+  }, [cancelColorAnalysis, handleRedo, handleUndo, trunkLayer]);
 
   const persistCandidate = async () => {
     const image = workingImageRef.current;
@@ -1589,6 +1970,7 @@ export default function AnnotationStudio({
 
   const deleteLayer = async (layer: StudioLayer) => {
     if (busy || !window.confirm(`¿Eliminar la capa “${layer.title}” y su máscara guardada?`)) return;
+    if (isTrunkLayer(layer)) cancelColorAnalysis(true);
     setBusy("delete");
     let cleanupPending = false;
     try {
@@ -1637,7 +2019,7 @@ export default function AnnotationStudio({
           <h1 className="text-xl font-semibold">Annotation Studio</h1>
           <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>{imageName}</p>
         </div>
-        <button type="button" onClick={onChooseAnotherImage} className="rounded border px-3 py-2 text-sm focus-visible:outline-2" style={{ borderColor: "var(--ld-border)" }}>
+        <button type="button" onClick={() => { cancelColorAnalysis(false); onChooseAnotherImage(); }} className="rounded border px-3 py-2 text-sm focus-visible:outline-2" style={{ borderColor: "var(--ld-border)" }}>
           Elegir otra imagen
         </button>
       </header>
@@ -1669,6 +2051,7 @@ export default function AnnotationStudio({
               aria-pressed={activeTool === tool.value}
               disabled={disabled}
               onClick={() => {
+                cancelColorAnalysis(true);
                 setActiveTool(tool.value);
                 setColorComponents([]);
                 setExcludedComponents(new Set());
@@ -1901,7 +2284,29 @@ export default function AnnotationStudio({
             <section className="rounded border bg-white p-3" style={{ borderColor: "var(--ld-border)" }}>
               <h2 className="font-semibold">Colores encontrados</h2>
               <p className="mt-1 text-xs" style={{ color: "var(--ld-text-secondary)" }}>Regiones visualmente diferentes; ninguna está identificada automáticamente como liquen.</p>
-              {studioState === "analyzing-colors" && colorPalette.length === 0 ? <p className="mt-3 flex items-center gap-2 text-sm"><span className="studio-spinner" />Analizando colores del tronco</p> : null}
+              {colorAnalysisFeedback.kind === "analyzing" ? (
+                <p className="mt-3 flex items-center gap-2 text-sm" aria-live="polite">
+                  <span className="studio-spinner" aria-hidden="true" />
+                  {colorAnalysisFeedback.message}
+                </p>
+              ) : colorAnalysisFeedback.message ? (
+                <p className="mt-3 text-sm" aria-live="polite">{colorAnalysisFeedback.message}</p>
+              ) : null}
+              {["empty", "error", "cancelled"].includes(colorAnalysisFeedback.kind) ? (
+                <div className="mt-3 space-y-2">
+                  <button type="button" onClick={retryColorAnalysis} className="studio-primary w-full rounded border px-3 py-2 text-sm font-semibold">
+                    {colorAnalysisFeedback.pixelReadFailure ? "Reintentar colores" : "Reintentar análisis"}
+                  </button>
+                  <button type="button" onClick={selectLichenDirectly} className="w-full rounded border px-3 py-2 text-sm font-semibold" style={{ borderColor: "var(--ld-border)" }}>
+                    Seleccionar liquen directamente
+                  </button>
+                  {colorAnalysisFeedback.pixelReadFailure ? (
+                    <button type="button" onClick={continueManually} className="w-full rounded border px-3 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
+                      Continuar seleccionando manualmente
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {colorPalette.map((candidate) => (
                   <button

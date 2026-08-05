@@ -24,16 +24,53 @@ create table if not exists public.annotation_metrics (
     check (overlapping_lichen_pixels is null or overlapping_lichen_pixels >= 0),
   constraint annotation_metrics_coverage_range
     check (coverage_percent is null or coverage_percent between 0 and 100),
+  constraint annotation_metrics_lichen_union_within_trunk
+    check (
+      trunk_area_pixels is null
+      or lichen_union_area_pixels is null
+      or lichen_union_area_pixels <= trunk_area_pixels
+    ),
+  constraint annotation_metrics_coverage_requires_trunk
+    check (
+      trunk_area_pixels is not null
+      or coverage_percent is null
+    ),
+  constraint annotation_metrics_zero_trunk_has_no_coverage
+    check (
+      trunk_area_pixels is null
+      or trunk_area_pixels <> 0
+      or coverage_percent is null
+    ),
+  constraint annotation_metrics_coverage_matches_areas
+    check (
+      coverage_percent is null
+      or (
+        trunk_area_pixels > 0
+        and lichen_union_area_pixels is not null
+        and abs(
+          coverage_percent
+          - (lichen_union_area_pixels::numeric / trunk_area_pixels::numeric * 100)
+        ) <= 0.01
+      )
+    ),
   constraint annotation_metrics_accepted_region_count_non_negative
     check (accepted_region_count >= 0),
   constraint annotation_metrics_lichen_region_count_non_negative
     check (lichen_region_count >= 0),
+  constraint annotation_metrics_lichen_region_count_within_accepted
+    check (lichen_region_count <= accepted_region_count),
   constraint annotation_metrics_morphotype_count_non_negative
     check (morphotype_count >= 0),
+  constraint annotation_metrics_morphotype_count_within_lichen
+    check (morphotype_count <= lichen_region_count),
   constraint annotation_metrics_calculation_method_not_blank
     check (btrim(calculation_method) <> ''),
+  constraint annotation_metrics_calculation_method_trimmed
+    check (calculation_method = btrim(calculation_method)),
   constraint annotation_metrics_calculation_version_not_blank
     check (btrim(calculation_version) <> ''),
+  constraint annotation_metrics_calculation_version_trimmed
+    check (calculation_version = btrim(calculation_version)),
   constraint annotation_metrics_quality_flags_container
     check (jsonb_typeof(quality_flags) in ('array', 'object'))
 );

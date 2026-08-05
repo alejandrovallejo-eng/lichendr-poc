@@ -80,7 +80,8 @@ El editor visual conserva capas confirmadas por el usuario separadas de las anot
 - `trunk_area_pixels`: píxeles únicos distintos de cero de la máscara de tronco confirmada.
 - `lichen_union_area_pixels`: píxeles únicos de la unión de máscaras `lichen` aceptadas que están dentro del tronco. Este es el numerador de cobertura.
 - `lichen_outside_trunk_pixels`: píxeles de la unión de liquen fuera del tronco.
-- `overlapping_lichen_pixels`: suma de áreas de máscaras de liquen menos el área de su unión; los píxeles solapados no se vuelven a contar en cobertura.
+- `overlapping_lichen_pixels`: solapamiento calculado exclusivamente dentro del tronco: `Σ popcount(Li AND T) − popcount(union(Li) AND T)`. Los píxeles solapados no se vuelven a contar en cobertura.
+- El solapamiento o área fuera del tronco no se mezcla con esa métrica; `lichen_outside_trunk_pixels` registra por separado la unión de liquen fuera de `T`.
 - `coverage_percent`: `lichen_union_area_pixels / trunk_area_pixels × 100`; queda nulo si el tronco falta, tiene área cero o las dimensiones son incompatibles.
 - `accepted_region_count`, `lichen_region_count` y `morphotype_count`: conteos descriptivos de la evaluación.
 - `calculation_method`, `calculation_version` y `calculated_at`: trazabilidad del algoritmo ejecutado.

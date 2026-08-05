@@ -17,9 +17,7 @@ export async function GET() {
   }
 
   const supabase = await createSupabaseServerClient();
-  const { error } = await supabase
-    .from("projects")
-    .select("id", { count: "exact", head: true });
+  const { error } = await supabase.auth.getSession();
 
   if (error) {
     return new Response(

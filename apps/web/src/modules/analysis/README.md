@@ -6,6 +6,12 @@ La cobertura por evaluación es la unión de píxeles de regiones de liquen acep
 
 `sum(lichen_union_area_pixels) / sum(trunk_area_pixels) × 100`
 
-Las máscaras se cargan con URL firmada temporal solamente al abrir el detalle de lectura existente o al ejecutar **Calcular resumen**. Los borradores quedan excluidos incluso si conservan métricas de una finalización anterior.
+El solapamiento también se mide dentro del tronco:
+
+`Σ popcount(Li AND T) − popcount(union(Li) AND T)`
+
+El área de unión fuera del tronco se registra aparte como `lichen_outside_trunk_pixels`; no forma parte de `overlapping_lichen_pixels`.
+
+Las máscaras se cargan con URL firmada temporal solamente al abrir el detalle de lectura existente o al ejecutar **Calcular resumen**. Este recálculo consulta regiones aceptadas por el identificador de una única evaluación completada, no modifica regiones ni estado y guarda métricas nulas con una alerta de calidad cuando una máscara no está disponible. Los borradores quedan excluidos incluso si conservan métricas de una finalización anterior.
 
 Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.

@@ -252,10 +252,13 @@ La migración aditiva `202608050002_create_annotation_metrics.sql` crea `public.
 
 - Mantiene una fila por `annotation_set_id`, con borrado en cascada.
 - Guarda áreas de máscara, cobertura, conteos, método, versión, alertas de calidad y fechas de auditoría.
-- Restringe áreas y conteos a valores no negativos y `coverage_percent` al intervalo 0–100 o nulo.
-- Exige `quality_flags` como array u objeto JSON y textos no vacíos para método y versión.
+- Restringe áreas y conteos a valores no negativos, impone `morphotype_count <= lichen_region_count <= accepted_region_count` y evita que la unión de liquen supere el área del tronco.
+- `coverage_percent` queda nulo si el tronco falta o tiene área cero. Cuando existe, exige tronco positivo, unión de liquen presente y concordancia con `lichen_union_area_pixels / trunk_area_pixels × 100` con tolerancia de 0.01 puntos porcentuales.
+- Exige `quality_flags` como array u objeto JSON y textos no vacíos y sin espacios exteriores para método y versión.
 - Reutiliza `public.set_updated_at()` y habilita RLS.
 - Las políticas `SELECT`, `INSERT`, `UPDATE` y `DELETE` para `authenticated` siguen `annotation_metrics → annotation_sets → images → tree_samples → sites → projects → owner_id = auth.uid()`.
 - No concede privilegios a `anon`.
 
 Las consultas del panel parten de `annotation_sets` con `status = 'completed'` y `completed_at is not null`, y después consultan métricas persistidas. Las agregaciones no descargan máscaras. El recálculo de un resumen anterior obtiene URLs firmadas temporales para las máscaras de esa única evaluación.
+
+`overlapping_lichen_pixels` se calcula dentro del tronco como `Σ popcount(Li AND T) − popcount(union(Li) AND T)`. La unión fuera del tronco se conserva separadamente en `lichen_outside_trunk_pixels`.

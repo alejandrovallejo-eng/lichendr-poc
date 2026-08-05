@@ -150,12 +150,21 @@ export function calculateAnnotationMetricSummary(
   const lichenUnionArea = calculateMaskArea(lichenUnion);
   const lichenUnionInsideTrunkPixels = calculateMaskArea(intersectMasks(lichenUnion, trunk));
   const lichenOutsideTrunkPixels = lichenUnionArea - lichenUnionInsideTrunkPixels;
-  const summedLichenArea = lichenMasks.reduce((sum, mask) => sum + calculateMaskArea(mask), 0);
-  const overlappingLichenPixels = Math.max(0, summedLichenArea - lichenUnionArea);
+  const summedLichenAreaInsideTrunk = lichenMasks.reduce(
+    (sum, mask) => sum + calculateMaskArea(intersectMasks(mask, trunk)),
+    0,
+  );
+  const overlappingLichenPixels = Math.max(
+    0,
+    summedLichenAreaInsideTrunk - lichenUnionInsideTrunkPixels,
+  );
 
   if (trunkAreaPixels === 0) qualityFlags.push("zero_trunk_area");
   if (lichenOutsideTrunkPixels > 0) qualityFlags.push("lichen_outside_trunk");
-  if (summedLichenArea > 0 && overlappingLichenPixels / summedLichenArea >= 0.2) {
+  if (
+    summedLichenAreaInsideTrunk > 0
+    && overlappingLichenPixels / summedLichenAreaInsideTrunk >= 0.2
+  ) {
     qualityFlags.push("high_lichen_overlap");
   }
 

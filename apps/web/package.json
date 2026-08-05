@@ -9,7 +9,8 @@
     "prebuild": "npm run prepare:onnx",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test --experimental-strip-types src/modules/annotations/studio-mask-utils.test.mts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

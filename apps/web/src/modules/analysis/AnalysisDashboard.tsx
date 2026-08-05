@@ -9,6 +9,7 @@ import {
   recalculateEvaluationMetrics,
   type AnalysisEvaluation,
 } from "@/modules/analysis/client";
+import { calculateWeightedCoverage } from "@/modules/analysis/metrics";
 import type { AnnotationQualityFlag } from "@/modules/annotations/studio-mask-utils";
 
 const SCIENTIFIC_NOTICE = "Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.";
@@ -33,22 +34,6 @@ function median(values: number[]): number | null {
   const sorted = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
-}
-
-function weightedCoverage(evaluations: AnalysisEvaluation[]): number | null {
-  let trunkPixels = 0;
-  let lichenPixels = 0;
-  for (const evaluation of evaluations) {
-    const metrics = evaluation.metrics;
-    if (
-      metrics?.trunk_area_pixels == null
-      || metrics.trunk_area_pixels <= 0
-      || metrics.lichen_union_area_pixels == null
-    ) continue;
-    trunkPixels += metrics.trunk_area_pixels;
-    lichenPixels += metrics.lichen_union_area_pixels;
-  }
-  return trunkPixels > 0 ? lichenPixels / trunkPixels * 100 : null;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -162,7 +147,7 @@ export default function AnalysisDashboard() {
     item.metrics?.coverage_percent == null ? [] : [item.metrics.coverage_percent]
   ));
   const uniqueTrees = new Set(filtered.map((item) => item.treeId));
-  const weighted = weightedCoverage(filtered);
+  const weighted = calculateWeightedCoverage(filtered.map((item) => item.metrics));
   const coverageMedian = median(coverageValues);
   const morphotypeNames = new Set(filtered.flatMap((item) => item.morphotypes.map((morphotype) => morphotype.label.toLocaleLowerCase())));
   const flagsFor = (evaluation: AnalysisEvaluation): AnnotationQualityFlag[] => {
@@ -381,7 +366,7 @@ export default function AnalysisDashboard() {
               <h2 className="text-lg font-semibold">Cobertura por árbol</h2>
               <div className="mt-4 space-y-4">
                 {treeGroups.map((group) => {
-                  const value = weightedCoverage(group.evaluations);
+                  const value = calculateWeightedCoverage(group.evaluations.map((item) => item.metrics));
                   return <article key={group.key}><div className="flex justify-between gap-3"><div><p className="font-semibold">{group.title}</p><p className="text-xs text-slate-500">{group.subtitle} · {group.evaluations.length} imágenes</p></div><p>{formatPercent(value)}</p></div><CoverageBar value={value} label={group.title} /></article>;
                 })}
               </div>
@@ -390,7 +375,7 @@ export default function AnalysisDashboard() {
               <h2 className="text-lg font-semibold">Comparación por sitio</h2>
               <div className="mt-4 space-y-4">
                 {siteGroups.map((group) => {
-                  const value = weightedCoverage(group.evaluations);
+                  const value = calculateWeightedCoverage(group.evaluations.map((item) => item.metrics));
                   const siteValues = group.evaluations.flatMap((item) => item.metrics?.coverage_percent == null ? [] : [item.metrics.coverage_percent]);
                   return <article key={group.key}><div className="flex justify-between gap-3"><div><p className="font-semibold">{group.title}</p><p className="text-xs text-slate-500">{group.subtitle} · {new Set(group.evaluations.map((item) => item.treeId)).size} árboles · {group.evaluations.length} imágenes · mediana {formatPercent(median(siteValues))}</p></div><p>{formatPercent(value)}</p></div><CoverageBar value={value} label={group.title} /></article>;
                 })}

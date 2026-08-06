@@ -32,7 +32,7 @@ export interface ImageMetadataValidation {
 export interface ImageValidationResult {
   valid: boolean;
   message: string | null;
-  mimeType: "image/jpeg" | "image/png" | null;
+  mimeType: "image/jpeg" | "image/png" | "image/heic" | "image/heif" | null;
 }
 
 export interface ImageCleanupResult {
@@ -126,25 +126,16 @@ async function safelyCleanup(operation: () => Promise<boolean>): Promise<boolean
 export function validateImageFile(file: ImageFileDescriptor): ImageValidationResult {
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
   const jpegExtensions = new Set([".jpg", ".jpeg"]);
-  const heicTypes = new Set(["image/heic", "image/heif"]);
-  const heicExtensions = new Set([".heic", ".heif"]);
-
-  if (heicTypes.has(file.type.toLowerCase()) || heicExtensions.has(extension)) {
-    return {
-      valid: false,
-      mimeType: null,
-      message: "HEIC/HEIF todavía no se puede guardar de forma fiable. Convierte la imagen a JPEG o PNG antes de seleccionarla.",
-    };
-  }
-
   const mimeType = file.type.toLowerCase();
   const validJpeg = mimeType === "image/jpeg" && jpegExtensions.has(extension);
   const validPng = mimeType === "image/png" && extension === ".png";
-  if (!validJpeg && !validPng) {
+  const validHeic = mimeType === "image/heic" && extension === ".heic";
+  const validHeif = mimeType === "image/heif" && extension === ".heif";
+  if (!validJpeg && !validPng && !validHeic && !validHeif) {
     return {
       valid: false,
       mimeType: null,
-      message: "Formato no admitido. Usa una imagen JPEG o PNG con un tipo MIME válido.",
+      message: "Formato no admitido. Usa JPEG, PNG, HEIC o HEIF con un tipo MIME válido.",
     };
   }
 
@@ -158,19 +149,29 @@ export function validateImageFile(file: ImageFileDescriptor): ImageValidationRes
     return { valid: false, mimeType: null, message: "El archivo supera el límite de 20 MB." };
   }
 
-  return { valid: true, mimeType: validJpeg ? "image/jpeg" : "image/png", message: null };
+  return {
+    valid: true,
+    mimeType: validJpeg ? "image/jpeg" : validPng ? "image/png" : validHeic ? "image/heic" : "image/heif",
+    message: null,
+  };
 }
 
 export async function validateImageSignature(
   file: Pick<Blob, "slice">,
-  mimeType: "image/jpeg" | "image/png"
+  mimeType: "image/jpeg" | "image/png" | "image/heic" | "image/heif"
 ): Promise<boolean> {
-  const bytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  const bytes = new Uint8Array(await file.slice(0, 32).arrayBuffer());
   if (mimeType === "image/jpeg") {
     return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   }
   const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  return bytes.length === pngSignature.length && pngSignature.every((value, index) => bytes[index] === value);
+  if (mimeType === "image/png") {
+    return bytes.length >= pngSignature.length && pngSignature.every((value, index) => bytes[index] === value);
+  }
+  if (bytes.length < 12 || String.fromCharCode(...bytes.slice(4, 8)) !== "ftyp") return false;
+  const brands = ["heic", "heix", "hevc", "hevx", "mif1", "msf1"];
+  const signature = String.fromCharCode(...bytes);
+  return brands.some((brand) => signature.includes(brand));
 }
 
 export function validateImageUploadPrerequisites(

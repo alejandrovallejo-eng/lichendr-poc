@@ -15,7 +15,7 @@ export type AnnotationRegionRow = Database["public"]["Tables"]["annotation_regio
 export type AnnotationSetRow = Database["public"]["Tables"]["annotation_sets"]["Row"];
 export type MorphotypeRow = Database["public"]["Tables"]["morphotypes"]["Row"];
 export type AnnotationRegionClassification = (typeof ANNOTATION_REGION_CLASSES)[number];
-export type AnnotationRegionSource = "mobile_sam" | "manual" | "color_assisted";
+export type AnnotationRegionSource = "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
 
 export interface NormalizedPoint {
   x: number;
@@ -198,7 +198,7 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   const representativeColorHex = input.representativeColorHex ?? null;
   const colorToleranceDeltaE = input.colorToleranceDeltaE ?? null;
   const regionRole = input.regionRole ?? null;
-  if (!["mobile_sam", "manual", "color_assisted"].includes(source)) {
+  if (!["mobile_sam", "manual", "color_assisted", "automatic_four_view"].includes(source)) {
     throw new Error("La procedencia de la máscara no es válida.");
   }
 

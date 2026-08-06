@@ -42,7 +42,7 @@ export interface SamplingEvent {
   observerNames?: string;
   weatherNotes?: string;
   protocolVersion: string;
-  status: "draft" | "completed";
+  status: "draft" | "provisional_ai" | "completed";
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -144,7 +144,7 @@ export interface AnnotationRegion {
   annotationSetId: UUID;
   classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
   morphotypeId?: UUID | null;
-  source: "mobile_sam" | "manual" | "color_assisted";
+  source: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
   modelName: string;
   modelVersion?: string | null;
   maskBucket: string;

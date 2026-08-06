@@ -30,7 +30,7 @@ interface ImageSavePayload {
   treeSampleId: string;
   storagePath: string;
   originalFilename: string;
-  mimeType: "image/jpeg" | "image/png";
+  mimeType: "image/jpeg" | "image/png" | "image/heic" | "image/heif";
   fileSizeBytes: number;
   widthPx: number | null;
   heightPx: number | null;

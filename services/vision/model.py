@@ -11,8 +11,13 @@ from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
+import cv2
 from PIL import Image, ImageOps
+
+try:
+    import torch
+except ImportError:  # Allows validation/rectification tests without the model runtime.
+    torch = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     pass
@@ -38,6 +43,8 @@ _model_loaded: bool = False
 
 def _load_mobilesam(checkpoint_path: str) -> object:
     """Load MobileSAM and return a SamPredictor."""
+    if torch is None:
+        raise RuntimeError("PyTorch is not installed.")
     from mobile_sam import SamPredictor, sam_model_registry  # type: ignore[import]
 
     model = sam_model_registry["vit_t"](checkpoint=checkpoint_path)
@@ -61,6 +68,39 @@ def load_model(checkpoint_path: str) -> None:
 
 def is_model_loaded() -> bool:
     return _model_loaded
+
+
+def automatic_segment_image(image_rgb: np.ndarray) -> list[dict]:
+    """Generate automatic MobileSAM candidates from a fixed, reproducible prompt grid."""
+    if not _model_loaded or _predictor is None:
+        raise RuntimeError("Model not loaded.")
+    original_height, original_width = image_rgb.shape[:2]
+    image_pil = _resize_proportional(Image.fromarray(image_rgb), MAX_IMAGE_DIMENSION)
+    resized = np.asarray(image_pil)
+    width, height = image_pil.size
+    candidates: list[dict] = []
+    with _inference_lock:
+        _predictor.set_image(resized)  # type: ignore[union-attr]
+        for row in range(5):
+            for column in range(2):
+                point_coords = np.array(
+                    [[(column + 0.5) / 2 * width, (row + 0.5) / 5 * height]],
+                    dtype=np.float32,
+                )
+                if torch is None:
+                    raise RuntimeError("PyTorch is not installed.")
+                with torch.inference_mode():
+                    masks, scores, _ = _predictor.predict(  # type: ignore[union-attr]
+                        point_coords=point_coords,
+                        point_labels=np.array([1], dtype=np.int32),
+                        multimask_output=True,
+                    )
+                selected = int(np.argmax(scores))
+                mask = masks[selected].astype(np.uint8)
+                if mask.shape != (original_height, original_width):
+                    mask = cv2.resize(mask, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+                candidates.append({"mask": mask.astype(bool), "score": float(scores[selected])})
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +249,8 @@ def segment_session(
         point_coords = np.array([[p["x"] * width, p["y"] * height] for p in points], dtype=np.float32)
         point_labels = np.array([p["label"] for p in points], dtype=np.int32)
 
+        if torch is None:
+            raise RuntimeError("PyTorch is not installed.")
         with torch.inference_mode():
             masks, scores, _ = _predictor.predict(  # type: ignore[union-attr]
                 point_coords=point_coords,
@@ -257,7 +299,7 @@ def _capture_predictor_features(predictor: object) -> dict:
     state: dict = {}
     for attr in ("features", "original_size", "input_size", "is_image_set"):
         val = getattr(predictor, attr, None)
-        if isinstance(val, torch.Tensor):
+        if torch is not None and isinstance(val, torch.Tensor):
             state[attr] = val.clone()
         else:
             state[attr] = val
@@ -267,7 +309,7 @@ def _capture_predictor_features(predictor: object) -> dict:
 def _restore_predictor_features(predictor: object, state: dict) -> None:
     """Restore previously captured feature state into predictor."""
     for attr, val in state.items():
-        if isinstance(val, torch.Tensor):
+        if torch is not None and isinstance(val, torch.Tensor):
             setattr(predictor, attr, val.clone())
         else:
             setattr(predictor, attr, val)

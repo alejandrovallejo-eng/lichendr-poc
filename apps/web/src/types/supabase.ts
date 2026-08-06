@@ -383,6 +383,77 @@ export type Database = {
           }
         ];
       };
+      capture_series: {
+        Row: {
+          id: string; tree_sample_id: string; request_key: string; template_version: string; algorithm_version: string;
+          status: "capturing" | "processing" | "needs_retake" | "provisional_ai" | "confirmed";
+          review_status: "pending" | "confirmed" | "correction_requested";
+          total_valid_area_cm2: number | null; total_lichen_area_cm2: number | null; tree_lichen_coverage_percent: number | null;
+          occupied_cells: number | null; provisional_morphotype_richness: number | null;
+          valid_view_count: number; pending_view_count: number; calculated_at: string | null; confirmed_at: string | null;
+          created_at: string; updated_at: string;
+        };
+        Insert: {
+          id?: string; tree_sample_id: string; request_key?: string; template_version?: string; algorithm_version: string;
+          status?: "capturing" | "processing" | "needs_retake" | "provisional_ai" | "confirmed";
+          review_status?: "pending" | "confirmed" | "correction_requested";
+          total_valid_area_cm2?: number | null; total_lichen_area_cm2?: number | null; tree_lichen_coverage_percent?: number | null;
+          occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
+          valid_view_count?: number; pending_view_count?: number; calculated_at?: string | null; confirmed_at?: string | null;
+          created_at?: string; updated_at?: string;
+        };
+        Update: {
+          tree_sample_id?: string; request_key?: string; template_version?: string; algorithm_version?: string;
+          status?: "capturing" | "processing" | "needs_retake" | "provisional_ai" | "confirmed";
+          review_status?: "pending" | "confirmed" | "correction_requested";
+          total_valid_area_cm2?: number | null; total_lichen_area_cm2?: number | null; tree_lichen_coverage_percent?: number | null;
+          occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
+          valid_view_count?: number; pending_view_count?: number; calculated_at?: string | null; confirmed_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [{
+          foreignKeyName: "capture_series_tree_sample_id_fkey"; columns: ["tree_sample_id"];
+          referencedRelation: "tree_samples"; referencedColumns: ["id"];
+        }];
+      };
+      capture_views: {
+        Row: {
+          id: string; capture_series_id: string; image_id: string; annotation_set_id: string | null; request_key: string;
+          direction: "N" | "E" | "S" | "W"; active: boolean; replaces_view_id: string | null;
+          processing_status: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          template_version: string; algorithm_version: string; source: string; model_name: string; model_version: string | null;
+          rectified_storage_path: string | null; union_mask_storage_path: string | null;
+          valid_area_cm2: number | null; lichen_union_area_cm2: number | null; lichen_coverage_percent: number | null;
+          component_count: number | null; occupied_cells: number | null; provisional_morphotype_richness: number | null;
+          morphotype_coverage: Record<string, number>; reprojection_error_px: number | null; quality_score: number | null;
+          quality_flags: unknown[]; confidence: number | null; processed_at: string | null; created_at: string; updated_at: string;
+        };
+        Insert: {
+          id?: string; capture_series_id: string; image_id: string; annotation_set_id?: string | null; request_key?: string;
+          direction: "N" | "E" | "S" | "W"; active?: boolean; replaces_view_id?: string | null;
+          processing_status?: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          template_version?: string; algorithm_version: string; source?: string; model_name?: string; model_version?: string | null;
+          rectified_storage_path?: string | null; union_mask_storage_path?: string | null;
+          valid_area_cm2?: number | null; lichen_union_area_cm2?: number | null; lichen_coverage_percent?: number | null;
+          component_count?: number | null; occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
+          morphotype_coverage?: Record<string, number>; reprojection_error_px?: number | null; quality_score?: number | null;
+          quality_flags?: unknown[]; confidence?: number | null; processed_at?: string | null; created_at?: string; updated_at?: string;
+        };
+        Update: {
+          annotation_set_id?: string | null; active?: boolean;
+          processing_status?: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          rectified_storage_path?: string | null; union_mask_storage_path?: string | null;
+          valid_area_cm2?: number | null; lichen_union_area_cm2?: number | null; lichen_coverage_percent?: number | null;
+          component_count?: number | null; occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
+          morphotype_coverage?: Record<string, number>; reprojection_error_px?: number | null; quality_score?: number | null;
+          quality_flags?: unknown[]; confidence?: number | null; processed_at?: string | null; updated_at?: string;
+        };
+        Relationships: [
+          { foreignKeyName: "capture_views_capture_series_id_fkey"; columns: ["capture_series_id"]; referencedRelation: "capture_series"; referencedColumns: ["id"]; },
+          { foreignKeyName: "capture_views_image_id_fkey"; columns: ["image_id"]; referencedRelation: "images"; referencedColumns: ["id"]; },
+          { foreignKeyName: "capture_views_annotation_set_id_fkey"; columns: ["annotation_set_id"]; referencedRelation: "annotation_sets"; referencedColumns: ["id"]; }
+        ];
+      };
       annotation_sets: {
         Row: {
           id: string;
@@ -539,9 +610,13 @@ export type Database = {
           annotation_set_id: string;
           classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id: string | null;
-          source: "mobile_sam" | "manual" | "color_assisted";
+          source: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
           model_name: string;
           model_version: string | null;
+          confidence: number | null;
+          algorithm_version: string | null;
+          template_version: string | null;
+          quality_flags: unknown[] | Record<string, unknown>;
           mask_bucket: string;
           mask_path: string;
           mask_width_px: number;
@@ -563,9 +638,13 @@ export type Database = {
           annotation_set_id: string;
           classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;
-          source?: "mobile_sam" | "manual" | "color_assisted";
+          source?: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
           model_name: string;
           model_version?: string | null;
+          confidence?: number | null;
+          algorithm_version?: string | null;
+          template_version?: string | null;
+          quality_flags?: unknown[] | Record<string, unknown>;
           mask_bucket?: string;
           mask_path: string;
           mask_width_px: number;
@@ -586,9 +665,13 @@ export type Database = {
           annotation_set_id?: string;
           classification?: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;
-          source?: "mobile_sam" | "manual" | "color_assisted";
+          source?: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
           model_name?: string;
           model_version?: string | null;
+          confidence?: number | null;
+          algorithm_version?: string | null;
+          template_version?: string | null;
+          quality_flags?: unknown[] | Record<string, unknown>;
           mask_bucket?: string;
           mask_path?: string;
           mask_width_px?: number;
@@ -848,6 +931,15 @@ export type Database = {
       };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      get_or_create_capture_series: {
+        Args: { p_tree_sample_id: string; p_algorithm_version: string; p_request_key: string; p_template_version?: string };
+        Returns: Database["public"]["Tables"]["capture_series"]["Row"];
+      };
+      register_capture_view: {
+        Args: { p_series_id: string; p_image_id: string; p_direction: string; p_algorithm_version: string; p_request_key: string };
+        Returns: Database["public"]["Tables"]["capture_views"]["Row"];
+      };
+    };
   };
 };

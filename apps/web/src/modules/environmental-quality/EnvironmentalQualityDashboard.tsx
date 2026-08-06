@@ -4,11 +4,14 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   createPollutantMeasurement,
+  deletePollutantMeasurement,
   loadEnvironmentalDataset,
   saveSamplingContext,
   saveSiteContext,
+  updatePollutantMeasurement,
   type EnvironmentalDataset,
   type PollutantCode,
+  type PollutantMeasurementRow,
   type QaQcStatus,
   type SampleContextRow,
   type SiteContextRow,
@@ -183,6 +186,22 @@ function existingDraft(
   };
 }
 
+function existingPollutantDraft(measurement: PollutantMeasurementRow): PollutantDraft {
+  return {
+    siteId: measurement.site_id,
+    samplingEventId: measurement.sampling_event_id ?? "",
+    measuredAt: localDateTime(measurement.measured_at),
+    pollutantCode: measurement.pollutant_code,
+    value: String(measurement.value),
+    unit: measurement.unit,
+    averagingPeriod: measurement.averaging_period ?? "",
+    instrumentMethod: measurement.instrument_method ?? "",
+    dataSource: measurement.data_source,
+    qaQcStatus: measurement.qa_qc_status,
+    notes: measurement.notes ?? "",
+  };
+}
+
 export default function EnvironmentalQualityDashboard() {
   const searchParams = useSearchParams();
   const requestRef = useRef(0);
@@ -200,6 +219,7 @@ export default function EnvironmentalQualityDashboard() {
   );
   const [samplingSaveState, setSamplingSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [pollutantSaveState, setPollutantSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [editingPollutantId, setEditingPollutantId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const refresh = async (signal?: AbortSignal) => {
@@ -259,7 +279,7 @@ export default function EnvironmentalQualityDashboard() {
   const profile = useMemo(() => buildDescriptiveProfile(evaluations), [evaluations]);
 
   const sampleContextById = useMemo(() => new Map(dataset.sampleContexts.map((item) => [item.tree_sample_id, item])), [dataset.sampleContexts]);
-  const siteContextById = useMemo(() => new Map(dataset.siteContexts.map((item) => [item.site_id, item])), [dataset.siteContexts]);
+  const siteContextByEventId = useMemo(() => new Map(dataset.siteContexts.map((item) => [item.sampling_event_id, item])), [dataset.siteContexts]);
   const treeById = useMemo(() => new Map(dataset.trees.map((item) => [item.id, item])), [dataset.trees]);
   const eventById = useMemo(() => new Map(dataset.samplingEvents.map((item) => [item.id, item])), [dataset.samplingEvents]);
   const siteById = useMemo(() => new Map(dataset.sites.map((item) => [item.id, item])), [dataset.sites]);
@@ -289,17 +309,19 @@ export default function EnvironmentalQualityDashboard() {
       return context?.air_temperature_c != null && context.relative_humidity_percent != null;
     }).length,
     representedSites: sites.length,
-    candidateReferenceSites: sites.filter((site) => siteContextById.get(site.id)?.is_reference_candidate === true).length,
+    candidateReferenceSites: new Set(samples.flatMap((sample) => (
+      siteContextByEventId.get(sample.sampling_event_id)?.is_reference_candidate === true ? [sample.site_id] : []
+    ))).size,
     pollutantMeasurements: pollutants.length,
     representedTrees: new Set(samples.map((sample) => sample.tree_id)).size,
-  }), [completed, pollutants.length, sampleContextById, samples, siteContextById, sites, treeById]);
+  }), [completed, pollutants.length, sampleContextById, samples, siteContextByEventId, sites, treeById]);
 
   const missingMetadata = readiness.filter((item) => item.status !== "Completo" && item.status !== "No aplica");
   const effectiveSampleId = samples.some((sample) => sample.id === selectedSampleId) ? selectedSampleId : samples[0]?.id ?? "";
   const selectedSample = dataset.treeSamples.find((item) => item.id === effectiveSampleId);
   const selectedDraft = samplingDrafts[effectiveSampleId] ?? (
     selectedSample
-      ? existingDraft(selectedSample, sampleContextById.get(selectedSample.id), siteContextById.get(selectedSample.site_id))
+      ? existingDraft(selectedSample, sampleContextById.get(selectedSample.id), siteContextByEventId.get(selectedSample.sampling_event_id))
       : EMPTY_SAMPLING_DRAFT
   );
   const pollutantSiteId = sites.some((site) => site.id === pollutantDraft.siteId) ? pollutantDraft.siteId : sites[0]?.id ?? "";
@@ -345,6 +367,7 @@ export default function EnvironmentalQualityDashboard() {
       });
       await saveSiteContext({
         siteId: selectedSample.site_id,
+        samplingEventId: selectedSample.sampling_event_id,
         landUseClassification: selectedDraft.landUseClassification.trim() || null,
         isReferenceCandidate: selectedDraft.referenceCandidate === "" ? null : selectedDraft.referenceCandidate === "yes",
         measuredAt,
@@ -368,7 +391,7 @@ export default function EnvironmentalQualityDashboard() {
     setPollutantSaveState("saving");
     setSaveError(null);
     try {
-      await createPollutantMeasurement({
+      const input = {
         siteId: pollutantSiteId,
         samplingEventId: pollutantDraft.samplingEventId || null,
         measuredAt: new Date(pollutantDraft.measuredAt).toISOString(),
@@ -380,12 +403,44 @@ export default function EnvironmentalQualityDashboard() {
         dataSource: pollutantDraft.dataSource,
         qaQcStatus: pollutantDraft.qaQcStatus,
         notes: pollutantDraft.notes.trim() || null,
-      });
+      };
+      if (editingPollutantId) {
+        await updatePollutantMeasurement(editingPollutantId, input);
+      } else {
+        await createPollutantMeasurement(input);
+      }
       setPollutantSaveState("saved");
       await refresh();
+      setEditingPollutantId(null);
+      setPollutantDraft(EMPTY_POLLUTANT_DRAFT);
     } catch (reason) {
       setPollutantSaveState("error");
       setSaveError(reason instanceof Error ? reason.message : "No se pudo guardar la medición.");
+    }
+  };
+
+  const editPollutant = (measurement: PollutantMeasurementRow) => {
+    setEditingPollutantId(measurement.id);
+    setPollutantDraft(existingPollutantDraft(measurement));
+    setPollutantSaveState("idle");
+    setSaveError(null);
+  };
+
+  const deletePollutant = async (measurement: PollutantMeasurementRow) => {
+    if (!window.confirm(`¿Eliminar la medición ${measurement.pollutant_code} de ${localDateTime(measurement.measured_at)}?`)) return;
+    setPollutantSaveState("saving");
+    setSaveError(null);
+    try {
+      await deletePollutantMeasurement(measurement.id);
+      if (editingPollutantId === measurement.id) {
+        setEditingPollutantId(null);
+        setPollutantDraft(EMPTY_POLLUTANT_DRAFT);
+      }
+      await refresh();
+      setPollutantSaveState("saved");
+    } catch (reason) {
+      setPollutantSaveState("error");
+      setSaveError(reason instanceof Error ? reason.message : "No se pudo eliminar la medición.");
     }
   };
 
@@ -557,7 +612,7 @@ export default function EnvironmentalQualityDashboard() {
         </form>
 
         <form onSubmit={submitPollutant} className="rounded-lg border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
-          <h3 className="font-semibold">Medición instrumental opcional</h3>
+          <h3 className="font-semibold">{editingPollutantId ? "Editar medición instrumental" : "Medición instrumental opcional"}</h3>
           <p className="mt-1 text-xs text-slate-500">Registre el valor y su unidad original. No se realizan conversiones automáticas entre gases o unidades.</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label className="text-sm">Sitio<select required value={pollutantSiteId} onChange={(event) => setPollutantDraft((current) => ({ ...current, siteId: event.target.value, samplingEventId: "" }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }}><option value="">Seleccione</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
@@ -578,10 +633,30 @@ export default function EnvironmentalQualityDashboard() {
             </div>
           </details>
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <button type="submit" disabled={pollutantSaveState === "saving"} className="rounded bg-emerald-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{pollutantSaveState === "saving" ? "Guardando…" : "Guardar medición"}</button>
+            <button type="submit" disabled={pollutantSaveState === "saving"} className="rounded bg-emerald-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{pollutantSaveState === "saving" ? "Guardando…" : editingPollutantId ? "Actualizar medición" : "Guardar medición"}</button>
+            {editingPollutantId ? <button type="button" onClick={() => { setEditingPollutantId(null); setPollutantDraft(EMPTY_POLLUTANT_DRAFT); setPollutantSaveState("idle"); }} className="rounded border px-4 py-2 text-sm font-semibold" style={{ borderColor: "var(--ld-border)" }}>Cancelar edición</button> : null}
             <span role="status" className={`text-sm ${pollutantSaveState === "error" ? "text-red-700" : "text-emerald-800"}`}>{pollutantSaveState === "saved" ? "Medición guardada." : pollutantSaveState === "error" ? "Error al guardar; el borrador se conserva." : "Borrador conservado en este dispositivo."}</span>
           </div>
         </form>
+        <div className="rounded-lg border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
+          <h3 className="font-semibold">Mediciones persistidas</h3>
+          {pollutants.length === 0 ? <p className="mt-2 text-sm text-slate-500">No hay mediciones registradas para el alcance seleccionado.</p> : (
+            <ul className="mt-3 space-y-2">
+              {pollutants.map((measurement) => (
+                <li key={measurement.id} className="flex flex-wrap items-center justify-between gap-3 rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
+                  <div className="text-sm">
+                    <strong>{measurement.pollutant_code}: {measurement.value} {measurement.unit}</strong>
+                    <span className="ml-2 text-slate-500">{new Date(measurement.measured_at).toLocaleString("es-DO")} · {measurement.averaging_period || "sin período"} · {measurement.qa_qc_status}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => editPollutant(measurement)} className="rounded border px-3 py-1 text-sm font-semibold" style={{ borderColor: "var(--ld-border)" }}>Editar</button>
+                    <button type="button" onClick={() => void deletePollutant(measurement)} disabled={pollutantSaveState === "saving"} className="rounded border border-red-300 px-3 py-1 text-sm font-semibold text-red-700 disabled:opacity-50">Eliminar</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
         {saveError ? <p className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{saveError}</p> : null}
       </section>
 

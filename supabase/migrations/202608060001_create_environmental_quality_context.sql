@@ -8,9 +8,12 @@
 -- plus optional pollutant measurements. It does not compute, store or imply any environmental
 -- estimate, index or score; all new fields are descriptive field/laboratory observations.
 
--- 1) Site-level environmental context (one row per site).
+-- 1) Site-level environmental observations (one row per sampling event).
+-- Land use and reference/control candidacy are campaign-dependent observations, so they are
+-- keyed to the sampling event rather than stored as mutable one-row-per-site attributes.
 create table if not exists public.site_environmental_contexts (
-  site_id uuid primary key references public.sites(id) on delete cascade,
+  sampling_event_id uuid primary key,
+  site_id uuid not null references public.sites(id) on delete cascade,
   land_use_classification text,
   -- Nullable boolean: true = confirmed reference/control candidate, false = confirmed not a
   -- candidate, null = reference status not yet assessed ("unknown"). Kept as a real boolean
@@ -31,9 +34,14 @@ create table if not exists public.site_environmental_contexts (
   constraint site_environmental_contexts_provenance_trimmed
     check (provenance is null or provenance = btrim(provenance)),
   constraint site_environmental_contexts_provenance_max_length
-    check (provenance is null or char_length(provenance) <= 255)
+    check (provenance is null or char_length(provenance) <= 255),
+  constraint site_environmental_contexts_sampling_event_site_fk
+    foreign key (sampling_event_id, site_id)
+    references public.sampling_events(id, site_id) on delete cascade
 );
 
+create index if not exists idx_site_environmental_contexts_site_id
+  on public.site_environmental_contexts(site_id);
 create index if not exists idx_site_environmental_contexts_is_reference_candidate
   on public.site_environmental_contexts(is_reference_candidate);
 

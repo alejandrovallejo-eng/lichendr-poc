@@ -683,6 +683,7 @@ export type Database = {
       };
       site_environmental_contexts: {
         Row: {
+          sampling_event_id: string;
           site_id: string;
           land_use_classification: string | null;
           is_reference_candidate: boolean | null;
@@ -692,6 +693,7 @@ export type Database = {
           updated_at: string;
         };
         Insert: {
+          sampling_event_id: string;
           site_id: string;
           land_use_classification?: string | null;
           is_reference_candidate?: boolean | null;
@@ -701,6 +703,7 @@ export type Database = {
           updated_at?: string;
         };
         Update: {
+          sampling_event_id?: string;
           site_id?: string;
           land_use_classification?: string | null;
           is_reference_candidate?: boolean | null;
@@ -715,6 +718,12 @@ export type Database = {
             columns: ["site_id"];
             referencedRelation: "sites";
             referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "site_environmental_contexts_sampling_event_site_fk";
+            columns: ["sampling_event_id", "site_id"];
+            referencedRelation: "sampling_events";
+            referencedColumns: ["id", "site_id"];
           }
         ];
       };

@@ -274,9 +274,11 @@ La migración aditiva `202608060001_create_environmental_quality_context.sql` no
 
 Solo agrega almacenamiento normalizado para contexto que faltaba y mediciones de contaminantes opcionales. **No crea ninguna tabla de estimación, índice o puntaje de calidad ambiental.**
 
-### Tabla `public.site_environmental_contexts` (uno a uno con `sites`)
+### Tabla `public.site_environmental_contexts` (una observación por jornada)
 
-- `site_id`: uuid, clave primaria, referencia `public.sites(id)` con `on delete cascade`.
+- `sampling_event_id`: uuid, clave primaria.
+- `site_id`: uuid obligatorio, referencia `public.sites(id)` con `on delete cascade`.
+- `site_environmental_contexts_sampling_event_site_fk`: clave foránea compuesta `(sampling_event_id, site_id)` hacia `public.sampling_events(id, site_id)` con `on delete cascade`; conserva cada campaña por separado e impide asociar una jornada de otro sitio.
 - `land_use_classification`: texto libre opcional (no vacío, sin espacios al inicio o al final, máximo 160 caracteres si se proporciona). Sin lista cerrada de valores.
 - `is_reference_candidate`: **booleano opcional**, no un texto con literal `unknown`. `true` = candidato de referencia/control confirmado, `false` = confirmado que no lo es, `NULL` = estado de referencia aún no evaluado ("desconocido" se representa con `NULL`, no con una cadena de texto).
 - `measured_at`: timestamptz opcional (sin valor por defecto).
@@ -315,11 +317,11 @@ Solo agrega almacenamiento normalizado para contexto que faltaba y mediciones de
 
 ### Índices creados
 
-- `idx_site_environmental_contexts_is_reference_candidate` sobre `site_environmental_contexts`.
+- `idx_site_environmental_contexts_site_id` e `idx_site_environmental_contexts_is_reference_candidate` sobre `site_environmental_contexts`.
 - `idx_tree_sample_scientific_contexts_measured_at` sobre `tree_sample_scientific_contexts`.
 - `idx_pollutant_measurements_site_id`, `idx_pollutant_measurements_sampling_event_id`, `idx_pollutant_measurements_pollutant_code`, `idx_pollutant_measurements_measured_at_desc` e `idx_pollutant_measurements_qa_qc_status` sobre `pollutant_measurements`.
 
-Las claves primarias de `site_environmental_contexts` y `tree_sample_scientific_contexts` ya proveen el índice de la relación uno a uno con `sites` y `tree_samples` respectivamente.
+Las claves primarias de `site_environmental_contexts` y `tree_sample_scientific_contexts` proveen índices para la jornada de muestreo y la relación uno a uno con `tree_samples`, respectivamente.
 
 ### Triggers `updated_at`
 

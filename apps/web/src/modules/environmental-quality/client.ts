@@ -179,6 +179,7 @@ export async function saveSamplingContext(input: SaveSamplingContextInput): Prom
 
 export interface SaveSiteContextInput {
   siteId: string;
+  samplingEventId: string;
   landUseClassification: string | null;
   isReferenceCandidate: boolean | null;
   measuredAt: string | null;
@@ -189,6 +190,7 @@ export async function saveSiteContext(input: SaveSiteContextInput): Promise<void
   await ensureSession();
   const payload: Database["public"]["Tables"]["site_environmental_contexts"]["Insert"] = {
     site_id: input.siteId,
+    sampling_event_id: input.samplingEventId,
     land_use_classification: input.landUseClassification,
     is_reference_candidate: input.isReferenceCandidate,
     measured_at: input.measuredAt,
@@ -196,7 +198,7 @@ export async function saveSiteContext(input: SaveSiteContextInput): Promise<void
   };
   const { error } = await supabase
     .from("site_environmental_contexts")
-    .upsert(payload, { onConflict: "site_id" });
+    .upsert(payload, { onConflict: "sampling_event_id" });
   if (error) throw new Error(`El contexto de la muestra se guardó, pero no el contexto del sitio: ${error.message}`);
 }
 
@@ -236,5 +238,33 @@ export async function createPollutantMeasurement(input: CreatePollutantInput): P
     notes: input.notes,
   };
   const { error } = await supabase.from("pollutant_measurements").insert(payload);
+  if (error) throw error;
+}
+
+export async function updatePollutantMeasurement(id: string, input: CreatePollutantInput): Promise<void> {
+  await ensureSession();
+  if (!input.unit.trim() || !input.dataSource.trim()) {
+    throw new Error("La unidad y la fuente de datos no pueden quedar vacías.");
+  }
+  const payload: Database["public"]["Tables"]["pollutant_measurements"]["Update"] = {
+    site_id: input.siteId,
+    sampling_event_id: input.samplingEventId,
+    measured_at: input.measuredAt,
+    pollutant_code: input.pollutantCode,
+    value: input.value,
+    unit: input.unit.trim(),
+    averaging_period: input.averagingPeriod,
+    instrument_method: input.instrumentMethod,
+    data_source: input.dataSource.trim(),
+    qa_qc_status: input.qaQcStatus,
+    notes: input.notes,
+  };
+  const { error } = await supabase.from("pollutant_measurements").update(payload).eq("id", id);
+  if (error) throw error;
+}
+
+export async function deletePollutantMeasurement(id: string): Promise<void> {
+  await ensureSession();
+  const { error } = await supabase.from("pollutant_measurements").delete().eq("id", id);
   if (error) throw error;
 }

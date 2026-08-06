@@ -171,7 +171,7 @@ async function persistAutomaticAnnotations(
       coverage_percent: metrics.lichen_coverage_percent,
       accepted_region_count: unionPixels > 0 ? 1 : 0,
       lichen_region_count: unionPixels > 0 ? 1 : 0,
-      morphotype_count: unionPixels > 0 ? Math.min(1, morphotypeCodes.length) : 0,
+      morphotype_count: unionPixels > 0 ? morphotypeCodes.length : 0,
       calculation_method: "rectified_mask_union",
       calculation_version: result.algorithm_version,
       quality_flags: result.quality_flags,
@@ -379,6 +379,10 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
 
 export interface EvaluatedTreeRow {
   series: CaptureSeriesRow;
+  projectId: string;
+  siteId: string;
+  eventId: string;
+  treeId: string;
   project: string;
   site: string;
   event: string;
@@ -409,6 +413,10 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
     if (!sample || !site) return [];
     return [{
       series: item,
+      projectId: site.project_id,
+      siteId: sample.site_id,
+      eventId: sample.sampling_event_id,
+      treeId: sample.tree_id,
       project: projectMap.get(site.project_id) ?? "Proyecto",
       site: site.name,
       event: eventMap.get(sample.sampling_event_id) ?? "Jornada",

@@ -56,6 +56,12 @@ create table if not exists public.capture_series (
   constraint capture_series_areas_non_negative check (
     (total_valid_area_cm2 is null or total_valid_area_cm2 >= 0)
     and (total_lichen_area_cm2 is null or total_lichen_area_cm2 >= 0)
+    and (total_valid_area_cm2 is null or total_valid_area_cm2 <= 2000)
+    and (total_lichen_area_cm2 is null or total_lichen_area_cm2 <= 2000)
+    and (
+      total_lichen_area_cm2 is null
+      or (total_valid_area_cm2 is not null and total_lichen_area_cm2 <= total_valid_area_cm2)
+    )
   ),
   constraint capture_series_coverage_range
     check (tree_lichen_coverage_percent is null or tree_lichen_coverage_percent between 0 and 100),
@@ -121,6 +127,12 @@ create table if not exists public.capture_views (
   constraint capture_views_areas_non_negative check (
     (valid_area_cm2 is null or valid_area_cm2 >= 0)
     and (lichen_union_area_cm2 is null or lichen_union_area_cm2 >= 0)
+    and (valid_area_cm2 is null or valid_area_cm2 <= 500)
+    and (lichen_union_area_cm2 is null or lichen_union_area_cm2 <= 500)
+    and (
+      lichen_union_area_cm2 is null
+      or (valid_area_cm2 is not null and lichen_union_area_cm2 <= valid_area_cm2)
+    )
   ),
   constraint capture_views_coverage_range
     check (lichen_coverage_percent is null or lichen_coverage_percent between 0 and 100),
@@ -223,7 +235,19 @@ create policy capture_views_insert_authenticated on public.capture_views
       join public.tree_samples ts on ts.id = cs.tree_sample_id
       join public.sites s on s.id = ts.site_id
       join public.projects p on p.id = s.project_id
-      where cs.id = capture_series_id and p.owner_id = auth.uid()
+      join public.images i
+        on i.id = public.capture_views.image_id
+       and i.tree_sample_id = cs.tree_sample_id
+      where cs.id = public.capture_views.capture_series_id
+        and p.owner_id = auth.uid()
+        and (
+          public.capture_views.annotation_set_id is null
+          or exists (
+            select 1 from public.annotation_sets aset
+            where aset.id = public.capture_views.annotation_set_id
+              and aset.image_id = public.capture_views.image_id
+          )
+        )
     )
   );
 drop policy if exists capture_views_update_authenticated on public.capture_views;
@@ -244,7 +268,19 @@ create policy capture_views_update_authenticated on public.capture_views
       join public.tree_samples ts on ts.id = cs.tree_sample_id
       join public.sites s on s.id = ts.site_id
       join public.projects p on p.id = s.project_id
-      where cs.id = capture_series_id and p.owner_id = auth.uid()
+      join public.images i
+        on i.id = public.capture_views.image_id
+       and i.tree_sample_id = cs.tree_sample_id
+      where cs.id = public.capture_views.capture_series_id
+        and p.owner_id = auth.uid()
+        and (
+          public.capture_views.annotation_set_id is null
+          or exists (
+            select 1 from public.annotation_sets aset
+            where aset.id = public.capture_views.annotation_set_id
+              and aset.image_id = public.capture_views.image_id
+          )
+        )
     )
   );
 drop policy if exists capture_views_delete_authenticated on public.capture_views;
@@ -375,8 +411,14 @@ begin
 end;
 $$;
 
-grant select, insert, update, delete on public.capture_series to authenticated;
-grant select, insert, update, delete on public.capture_views to authenticated;
+revoke all on table public.capture_series from public, anon;
+revoke all on table public.capture_views from public, anon;
+revoke all on function public.get_or_create_capture_series(uuid, text, uuid, text) from public, anon;
+revoke all on function public.register_capture_view(uuid, uuid, text, text, uuid) from public, anon;
+revoke all on function public.confirm_capture_series(uuid) from public, anon;
+
+grant select, insert, update on public.capture_series to authenticated;
+grant select, insert, update on public.capture_views to authenticated;
 grant execute on function public.get_or_create_capture_series(uuid, text, uuid, text) to authenticated;
 grant execute on function public.register_capture_view(uuid, uuid, text, text, uuid) to authenticated;
 grant execute on function public.confirm_capture_series(uuid) to authenticated;

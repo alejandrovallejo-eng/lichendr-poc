@@ -8,7 +8,7 @@ export type Database = {
           name: string;
           description: string | null;
           country_code: string;
-          status: string;
+          status: "draft" | "provisional_ai" | "completed";
           created_at: string;
           updated_at: string;
         };
@@ -17,7 +17,7 @@ export type Database = {
           name: string;
           description?: string | null;
           country_code?: string;
-          status?: string;
+          status?: "draft" | "provisional_ai" | "completed";
           created_at?: string;
           updated_at?: string;
         };
@@ -26,7 +26,7 @@ export type Database = {
           name?: string;
           description?: string | null;
           country_code?: string;
-          status?: string;
+          status?: "draft" | "provisional_ai" | "completed";
           created_at?: string;
           updated_at?: string;
         };

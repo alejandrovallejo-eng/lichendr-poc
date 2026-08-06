@@ -2,7 +2,14 @@ import type { TreeMetricSummary, VisionViewResult } from "./types";
 
 export function aggregateFourViewMetrics(results: readonly (VisionViewResult | null)[]): TreeMetricSummary {
   const valid = results.filter((result): result is VisionViewResult & { metrics: NonNullable<VisionViewResult["metrics"]> } => (
-    result?.status === "provisional_ai" && result.metrics !== null
+    result?.status === "provisional_ai"
+    && result.metrics !== null
+    && result.metrics.valid_area_cm2 > 0
+    && result.metrics.valid_area_cm2 <= 500
+    && result.metrics.lichen_union_area_cm2 >= 0
+    && result.metrics.lichen_union_area_cm2 <= result.metrics.valid_area_cm2
+    && result.metrics.occupied_cells >= 0
+    && result.metrics.occupied_cells <= 5
   ));
   const totalValidAreaCm2 = valid.reduce((sum, result) => sum + result.metrics.valid_area_cm2, 0);
   const totalLichenAreaCm2 = valid.reduce((sum, result) => sum + result.metrics.lichen_union_area_cm2, 0);
@@ -10,7 +17,7 @@ export function aggregateFourViewMetrics(results: readonly (VisionViewResult | n
   return {
     totalValidAreaCm2,
     totalLichenAreaCm2,
-    coveragePercent: totalValidAreaCm2 > 0 ? totalLichenAreaCm2 / totalValidAreaCm2 * 100 : null,
+    coveragePercent: valid.length === 4 ? totalLichenAreaCm2 / totalValidAreaCm2 * 100 : null,
     occupiedCells: valid.reduce((sum, result) => sum + result.metrics.occupied_cells, 0),
     morphotypeRichness: morphotypes.size,
     validViews: valid.length,

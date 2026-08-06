@@ -46,6 +46,7 @@ test("calcula las cuatro vistas con área ponderada y máximo de 2000 cm²", () 
 test("mantiene incompleta una serie con una vista faltante", () => {
   const summary = aggregateFourViewMetrics([result(50), result(50), result(50), null]);
   assert.equal(summary.totalValidAreaCm2, 1500);
+  assert.equal(summary.coveragePercent, null);
   assert.equal(summary.validViews, 3);
   assert.equal(summary.pendingViews, 1);
 });
@@ -58,4 +59,13 @@ test("cuenta un morfotipo una sola vez entre vistas", () => {
     null,
   ]);
   assert.equal(summary.morphotypeRichness, 2);
+});
+
+test("rechaza una vista que excede el máximo físico de 500 cm²", () => {
+  const invalid = result(501);
+  invalid.metrics!.valid_area_cm2 = 501;
+  const summary = aggregateFourViewMetrics([result(50), result(50), result(50), invalid]);
+  assert.equal(summary.totalValidAreaCm2, 1500);
+  assert.equal(summary.coveragePercent, null);
+  assert.equal(summary.validViews, 3);
 });

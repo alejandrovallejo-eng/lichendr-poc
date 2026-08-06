@@ -32,6 +32,9 @@ type SlotState = {
 };
 
 const EMPTY_SLOT = (): SlotState => ({ file: null, requestKey: crypto.randomUUID(), status: "empty", error: null, result: null });
+const EMPTY_SLOTS = (): Record<Direction, SlotState> => ({
+  N: EMPTY_SLOT(), E: EMPTY_SLOT(), S: EMPTY_SLOT(), W: EMPTY_SLOT(),
+});
 const CAPTURE_INSTRUCTIONS = [
   "Coloca el borde inferior de la plantilla a 1 m sobre la base del árbol.",
   "Colócate aproximadamente a 1 m del tronco.",
@@ -100,21 +103,26 @@ export default function FourViewWorkflow() {
   const [siteId, setSiteId] = useState("");
   const [eventId, setEventId] = useState("");
   const [treeId, setTreeId] = useState("");
-  const [slots, setSlots] = useState<Record<Direction, SlotState>>({
-    N: EMPTY_SLOT(), E: EMPTY_SLOT(), S: EMPTY_SLOT(), W: EMPTY_SLOT(),
-  });
+  const [slots, setSlots] = useState<Record<Direction, SlotState>>(EMPTY_SLOTS);
   const [series, setSeries] = useState<CaptureSeriesRow | null>(null);
+  const [contextConfirmed, setContextConfirmed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [layer, setLayer] = useState("lichen");
   const [heading, setHeading] = useState<number | null>(null);
   const [evaluated, setEvaluated] = useState<EvaluatedTreeRow[]>([]);
 
+  const resetCapture = () => {
+    setSlots(EMPTY_SLOTS());
+    setSeries(null);
+    setContextConfirmed(false);
+  };
+
   useEffect(() => {
     void fetchProjects().then(({ projects: rows, error }) => {
       if (error) setGlobalError(error);
       setProjects(rows);
-      setProjectId(rows[0]?.id ?? "");
+      setProjectId((current) => rows.some((item) => item.id === current) ? current : (rows[0]?.id ?? ""));
     });
     void listEvaluatedTrees().then(setEvaluated).catch(() => undefined);
   }, []);
@@ -123,7 +131,7 @@ export default function FourViewWorkflow() {
     void fetchSitesByProject(projectId).then(({ sites: rows, error }) => {
       if (error) setGlobalError(error);
       setSites(rows);
-      setSiteId(rows[0]?.id ?? "");
+      setSiteId((current) => rows.some((item) => item.id === current) ? current : (rows[0]?.id ?? ""));
     });
   }, [projectId]);
   useEffect(() => {
@@ -132,8 +140,12 @@ export default function FourViewWorkflow() {
       if (eventResult.error || treeResult.error) setGlobalError(eventResult.error ?? treeResult.error);
       setEvents(eventResult.samplingEvents);
       setTrees(treeResult.trees);
-      setEventId(eventResult.samplingEvents[0]?.id ?? "");
-      setTreeId(treeResult.trees[0]?.id ?? "");
+      setEventId((current) => eventResult.samplingEvents.some((item) => item.id === current)
+        ? current
+        : (eventResult.samplingEvents[0]?.id ?? ""));
+      setTreeId((current) => treeResult.trees.some((item) => item.id === current)
+        ? current
+        : (treeResult.trees[0]?.id ?? ""));
     });
   }, [siteId]);
   useEffect(() => {
@@ -152,9 +164,13 @@ export default function FourViewWorkflow() {
 
   const selectedTree = trees.find((tree) => tree.id === treeId);
   const selectedEvent = events.find((event) => event.id === eventId);
-  const count = DIRECTIONS.filter((direction) => slots[direction].file).length;
+  const capturedCount = DIRECTIONS.filter((direction) => slots[direction].file || slots[direction].result).length;
   const summary = useMemo(() => aggregateFourViewMetrics(DIRECTIONS.map((direction) => slots[direction].result)), [slots]);
   const suggestion = suggestedDirection(heading);
+  const canProcess = contextConfirmed
+    && series?.status !== "confirmed"
+    && DIRECTIONS.every((direction) => slots[direction].file || slots[direction].result?.status === "provisional_ai")
+    && DIRECTIONS.some((direction) => slots[direction].file && ["ready", "error"].includes(slots[direction].status));
 
   const chooseFile = (direction: Direction, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -162,12 +178,11 @@ export default function FourViewWorkflow() {
       ...current,
       [direction]: file ? { file, requestKey: crypto.randomUUID(), status: "ready", error: null, result: null } : EMPTY_SLOT(),
     }));
-    setSeries(null);
   };
 
   const processAll = async () => {
-    if (!projectId || !siteId || !eventId || !treeId || count !== 4) {
-      setGlobalError("Selecciona el contexto y carga las cuatro fotografías.");
+    if (!projectId || !siteId || !eventId || !treeId || !canProcess) {
+      setGlobalError("Confirma el árbol y la jornada, y completa las cuatro vistas.");
       return;
     }
     setProcessing(true);
@@ -176,10 +191,14 @@ export default function FourViewWorkflow() {
       const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
       const activeSeries = await getOrCreateCaptureSeries(treeSampleId);
       setSeries(activeSeries);
-      const completed: Record<Direction, VisionViewResult | null> = { N: null, E: null, S: null, W: null };
+      const completed = Object.fromEntries(DIRECTIONS.map((direction) => {
+        const result = slots[direction].result;
+        return [direction, result?.status === "provisional_ai" ? result : null];
+      })) as Record<Direction, VisionViewResult | null>;
       for (const direction of DIRECTIONS) {
-        const file = slots[direction].file;
-        if (!file) continue;
+        const slot = slots[direction];
+        const file = slot.file;
+        if (!file || !["ready", "error"].includes(slot.status)) continue;
         setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "processing", error: null } }));
         try {
           const result = await analyzeFourViewFile(file);
@@ -188,7 +207,7 @@ export default function FourViewWorkflow() {
             direction,
             result,
             series: activeSeries,
-            requestKey: slots[direction].requestKey,
+            requestKey: slot.requestKey,
             context: { projectId, siteId, eventId, treeSampleId },
           });
           completed[direction] = result;
@@ -229,12 +248,15 @@ export default function FourViewWorkflow() {
 
   const repeat = (direction: Direction) => {
     setSlots((current) => ({ ...current, [direction]: EMPTY_SLOT() }));
-    setSeries(null);
   };
 
   const openEvaluation = async (row: EvaluatedTreeRow) => {
     try {
       const stored = await loadSeriesResults(row.series.id);
+      setProjectId(row.projectId);
+      setSiteId(row.siteId);
+      setEventId(row.eventId);
+      setTreeId(row.treeId);
       setSlots(Object.fromEntries(DIRECTIONS.map((direction) => {
         const result = stored[direction] ?? null;
         return [direction, {
@@ -246,6 +268,7 @@ export default function FourViewWorkflow() {
         }];
       })) as Record<Direction, SlotState>);
       setSeries(row.series);
+      setContextConfirmed(true);
     } catch {
       setGlobalError("No se pudo abrir la evaluación guardada.");
     }
@@ -265,25 +288,29 @@ export default function FourViewWorkflow() {
         <div className="grid gap-4 md:grid-cols-4">
           <label className="text-sm">Proyecto
             <select className="mt-1 w-full rounded border p-2" value={projectId} onChange={(event) => {
-              setProjectId(event.target.value); setSiteId(""); setEventId(""); setTreeId(""); setSites([]); setEvents([]); setTrees([]);
+              resetCapture(); setProjectId(event.target.value); setSiteId(""); setEventId(""); setTreeId(""); setSites([]); setEvents([]); setTrees([]);
             }}>
               {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="text-sm">Sitio
             <select className="mt-1 w-full rounded border p-2" value={siteId} onChange={(event) => {
-              setSiteId(event.target.value); setEventId(""); setTreeId(""); setEvents([]); setTrees([]);
+              resetCapture(); setSiteId(event.target.value); setEventId(""); setTreeId(""); setEvents([]); setTrees([]);
             }}>
               {sites.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="text-sm">Jornada
-            <select className="mt-1 w-full rounded border p-2" value={eventId} onChange={(event) => setEventId(event.target.value)}>
+            <select className="mt-1 w-full rounded border p-2" value={eventId} onChange={(event) => {
+              resetCapture(); setEventId(event.target.value);
+            }}>
               {events.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="text-sm">Árbol existente
-            <select className="mt-1 w-full rounded border p-2" value={treeId} onChange={(event) => setTreeId(event.target.value)}>
+            <select className="mt-1 w-full rounded border p-2" value={treeId} onChange={(event) => {
+              resetCapture(); setTreeId(event.target.value);
+            }}>
               {trees.map((item) => <option key={item.id} value={item.id}>{item.code}</option>)}
             </select>
           </label>
@@ -291,7 +318,18 @@ export default function FourViewWorkflow() {
         <div className="mt-4 grid gap-2 text-sm md:grid-cols-3">
           <strong>Árbol seleccionado: {selectedTree?.code ?? "—"}</strong>
           <strong>Jornada seleccionada: {selectedEvent?.name ?? "—"}</strong>
-          <strong>Serie fotográfica: {count} de 4</strong>
+          <strong>Serie fotográfica: {capturedCount} de 4</strong>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={!eventId || !treeId || contextConfirmed}
+            onClick={() => setContextConfirmed(true)}
+            className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {contextConfirmed ? "Árbol y jornada confirmados" : "Confirmar árbol y jornada"}
+          </button>
+          {contextConfirmed ? <span className="text-sm text-emerald-800">Contexto bloqueado para esta serie; cambia un selector para reiniciar.</span> : null}
         </div>
       </section>
 
@@ -314,13 +352,14 @@ export default function FourViewWorkflow() {
             <article key={direction} className="min-h-64 rounded-lg border p-4" style={{ background: "var(--ld-card)", borderColor: suggestion === direction ? "#D9BD67" : "var(--ld-border)" }}>
               <h2 className="text-xl font-bold">{DIRECTION_LABELS[direction]}</h2>
               <p className="mt-1 text-sm">{statusLabel(slot)}</p>
-              <label className="mt-5 block cursor-pointer rounded bg-emerald-800 px-4 py-3 text-center text-white">
-                {slot.file ? "Reemplazar imagen" : "Tomar foto o elegir archivo"}
+              <label className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || processing || series?.status === "confirmed" ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
+                {series?.status === "confirmed" ? "Evaluación confirmada" : slot.file || slot.result ? "Reemplazar imagen" : "Tomar foto o elegir archivo"}
                 <input
                   className="sr-only"
                   type="file"
                   accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif"
                   capture="environment"
+                  disabled={!contextConfirmed || processing || series?.status === "confirmed"}
                   onChange={(event) => chooseFile(direction, event)}
                 />
               </label>
@@ -337,7 +376,7 @@ export default function FourViewWorkflow() {
       {globalError ? <div className="rounded border border-red-300 bg-red-50 p-4 text-sm text-red-800">{globalError}</div> : null}
       <button
         type="button"
-        disabled={processing || count !== 4}
+        disabled={processing || !canProcess}
         onClick={() => void processAll()}
         className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
       >
@@ -386,7 +425,6 @@ export default function FourViewWorkflow() {
           <div className="flex flex-wrap gap-3">
             <button type="button" disabled={summary.validViews !== 4 || series.status === "confirmed"} onClick={() => void confirm()} className="rounded bg-emerald-800 px-4 py-2 text-white disabled:opacity-50">Confirmar evaluación</button>
             <Link href="/annotations" className="rounded border px-4 py-2">Corregir propuesta</Link>
-            <button type="button" className="rounded border px-4 py-2" onClick={() => repeat("N")}>Repetir una vista</button>
           </div>
         </section>
       ) : null}

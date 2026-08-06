@@ -26,6 +26,13 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(result.canonical_rgb.shape, (CANONICAL_HEIGHT, CANONICAL_WIDTH, 3))
         self.assertLess(result.reprojection_error_px, 0.01)
 
+    def test_rectification_crops_the_exact_inner_window(self) -> None:
+        source = synthetic_frame()
+        result = rectify_frame(source)
+        expected = source[160:2160, 160:560]
+        difference = np.abs(result.canonical_rgb.astype(np.int16) - expected.astype(np.int16))
+        self.assertLess(float(difference.mean()), 1.0)
+
     def test_missing_marker_is_rejected(self) -> None:
         with self.assertRaisesRegex(FrameValidationError, "Faltan marcadores"):
             rectify_frame(synthetic_frame(missing_id=2))
@@ -77,6 +84,19 @@ class FrameTests(unittest.TestCase):
         missing = aggregate_tree_metrics([{"metrics": metric} for _ in range(3)])
         self.assertEqual(missing["valid_view_count"], 3)
         self.assertEqual(missing["pending_view_count"], 1)
+        self.assertIsNone(missing["tree_lichen_coverage_percent"])
+
+    def test_tree_aggregation_rejects_area_above_physical_maximum(self) -> None:
+        metric = {
+            "valid_area_cm2": 501,
+            "lichen_union_area_cm2": 100,
+            "occupied_cells": 3,
+            "morphotype_coverage": {},
+        }
+        result = aggregate_tree_metrics([{"metrics": metric} for _ in range(4)])
+        self.assertEqual(result["valid_view_count"], 0)
+        self.assertEqual(result["total_valid_area_cm2"], 0)
+        self.assertIsNone(result["tree_lichen_coverage_percent"])
 
     def test_jpeg_png_and_invalid_signatures(self) -> None:
         png = encode(synthetic_frame())

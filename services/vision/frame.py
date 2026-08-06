@@ -328,7 +328,13 @@ def analyze_view(raw: bytes, mime: str, automatic_masks: list[dict[str, Any]]) -
 
 
 def aggregate_tree_metrics(views: list[dict[str, Any]]) -> dict[str, Any]:
-    valid = [view for view in views if view.get("metrics")]
+    valid = [
+        view for view in views
+        if view.get("metrics")
+        and 0 < float(view["metrics"]["valid_area_cm2"]) <= WINDOW_AREA_CM2
+        and 0 <= float(view["metrics"]["lichen_union_area_cm2"]) <= float(view["metrics"]["valid_area_cm2"])
+        and 0 <= int(view["metrics"]["occupied_cells"]) <= 5
+    ]
     valid_area = sum(float(view["metrics"]["valid_area_cm2"]) for view in valid)
     lichen_area = sum(float(view["metrics"]["lichen_union_area_cm2"]) for view in valid)
     morphotypes = {
@@ -339,7 +345,7 @@ def aggregate_tree_metrics(views: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "total_valid_area_cm2": round(valid_area, 4),
         "total_lichen_area_cm2": round(lichen_area, 4),
-        "tree_lichen_coverage_percent": round(lichen_area / valid_area * 100, 4) if valid_area else None,
+        "tree_lichen_coverage_percent": round(lichen_area / valid_area * 100, 4) if len(valid) == 4 else None,
         "occupied_cells": sum(int(view["metrics"]["occupied_cells"]) for view in valid),
         "provisional_morphotype_richness": len(morphotypes),
         "valid_view_count": len(valid),

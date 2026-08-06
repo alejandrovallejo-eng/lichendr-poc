@@ -12,6 +12,7 @@ import {
   type EnvironmentalDataset,
   type PollutantCode,
   type PollutantMeasurementRow,
+  type PollutantUnitCode,
   type QaQcStatus,
   type SampleContextRow,
   type SiteContextRow,
@@ -19,9 +20,13 @@ import {
 } from "./client";
 import {
   aggregateCompatiblePollutants,
+  averagingPeriodLabel,
   buildDescriptiveProfile,
   buildReadinessChecklist,
+  POLLUTANT_UNIT_OPTIONS,
+  pollutantUnitLabel,
   selectCompletedEvaluations,
+  validateAveragingPeriodMinutes,
   type ReadinessStatus,
 } from "./science";
 
@@ -49,6 +54,7 @@ const QUALITY_LABELS: Record<string, string> = {
 };
 const ORIENTATIONS = ["unknown", "N", "NE", "E", "SE", "S", "SW", "W", "NW", "multiple"];
 const POLLUTANTS: PollutantCode[] = ["PM2.5", "PM10", "NO2", "SO2", "NH3", "O3", "CO"];
+const COMMON_AVERAGING_PERIODS = ["", "0", "1", "15", "60", "480", "1440"] as const;
 const REFERENCES = [
   ["EN 16413:2014 — Ambient air: biomonitoring with lichens", "https://www.dinmedia.de/en/standard/din-en-16413/191132720"],
   ["Counoy et al. (2025) — New interpretative framework", "https://doi.org/10.1111/gcb.70632"],
@@ -82,8 +88,9 @@ interface PollutantDraft {
   measuredAt: string;
   pollutantCode: PollutantCode;
   value: string;
-  unit: string;
+  unitCode: PollutantUnitCode;
   averagingPeriod: string;
+  customAveragingPeriodMinutes: string;
   instrumentMethod: string;
   dataSource: string;
   qaQcStatus: QaQcStatus;
@@ -113,8 +120,9 @@ const EMPTY_POLLUTANT_DRAFT: PollutantDraft = {
   measuredAt: "",
   pollutantCode: "PM2.5",
   value: "",
-  unit: "µg/m³",
+  unitCode: "ug_m3",
   averagingPeriod: "",
+  customAveragingPeriodMinutes: "",
   instrumentMethod: "",
   dataSource: "",
   qaQcStatus: "not_assessed",
@@ -193,8 +201,16 @@ function existingPollutantDraft(measurement: PollutantMeasurementRow): Pollutant
     measuredAt: localDateTime(measurement.measured_at),
     pollutantCode: measurement.pollutant_code,
     value: String(measurement.value),
-    unit: measurement.unit,
-    averagingPeriod: measurement.averaging_period ?? "",
+    unitCode: measurement.unit_code,
+    averagingPeriod: measurement.averaging_period_minutes == null
+      ? ""
+      : COMMON_AVERAGING_PERIODS.includes(String(measurement.averaging_period_minutes) as typeof COMMON_AVERAGING_PERIODS[number])
+        ? String(measurement.averaging_period_minutes)
+        : "custom",
+    customAveragingPeriodMinutes: measurement.averaging_period_minutes != null
+      && !COMMON_AVERAGING_PERIODS.includes(String(measurement.averaging_period_minutes) as typeof COMMON_AVERAGING_PERIODS[number])
+      ? String(measurement.averaging_period_minutes)
+      : "",
     instrumentMethod: measurement.instrument_method ?? "",
     dataSource: measurement.data_source,
     qaQcStatus: measurement.qa_qc_status,
@@ -328,8 +344,8 @@ export default function EnvironmentalQualityDashboard() {
   const pollutantEvents = dataset.samplingEvents.filter((item) => item.site_id === pollutantSiteId);
   const compatiblePollutants = aggregateCompatiblePollutants(pollutants.map((item) => ({
     pollutantCode: item.pollutant_code,
-    unit: item.unit,
-    averagingPeriod: item.averaging_period,
+    unitCode: item.unit_code,
+    averagingPeriodMinutes: item.averaging_period_minutes,
     value: item.value,
   })));
 
@@ -391,14 +407,24 @@ export default function EnvironmentalQualityDashboard() {
     setPollutantSaveState("saving");
     setSaveError(null);
     try {
+      const averagingPeriodMinutes = pollutantDraft.averagingPeriod === ""
+        ? null
+        : validateAveragingPeriodMinutes(Number(
+          pollutantDraft.averagingPeriod === "custom"
+            ? pollutantDraft.customAveragingPeriodMinutes
+            : pollutantDraft.averagingPeriod,
+        ));
+      if (pollutantDraft.averagingPeriod === "custom" && (averagingPeriodMinutes ?? 0) <= 0) {
+        throw new Error("El período personalizado debe ser un número entero positivo de minutos.");
+      }
       const input = {
         siteId: pollutantSiteId,
         samplingEventId: pollutantDraft.samplingEventId || null,
         measuredAt: new Date(pollutantDraft.measuredAt).toISOString(),
         pollutantCode: pollutantDraft.pollutantCode,
         value: Number(pollutantDraft.value),
-        unit: pollutantDraft.unit,
-        averagingPeriod: pollutantDraft.averagingPeriod.trim() || null,
+        unitCode: pollutantDraft.unitCode,
+        averagingPeriodMinutes,
         instrumentMethod: pollutantDraft.instrumentMethod.trim() || null,
         dataSource: pollutantDraft.dataSource,
         qaQcStatus: pollutantDraft.qaQcStatus,
@@ -620,8 +646,9 @@ export default function EnvironmentalQualityDashboard() {
             <label className="text-sm">Fecha y hora<input required type="datetime-local" value={pollutantDraft.measuredAt} onChange={(event) => setPollutantDraft((current) => ({ ...current, measuredAt: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
             <label className="text-sm">Contaminante<select value={pollutantDraft.pollutantCode} onChange={(event) => setPollutantDraft((current) => ({ ...current, pollutantCode: event.target.value as PollutantCode }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }}>{POLLUTANTS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <label className="text-sm">Valor<input required type="number" step="any" value={pollutantDraft.value} onChange={(event) => setPollutantDraft((current) => ({ ...current, value: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
-            <label className="text-sm">Unidad<input required value={pollutantDraft.unit} onChange={(event) => setPollutantDraft((current) => ({ ...current, unit: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
-            <label className="text-sm">Período de promedio<input value={pollutantDraft.averagingPeriod} onChange={(event) => setPollutantDraft((current) => ({ ...current, averagingPeriod: event.target.value }))} placeholder="p. ej., 1 h" className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
+            <label className="text-sm">Unidad<select required value={pollutantDraft.unitCode} onChange={(event) => setPollutantDraft((current) => ({ ...current, unitCode: event.target.value as PollutantUnitCode }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }}>{POLLUTANT_UNIT_OPTIONS.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}</select></label>
+            <label className="text-sm">Período de promedio<select value={pollutantDraft.averagingPeriod} onChange={(event) => setPollutantDraft((current) => ({ ...current, averagingPeriod: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }}><option value="">No reportado</option><option value="0">Instantáneo</option><option value="1">1 minuto</option><option value="15">15 minutos</option><option value="60">1 hora</option><option value="480">8 horas</option><option value="1440">24 horas</option><option value="custom">Minutos personalizados</option></select></label>
+            {pollutantDraft.averagingPeriod === "custom" ? <label className="text-sm">Minutos de promedio<input required type="number" min="1" step="1" value={pollutantDraft.customAveragingPeriodMinutes} onChange={(event) => setPollutantDraft((current) => ({ ...current, customAveragingPeriodMinutes: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label> : null}
             <label className="text-sm">Fuente de datos<input required value={pollutantDraft.dataSource} onChange={(event) => setPollutantDraft((current) => ({ ...current, dataSource: event.target.value }))} className="mt-1 w-full rounded border px-3 py-2" style={{ borderColor: "var(--ld-border)" }} /></label>
           </div>
           <details className="mt-4 rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
@@ -645,8 +672,8 @@ export default function EnvironmentalQualityDashboard() {
               {pollutants.map((measurement) => (
                 <li key={measurement.id} className="flex flex-wrap items-center justify-between gap-3 rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
                   <div className="text-sm">
-                    <strong>{measurement.pollutant_code}: {measurement.value} {measurement.unit}</strong>
-                    <span className="ml-2 text-slate-500">{new Date(measurement.measured_at).toLocaleString("es-DO")} · {measurement.averaging_period || "sin período"} · {measurement.qa_qc_status}</span>
+                    <strong>{measurement.pollutant_code}: {measurement.value} {pollutantUnitLabel(measurement.unit_code)}</strong>
+                    <span className="ml-2 text-slate-500">{new Date(measurement.measured_at).toLocaleString("es-DO")} · {averagingPeriodLabel(measurement.averaging_period_minutes)} · {measurement.qa_qc_status}</span>
                   </div>
                   <div className="flex gap-2">
                     <button type="button" onClick={() => editPollutant(measurement)} className="rounded border px-3 py-1 text-sm font-semibold" style={{ borderColor: "var(--ld-border)" }}>Editar</button>

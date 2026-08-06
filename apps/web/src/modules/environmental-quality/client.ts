@@ -203,6 +203,7 @@ export async function saveSiteContext(input: SaveSiteContextInput): Promise<void
 }
 
 export type PollutantCode = PollutantMeasurementRow["pollutant_code"];
+export type PollutantUnitCode = PollutantMeasurementRow["unit_code"];
 export type QaQcStatus = PollutantMeasurementRow["qa_qc_status"];
 
 export interface CreatePollutantInput {
@@ -211,8 +212,8 @@ export interface CreatePollutantInput {
   measuredAt: string;
   pollutantCode: PollutantCode;
   value: number;
-  unit: string;
-  averagingPeriod: string | null;
+  unitCode: PollutantUnitCode;
+  averagingPeriodMinutes: number | null;
   instrumentMethod: string | null;
   dataSource: string;
   qaQcStatus: QaQcStatus;
@@ -221,8 +222,11 @@ export interface CreatePollutantInput {
 
 export async function createPollutantMeasurement(input: CreatePollutantInput): Promise<void> {
   await ensureSession();
-  if (!input.unit.trim() || !input.dataSource.trim()) {
-    throw new Error("La unidad y la fuente de datos no pueden quedar vacías.");
+  if (!input.dataSource.trim()) {
+    throw new Error("La fuente de datos no puede quedar vacía.");
+  }
+  if (input.averagingPeriodMinutes != null && (!Number.isInteger(input.averagingPeriodMinutes) || input.averagingPeriodMinutes < 0)) {
+    throw new Error("El período de promedio debe ser cero o un número entero positivo de minutos.");
   }
   const payload: Database["public"]["Tables"]["pollutant_measurements"]["Insert"] = {
     site_id: input.siteId,
@@ -230,8 +234,8 @@ export async function createPollutantMeasurement(input: CreatePollutantInput): P
     measured_at: input.measuredAt,
     pollutant_code: input.pollutantCode,
     value: input.value,
-    unit: input.unit.trim(),
-    averaging_period: input.averagingPeriod,
+    unit_code: input.unitCode,
+    averaging_period_minutes: input.averagingPeriodMinutes,
     instrument_method: input.instrumentMethod,
     data_source: input.dataSource.trim(),
     qa_qc_status: input.qaQcStatus,
@@ -243,8 +247,11 @@ export async function createPollutantMeasurement(input: CreatePollutantInput): P
 
 export async function updatePollutantMeasurement(id: string, input: CreatePollutantInput): Promise<void> {
   await ensureSession();
-  if (!input.unit.trim() || !input.dataSource.trim()) {
-    throw new Error("La unidad y la fuente de datos no pueden quedar vacías.");
+  if (!input.dataSource.trim()) {
+    throw new Error("La fuente de datos no puede quedar vacía.");
+  }
+  if (input.averagingPeriodMinutes != null && (!Number.isInteger(input.averagingPeriodMinutes) || input.averagingPeriodMinutes < 0)) {
+    throw new Error("El período de promedio debe ser cero o un número entero positivo de minutos.");
   }
   const payload: Database["public"]["Tables"]["pollutant_measurements"]["Update"] = {
     site_id: input.siteId,
@@ -252,8 +259,8 @@ export async function updatePollutantMeasurement(id: string, input: CreatePollut
     measured_at: input.measuredAt,
     pollutant_code: input.pollutantCode,
     value: input.value,
-    unit: input.unit.trim(),
-    averaging_period: input.averagingPeriod,
+    unit_code: input.unitCode,
+    averaging_period_minutes: input.averagingPeriodMinutes,
     instrument_method: input.instrumentMethod,
     data_source: input.dataSource.trim(),
     qa_qc_status: input.qaQcStatus,

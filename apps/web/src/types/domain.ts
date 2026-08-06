@@ -1,6 +1,14 @@
 // Domain types for LichenDR v1 (initial)
 
 export type UUID = string;
+export type PollutantUnitCode = "ug_m3" | "mg_m3" | "ng_m3" | "ppm" | "ppb";
+
+export interface PollutantMeasurement {
+  pollutantCode: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
+  value: number;
+  unitCode: PollutantUnitCode;
+  averagingPeriodMinutes: number | null;
+}
 
 export interface Project {
   id: UUID;

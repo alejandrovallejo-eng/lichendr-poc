@@ -95,7 +95,7 @@ Estas entidades solo agregan almacenamiento normalizado para datos que faltaban.
 
 - `SiteEnvironmentalContext` (`public.site_environmental_contexts`): una observación por `SamplingEvent` (`sampling_event_id` es clave primaria; la clave foránea compuesta con `site_id` garantiza que la jornada pertenezca al sitio). Campos: `land_use_classification` (texto libre opcional), `is_reference_candidate` (**booleano opcional**: `true`/`false`/`NULL`, donde `NULL` representa estado de referencia desconocido — no se usa un literal de texto `unknown`), `measured_at`, `provenance`, `created_at`, `updated_at`. Al ser datos dependientes de campaña, una jornada nunca sobrescribe otra del mismo sitio.
 - `TreeSampleScientificContext` (`public.tree_sample_scientific_contexts`): uno a uno con `TreeSample` (`tree_sample_id` es clave primaria y foránea con `ON DELETE CASCADE`). Campos: `sampled_width_cm`, `sampled_height_cm`, `dbh_cm` (diámetro a la altura del pecho del árbol hospedero — contexto estructural medido en el momento del muestreo; no duplica `Tree.species_name`/`species_confidence`), `bark_ph`, `bark_texture` (texto libre opcional), `canopy_cover_percent`, `air_temperature_c`, `relative_humidity_percent`, `measured_at`, `provenance`, `created_at`, `updated_at`.
-- `PollutantMeasurement` (`public.pollutant_measurements`): cero o varias por `Site`; el `SamplingEvent` es opcional. Campos: `id`, `site_id`, `sampling_event_id` (nullable), `measured_at`, `pollutant_code`, `value`, `unit`, `averaging_period`, `instrument_method`, `data_source`, `qa_qc_status`, `notes`, `created_at`, `updated_at`. La clave foránea compuesta `pollutant_measurements_sampling_event_site_fk (sampling_event_id, site_id)` reutiliza `sampling_events_id_site_id_unique`. Con `sampling_event_id` nulo, PostgreSQL (`MATCH SIMPLE`) omite la verificación; si se proporciona, debe pertenecer al mismo `site_id`, impidiendo asociar un evento de otro sitio.
+- `PollutantMeasurement` (`public.pollutant_measurements`): cero o varias por `Site`; el `SamplingEvent` es opcional. Campos: `id`, `site_id`, `sampling_event_id` (nullable), `measured_at`, `pollutant_code`, `value`, `unit_code`, `averaging_period_minutes`, `instrument_method`, `data_source`, `qa_qc_status`, `notes`, `created_at`, `updated_at`. La clave foránea compuesta `pollutant_measurements_sampling_event_site_fk (sampling_event_id, site_id)` reutiliza `sampling_events_id_site_id_unique`. Con `sampling_event_id` nulo, PostgreSQL (`MATCH SIMPLE`) omite la verificación; si se proporciona, debe pertenecer al mismo `site_id`, impidiendo asociar un evento de otro sitio. No hay restricción de unicidad sobre fechas o valores: se preservan mediciones repetidas.
 
 ### Restricciones exactas
 
@@ -106,13 +106,15 @@ Estas entidades solo agregan almacenamiento normalizado para datos que faltaban.
 - `bark_ph`: `is null or (bark_ph >= 0 and bark_ph <= 14)`.
 - `land_use_classification`, `bark_texture`, `provenance`: si se proporcionan, no vacíos y sin espacios al inicio o al final (máximo 160, 120 y 255 caracteres respectivamente).
 - `value`: sin restricción de signo o rango; almacena la lectura numérica cruda del instrumento (deriva del sensor, calibración o artefactos pueden producir lecturas negativas). La confiabilidad se evalúa con `qa_qc_status`, no con una restricción de la base de datos.
-- `unit` y `data_source`: obligatorios, no vacíos, sin espacios al inicio o al final; `unit` máximo 40 caracteres, `data_source` máximo 120 caracteres.
-- `averaging_period` (máximo 40 caracteres) e `instrument_method` (máximo 160 caracteres): opcionales, sin espacios al inicio o al final si se proporcionan.
-- **No existe ninguna restricción que combine `pollutant_code` con `unit`, y la base de datos no convierte unidades.**
+- `unit_code`: obligatorio y limitado por la base de datos a `ug_m3`, `mg_m3`, `ng_m3`, `ppm` o `ppb`; la interfaz los muestra como `µg/m³`, `mg/m³`, `ng/m³`, `ppm` y `ppb`.
+- `averaging_period_minutes`: entero opcional y no negativo. `NULL` significa no reportado, `0` instantáneo y todo valor positivo una duración en minutos.
+- `data_source`: obligatorio, no vacío, sin espacios al inicio o al final, máximo 120 caracteres. `instrument_method` es opcional, sin espacios externos y máximo 160 caracteres.
+- **No existe ninguna restricción que combine `pollutant_code` con `unit_code`, y la base de datos no convierte unidades.**
 
 ### Valores permitidos (categóricos)
 
 - `pollutant_code` (en `PollutantMeasurement`): `PM2.5`, `PM10`, `NO2`, `SO2`, `NH3`, `O3`, `CO`.
+- `unit_code` (en `PollutantMeasurement`): `ug_m3`, `mg_m3`, `ng_m3`, `ppm`, `ppb`.
 - `qa_qc_status` (en `PollutantMeasurement`): `not_assessed` (valor por defecto), `provisional`, `validated`, `rejected`.
 - `land_use_classification` y `bark_texture` son texto libre; no tienen lista cerrada de valores permitidos.
 

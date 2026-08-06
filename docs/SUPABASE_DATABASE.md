@@ -307,13 +307,15 @@ Solo agrega almacenamiento normalizado para contexto que faltaba y mediciones de
 - `measured_at`: timestamptz obligatorio, sin valor por defecto (debe proporcionarse explícitamente).
 - `pollutant_code`: texto obligatorio con lista cerrada de valores permitidos: `PM2.5`, `PM10`, `NO2`, `SO2`, `NH3`, `O3` o `CO`.
 - `value`: double precision obligatorio. **Sin restricción de signo o rango**: almacena la lectura numérica cruda del instrumento tal como se reporta (la deriva del sensor, los desplazamientos de calibración o los artefactos del instrumento pueden producir lecturas crudas negativas). La confiabilidad se evalúa mediante `qa_qc_status`, no rechazando el valor al insertarlo.
-- `unit`: texto obligatorio, no vacío, sin espacios al inicio o al final, máximo 40 caracteres. **No existe ninguna restricción que combine `pollutant_code` con `unit`, y la migración no convierte unidades.**
-- `averaging_period`: texto opcional (p. ej. `1 h`, `24 h`), sin espacios al inicio o al final si se proporciona, máximo 40 caracteres.
+- `unit_code`: texto obligatorio limitado por `pollutant_measurements_unit_code_allowed` a `ug_m3`, `mg_m3`, `ng_m3`, `ppm` o `ppb`. La interfaz presenta las etiquetas `µg/m³`, `mg/m³`, `ng/m³`, `ppm` y `ppb`. **No existe ninguna restricción que combine `pollutant_code` con `unit_code`, y la migración no convierte unidades.**
+- `averaging_period_minutes`: integer opcional. `NULL` significa no reportado, `0` instantáneo y un valor positivo una duración en minutos; `pollutant_measurements_averaging_period_minutes_nonnegative` rechaza valores negativos.
 - `instrument_method`: texto opcional, sin espacios al inicio o al final si se proporciona, máximo 160 caracteres.
 - `data_source`: texto obligatorio, no vacío, sin espacios al inicio o al final, máximo 120 caracteres (sin valor por defecto).
 - `qa_qc_status`: texto obligatorio, valor por defecto `not_assessed`; acepta `not_assessed`, `provisional`, `validated` o `rejected`.
 - `notes`: texto opcional.
 - `created_at` y `updated_at`: timestamptz obligatorios con valor por defecto `now()` y trigger `set_updated_at`.
+
+La tabla no contiene una restricción de unicidad sobre la fecha, el valor ni la combinación de serie; permite conservar múltiples fechas y mediciones repetidas. La agregación de la aplicación separa estrictamente las series por `pollutant_code + unit_code + averaging_period_minutes`.
 
 ### Índices creados
 

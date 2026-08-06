@@ -4,7 +4,9 @@ import {
   aggregateCompatiblePollutants,
   buildDescriptiveProfile,
   buildReadinessChecklist,
+  pollutantUnitCodeFromLabel,
   selectCompletedEvaluations,
+  validateAveragingPeriodMinutes,
   type EnvironmentalEvaluation,
   type ReadinessInput,
 } from "./science";
@@ -113,14 +115,48 @@ test("registra annotation_metrics faltante e incompleto", () => {
   assert.equal(profile.incompleteMetrics, 1);
 });
 
-test("no agrega unidades incompatibles del mismo contaminante", () => {
+test("normaliza etiquetas equivalentes al mismo código canónico", () => {
+  assert.equal(pollutantUnitCodeFromLabel("µg/m³"), "ug_m3");
+  assert.equal(pollutantUnitCodeFromLabel("ug/m3"), "ug_m3");
+  assert.equal(pollutantUnitCodeFromLabel("µg/m3"), "ug_m3");
+});
+
+test("mantiene separados códigos de unidad distintos sin convertir valores", () => {
   const aggregates = aggregateCompatiblePollutants([
-    { pollutantCode: "NO2", unit: "ppb", averagingPeriod: "1 h", value: 10 },
-    { pollutantCode: "NO2", unit: "ppb", averagingPeriod: "1 h", value: 20 },
-    { pollutantCode: "NO2", unit: "µg/m³", averagingPeriod: "1 h", value: 30 },
+    { pollutantCode: "NO2", unitCode: "ppb", averagingPeriodMinutes: 60, value: 10 },
+    { pollutantCode: "NO2", unitCode: "ppb", averagingPeriodMinutes: 60, value: 20 },
+    { pollutantCode: "NO2", unitCode: "ug_m3", averagingPeriodMinutes: 60, value: 30 },
   ]);
   assert.equal(aggregates.length, 2);
-  assert.equal(aggregates.find((item) => item.unit === "ppb")?.mean, 15);
+  assert.equal(aggregates.find((item) => item.unitCode === "ppb")?.mean, 15);
+  assert.equal(aggregates.find((item) => item.unitCode === "ug_m3")?.mean, 30);
+});
+
+test("mantiene separados períodos de promedio distintos", () => {
+  const aggregates = aggregateCompatiblePollutants([
+    { pollutantCode: "PM2.5", unitCode: "ug_m3", averagingPeriodMinutes: 60, value: 8 },
+    { pollutantCode: "PM2.5", unitCode: "ug_m3", averagingPeriodMinutes: 1440, value: 12 },
+  ]);
+  assert.equal(aggregates.length, 2);
+});
+
+test("distingue período no reportado de medición instantánea", () => {
+  const aggregates = aggregateCompatiblePollutants([
+    { pollutantCode: "O3", unitCode: "ppb", averagingPeriodMinutes: null, value: 5 },
+    { pollutantCode: "O3", unitCode: "ppb", averagingPeriodMinutes: 0, value: 5 },
+  ]);
+  assert.equal(aggregates.length, 2);
+  assert.ok(aggregates.some((item) => item.averagingPeriodMinutes === null));
+  assert.ok(aggregates.some((item) => item.averagingPeriodMinutes === 0));
+});
+
+test("rechaza períodos negativos y no altera valores medidos", () => {
+  assert.throws(() => validateAveragingPeriodMinutes(-1), /cero o un número entero positivo/);
+  const [aggregate] = aggregateCompatiblePollutants([
+    { pollutantCode: "CO", unitCode: "ppm", averagingPeriodMinutes: 0, value: -0.25 },
+  ]);
+  assert.equal(aggregate.mean, -0.25);
+  assert.equal(aggregate.unitCode, "ppm");
 });
 
 test("propaga alertas de calidad únicas", () => {

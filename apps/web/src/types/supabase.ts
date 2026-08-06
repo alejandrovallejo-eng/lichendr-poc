@@ -790,8 +790,8 @@ export type Database = {
           measured_at: string;
           pollutant_code: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
           value: number;
-          unit: string;
-          averaging_period: string | null;
+          unit_code: "ug_m3" | "mg_m3" | "ng_m3" | "ppm" | "ppb";
+          averaging_period_minutes: number | null;
           instrument_method: string | null;
           data_source: string;
           qa_qc_status: "not_assessed" | "provisional" | "validated" | "rejected";
@@ -806,8 +806,8 @@ export type Database = {
           measured_at: string;
           pollutant_code: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
           value: number;
-          unit: string;
-          averaging_period?: string | null;
+          unit_code: "ug_m3" | "mg_m3" | "ng_m3" | "ppm" | "ppb";
+          averaging_period_minutes?: number | null;
           instrument_method?: string | null;
           data_source: string;
           qa_qc_status?: "not_assessed" | "provisional" | "validated" | "rejected";
@@ -822,8 +822,8 @@ export type Database = {
           measured_at?: string;
           pollutant_code?: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
           value?: number;
-          unit?: string;
-          averaging_period?: string | null;
+          unit_code?: "ug_m3" | "mg_m3" | "ng_m3" | "ppm" | "ppb";
+          averaging_period_minutes?: number | null;
           instrument_method?: string | null;
           data_source?: string;
           qa_qc_status?: "not_assessed" | "provisional" | "validated" | "rejected";

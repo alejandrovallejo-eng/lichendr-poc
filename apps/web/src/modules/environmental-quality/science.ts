@@ -1,5 +1,46 @@
 import { calculateWeightedCoverage } from "../analysis/metrics";
 
+export type PollutantUnitCode = "ug_m3" | "mg_m3" | "ng_m3" | "ppm" | "ppb";
+
+export const POLLUTANT_UNIT_OPTIONS: ReadonlyArray<{ code: PollutantUnitCode; label: string }> = [
+  { code: "ug_m3", label: "µg/m³" },
+  { code: "mg_m3", label: "mg/m³" },
+  { code: "ng_m3", label: "ng/m³" },
+  { code: "ppm", label: "ppm" },
+  { code: "ppb", label: "ppb" },
+];
+
+const UNIT_CODE_BY_LABEL = new Map<string, PollutantUnitCode>([
+  ...POLLUTANT_UNIT_OPTIONS.map(({ code, label }) => [label, code] as const),
+  ["ug/m3", "ug_m3"],
+  ["µg/m3", "ug_m3"],
+]);
+
+export function pollutantUnitCodeFromLabel(label: string): PollutantUnitCode | null {
+  return UNIT_CODE_BY_LABEL.get(label) ?? null;
+}
+
+export function pollutantUnitLabel(code: PollutantUnitCode): string {
+  return POLLUTANT_UNIT_OPTIONS.find((option) => option.code === code)?.label ?? code;
+}
+
+export function validateAveragingPeriodMinutes(value: number | null): number | null {
+  if (value != null && (!Number.isInteger(value) || value < 0)) {
+    throw new Error("El período de promedio debe ser cero o un número entero positivo de minutos.");
+  }
+  return value;
+}
+
+export function averagingPeriodLabel(value: number | null): string {
+  if (value == null) return "No reportado";
+  if (value === 0) return "Instantáneo";
+  if (value === 1) return "1 minuto";
+  if (value === 60) return "1 hora";
+  if (value === 480) return "8 horas";
+  if (value === 1440) return "24 horas";
+  return `${value} minutos`;
+}
+
 export type ReadinessStatus = "Completo" | "Parcial" | "Faltante" | "No aplica";
 
 export interface ReadinessInput {
@@ -71,15 +112,15 @@ export interface DescriptiveProfile {
 
 export interface PollutantValue {
   pollutantCode: string;
-  unit: string;
-  averagingPeriod: string | null;
+  unitCode: PollutantUnitCode;
+  averagingPeriodMinutes: number | null;
   value: number;
 }
 
 export interface PollutantAggregate {
   pollutantCode: string;
-  unit: string;
-  averagingPeriod: string | null;
+  unitCode: PollutantUnitCode;
+  averagingPeriodMinutes: number | null;
   count: number;
   mean: number;
 }
@@ -240,13 +281,16 @@ export function aggregateCompatiblePollutants(
 ): PollutantAggregate[] {
   const groups = new Map<string, PollutantValue[]>();
   for (const measurement of measurements) {
-    const key = [measurement.pollutantCode, measurement.unit, measurement.averagingPeriod ?? ""].join("\u0000");
+    const periodKey = measurement.averagingPeriodMinutes == null
+      ? "null"
+      : String(measurement.averagingPeriodMinutes);
+    const key = [measurement.pollutantCode, measurement.unitCode, periodKey].join("\u0000");
     groups.set(key, [...(groups.get(key) ?? []), measurement]);
   }
   return [...groups.values()].map((items) => ({
     pollutantCode: items[0].pollutantCode,
-    unit: items[0].unit,
-    averagingPeriod: items[0].averagingPeriod,
+    unitCode: items[0].unitCode,
+    averagingPeriodMinutes: items[0].averagingPeriodMinutes,
     count: items.length,
     mean: items.reduce((sum, item) => sum + item.value, 0) / items.length,
   }));

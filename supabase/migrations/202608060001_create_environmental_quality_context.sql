@@ -264,8 +264,8 @@ create table if not exists public.pollutant_measurements (
   measured_at timestamptz not null,
   pollutant_code text not null,
   value double precision not null,
-  unit text not null,
-  averaging_period text,
+  unit_code text not null,
+  averaging_period_minutes integer,
   instrument_method text,
   data_source text not null,
   qa_qc_status text not null default 'not_assessed',
@@ -277,15 +277,12 @@ create table if not exists public.pollutant_measurements (
   -- `value` intentionally has no sign/range constraint: it stores the raw numeric instrument
   -- output as-is (drift, calibration offsets, or sensor artifacts can produce negative raw
   -- readings). Reliability is assessed via `qa_qc_status`, not by rejecting the value at
-  -- insert time. Units are intentionally NOT constrained or converted here: `unit` is free
-  -- text and no check ties a pollutant code to a required unit.
-  constraint pollutant_measurements_unit_not_blank check (btrim(unit) <> ''),
-  constraint pollutant_measurements_unit_trimmed check (unit = btrim(unit)),
-  constraint pollutant_measurements_unit_max_length check (char_length(unit) <= 40),
-  constraint pollutant_measurements_averaging_period_trimmed
-    check (averaging_period is null or averaging_period = btrim(averaging_period)),
-  constraint pollutant_measurements_averaging_period_max_length
-    check (averaging_period is null or char_length(averaging_period) <= 40),
+  -- insert time. Units are stored without conversion as controlled canonical codes; no check
+  -- ties a pollutant code to a required unit.
+  constraint pollutant_measurements_unit_code_allowed
+    check (unit_code in ('ug_m3', 'mg_m3', 'ng_m3', 'ppm', 'ppb')),
+  constraint pollutant_measurements_averaging_period_minutes_nonnegative
+    check (averaging_period_minutes is null or averaging_period_minutes >= 0),
   constraint pollutant_measurements_instrument_method_trimmed
     check (instrument_method is null or instrument_method = btrim(instrument_method)),
   constraint pollutant_measurements_instrument_method_max_length

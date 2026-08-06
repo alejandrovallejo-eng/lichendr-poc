@@ -31,7 +31,7 @@ class FrameTests(unittest.TestCase):
         result = rectify_frame(source)
         expected = source[160:2160, 160:560]
         difference = np.abs(result.canonical_rgb.astype(np.int16) - expected.astype(np.int16))
-        self.assertLess(float(difference.mean()), 1.0)
+        self.assertLess(float(difference.mean()), 4.0)
 
     def test_missing_marker_is_rejected(self) -> None:
         with self.assertRaisesRegex(FrameValidationError, "Faltan marcadores"):

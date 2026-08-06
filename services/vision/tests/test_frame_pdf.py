@@ -4,6 +4,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -18,7 +19,7 @@ ASSETS = ROOT / "docs" / "field-assets"
 class FramePdfTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        subprocess.run(["python", str(SCRIPT)], check=True)
+        subprocess.run([sys.executable, str(SCRIPT)], check=True)
         spec = importlib.util.spec_from_file_location("generate_lichen_frame", SCRIPT)
         if spec is None or spec.loader is None:
             raise RuntimeError("No se pudo cargar el generador de la plantilla.")

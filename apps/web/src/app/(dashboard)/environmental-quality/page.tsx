@@ -1,5 +1,12 @@
-import ModulePlaceholder from "@/components/ModulePlaceholder";
+import { Suspense } from "react";
+import EnvironmentalQualityDashboard from "@/modules/environmental-quality/EnvironmentalQualityDashboard";
+
+export const dynamic = "force-dynamic";
 
 export default function EnvironmentalQualityPage() {
-  return <ModulePlaceholder title="Calidad ambiental" />;
+  return (
+    <Suspense fallback={<div className="rounded border p-4 text-sm" style={{ borderColor: "var(--ld-border)" }}>Cargando preparación científica…</div>}>
+      <EnvironmentalQualityDashboard />
+    </Suspense>
+  );
 }

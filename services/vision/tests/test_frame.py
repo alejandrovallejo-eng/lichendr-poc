@@ -34,6 +34,10 @@ class FrameTests(unittest.TestCase):
         with self.assertRaisesRegex(FrameValidationError, "desconocidos"):
             rectify_frame(synthetic_frame(wrong_id=8))
 
+    def test_duplicate_marker_is_rejected(self) -> None:
+        with self.assertRaisesRegex(FrameValidationError, "duplicados"):
+            rectify_frame(synthetic_frame(wrong_id=0))
+
     def test_blurred_view_is_flagged_for_repeat(self) -> None:
         import cv2
         blurred = synthetic_frame()

@@ -940,6 +940,10 @@ export type Database = {
         Args: { p_series_id: string; p_image_id: string; p_direction: string; p_algorithm_version: string; p_request_key: string };
         Returns: Database["public"]["Tables"]["capture_views"]["Row"];
       };
+      confirm_capture_series: {
+        Args: { p_series_id: string };
+        Returns: Database["public"]["Tables"]["capture_series"]["Row"];
+      };
     };
   };
 };

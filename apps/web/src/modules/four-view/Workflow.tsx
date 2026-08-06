@@ -25,12 +25,13 @@ import { DIRECTIONS, DIRECTION_LABELS, type Direction, type VisionViewResult } f
 
 type SlotState = {
   file: File | null;
+  requestKey: string;
   status: "empty" | "ready" | "processing" | "saved" | "repeat" | "error";
   error: string | null;
   result: VisionViewResult | null;
 };
 
-const EMPTY_SLOT = (): SlotState => ({ file: null, status: "empty", error: null, result: null });
+const EMPTY_SLOT = (): SlotState => ({ file: null, requestKey: crypto.randomUUID(), status: "empty", error: null, result: null });
 const CAPTURE_INSTRUCTIONS = [
   "Coloca el borde inferior de la plantilla a 1 m sobre la base del árbol.",
   "Colócate aproximadamente a 1 m del tronco.",
@@ -159,7 +160,7 @@ export default function FourViewWorkflow() {
     const file = event.target.files?.[0] ?? null;
     setSlots((current) => ({
       ...current,
-      [direction]: file ? { file, status: "ready", error: null, result: null } : EMPTY_SLOT(),
+      [direction]: file ? { file, requestKey: crypto.randomUUID(), status: "ready", error: null, result: null } : EMPTY_SLOT(),
     }));
     setSeries(null);
   };
@@ -187,6 +188,7 @@ export default function FourViewWorkflow() {
             direction,
             result,
             series: activeSeries,
+            requestKey: slots[direction].requestKey,
             context: { projectId, siteId, eventId, treeSampleId },
           });
           completed[direction] = result;
@@ -237,6 +239,7 @@ export default function FourViewWorkflow() {
         const result = stored[direction] ?? null;
         return [direction, {
           file: null,
+          requestKey: crypto.randomUUID(),
           result,
           status: result?.status === "provisional_ai" ? "saved" : result ? "repeat" : "empty",
           error: result?.critical_errors.join(", ") || null,

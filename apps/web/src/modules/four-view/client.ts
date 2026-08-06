@@ -190,6 +190,7 @@ export async function saveProcessedView(input: {
   direction: Direction;
   result: VisionViewResult;
   series: CaptureSeriesRow;
+  requestKey: string;
   context: Omit<ImageUploadContext, "userId" | "treeId">;
 }): Promise<CaptureViewRow> {
   const uploadContext = await resolveImageUploadContext(input.context);
@@ -208,14 +209,25 @@ export async function saveProcessedView(input: {
       p_image_id: image.id,
       p_direction: input.direction,
       p_algorithm_version: FOUR_VIEW_ALGORITHM_VERSION,
-      p_request_key: crypto.randomUUID(),
+      p_request_key: input.requestKey,
     });
-    if (registration.error || !registration.data) throw registration.error ?? new Error("No se pudo registrar la vista.");
-    view = registration.data;
+    if (registration.error || !registration.data) {
+      const recovered = await supabase
+        .from("capture_views")
+        .select("*")
+        .eq("request_key", input.requestKey)
+        .maybeSingle();
+      if (recovered.error || !recovered.data) throw registration.error ?? recovered.error ?? new Error("No se pudo registrar la vista.");
+      view = recovered.data;
+    } else {
+      view = registration.data;
+    }
+    if (view.image_id !== image.id) await removeOriginal(image.id, image.storage_path);
   } catch (error) {
     await removeOriginal(image.id, image.storage_path);
     throw error;
   }
+  if (view.processing_status === "provisional_ai" || view.processing_status === "confirmed") return view;
 
   if (!input.result.metrics) {
     const { data, error } = await supabase
@@ -238,12 +250,13 @@ export async function saveProcessedView(input: {
   const rectifiedPath = `${root}/rectified.jpg`;
   const unionPath = `${root}/lichen-union.png`;
   const uploaded: string[] = [];
+  let annotationSetId: string | null = null;
   try {
     await uploadDerived(rectifiedPath, dataUrlToBlob(input.result.rectified_image_data_url));
     uploaded.push(rectifiedPath);
     await uploadDerived(unionPath, dataUrlToBlob(input.result.metrics.lichen_union_mask_data_url));
     uploaded.push(unionPath);
-    const annotationSetId = await persistAutomaticAnnotations(view, input.result, unionPath);
+    annotationSetId = await persistAutomaticAnnotations(view, input.result, unionPath);
     const confidenceValues = input.result.metrics.candidates.map((candidate) => candidate.confidence);
     const confidence = confidenceValues.length
       ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
@@ -274,6 +287,7 @@ export async function saveProcessedView(input: {
     if (error || !data) throw error ?? new Error("No se pudieron guardar las métricas.");
     return data;
   } catch (error) {
+    if (annotationSetId) await supabase.from("annotation_sets").delete().eq("id", annotationSetId);
     if (uploaded.length) await supabase.storage.from(IMAGE_STORAGE_BUCKET).remove(uploaded);
     await supabase.from("capture_views").update({ processing_status: "failed" }).eq("id", view.id);
     throw error;
@@ -307,32 +321,8 @@ export async function finalizeSeries(
 }
 
 export async function confirmSeries(seriesId: string): Promise<void> {
-  const { data: views, error: viewsError } = await supabase
-    .from("capture_views")
-    .select("id, annotation_set_id")
-    .eq("capture_series_id", seriesId)
-    .eq("active", true);
-  if (viewsError) throw viewsError;
-  const annotationIds = (views ?? []).flatMap((view) => view.annotation_set_id ? [view.annotation_set_id] : []);
-  if (annotationIds.length) {
-    const { error } = await supabase
-      .from("annotation_sets")
-      .update({ status: "completed", completed_at: new Date().toISOString() })
-      .in("id", annotationIds);
-    if (error) throw error;
-  }
-  const now = new Date().toISOString();
-  const { error } = await supabase
-    .from("capture_series")
-    .update({ status: "confirmed", review_status: "confirmed", confirmed_at: now })
-    .eq("id", seriesId)
-    .eq("valid_view_count", 4);
+  const { error } = await supabase.rpc("confirm_capture_series", { p_series_id: seriesId });
   if (error) throw error;
-  await supabase
-    .from("capture_views")
-    .update({ processing_status: "confirmed" })
-    .eq("capture_series_id", seriesId)
-    .eq("active", true);
 }
 
 export async function signedDerivedUrl(path: string | null): Promise<string | null> {

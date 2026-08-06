@@ -330,7 +330,53 @@ begin
 end;
 $$;
 
+create or replace function public.confirm_capture_series(
+  p_series_id uuid
+) returns public.capture_series
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  result public.capture_series;
+  active_valid integer;
+begin
+  select count(*) into active_valid
+  from public.capture_views
+  where capture_series_id = p_series_id
+    and active
+    and processing_status = 'provisional_ai';
+  if active_valid <> 4 then
+    raise exception 'La serie requiere cuatro vistas válidas.';
+  end if;
+
+  update public.annotation_sets
+  set status = 'completed', completed_at = coalesce(completed_at, now())
+  where id in (
+    select annotation_set_id
+    from public.capture_views
+    where capture_series_id = p_series_id and active and annotation_set_id is not null
+  );
+  update public.capture_views
+  set processing_status = 'confirmed'
+  where capture_series_id = p_series_id and active;
+  update public.capture_series
+  set status = 'confirmed',
+      review_status = 'confirmed',
+      confirmed_at = coalesce(confirmed_at, now())
+  where id = p_series_id
+    and valid_view_count = 4
+    and pending_view_count = 0
+  returning * into result;
+  if result.id is null then
+    raise exception 'La serie no está lista para confirmar.';
+  end if;
+  return result;
+end;
+$$;
+
 grant select, insert, update, delete on public.capture_series to authenticated;
 grant select, insert, update, delete on public.capture_views to authenticated;
 grant execute on function public.get_or_create_capture_series(uuid, text, uuid, text) to authenticated;
 grant execute on function public.register_capture_view(uuid, uuid, text, text, uuid) to authenticated;
+grant execute on function public.confirm_capture_series(uuid) to authenticated;

@@ -6,8 +6,8 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
 import { extractExifMetadata, type ExtractedImageMetadata } from "@/modules/images/exif";
-import { createSignedImageUrl, getImagesForTreeSample, ImagePersistenceError, persistImageWithMetadata, type ImageRecordRow, type ImageRecordWithAnnotationStatus, type ImageUploadProgress } from "@/modules/images/client";
-import { ensureAnonymousSession } from "@/modules/auth/client";
+import { createSignedImageUrl, getImagesForTreeSample, ImagePersistenceError, persistImageWithMetadata, resolveImageUploadContext, type ImageRecordRow, type ImageRecordWithAnnotationStatus, type ImageUploadProgress } from "@/modules/images/client";
+import { getRetryableImageIds, isMetadataValid, validateImageFile, validateImageSignature } from "@/modules/images/persistence";
 
 interface ReviewImage {
   id: string;
@@ -41,29 +41,8 @@ function formatMetadataState(metadata: ExtractedImageMetadata) {
   return "No se encontraron metadatos EXIF";
 }
 
-const MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp"]);
-const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/heic", "image/heif", "image/tiff", "image/webp"]);
-
 function getFileKey(file: File) {
   return `${file.name}-${file.size}-${file.lastModified}`;
-}
-
-function validateImageFile(file: File) {
-  const extension = file.name.toLowerCase().slice(file.name.lastIndexOf("."));
-  const mimeIsKnown = ALLOWED_IMAGE_TYPES.has(file.type);
-  const extensionIsKnown = ALLOWED_IMAGE_EXTENSIONS.has(extension);
-  const hasAcceptableType = mimeIsKnown || extensionIsKnown;
-
-  if (!hasAcceptableType) {
-    return { valid: false, message: "Formato no admitido. Usa JPG, JPEG, PNG, HEIC, HEIF, TIFF o WEBP." };
-  }
-
-  if (file.size > MAX_IMAGE_SIZE_BYTES) {
-    return { valid: false, message: "El archivo supera el límite de 20 MB." };
-  }
-
-  return { valid: true };
 }
 
 function getLocationSourceLabel(locationSource: ReviewImage["review"]["locationSource"]) {
@@ -81,6 +60,8 @@ function getLocationSourceLabel(locationSource: ReviewImage["review"]["locationS
 
 function getSaveStateLabel(saveState: ReviewImage["saveState"]) {
   switch (saveState) {
+    case "idle":
+      return "Pendiente";
     case "saved":
       return "Guardada";
     case "uploading":
@@ -96,8 +77,9 @@ function getSaveStateLabel(saveState: ReviewImage["saveState"]) {
     case "cleanup-pending":
       return "Limpieza pendiente";
     case "error":
-    default:
       return "Error";
+    default:
+      return "Pendiente";
   }
 }
 
@@ -163,7 +145,10 @@ export default function ImagesWorkflow() {
       pendingFiles.map(async (file) => {
         const validation = validateImageFile(file);
         if (!validation.valid) {
-          return null;
+          return { image: null, error: `${file.name}: ${validation.message}` };
+        }
+        if (!validation.mimeType || !await validateImageSignature(file, validation.mimeType)) {
+          return { image: null, error: `${file.name}: el contenido no corresponde a una imagen JPEG o PNG válida.` };
         }
 
         const previewUrl = URL.createObjectURL(file);
@@ -171,25 +156,29 @@ export default function ImagesWorkflow() {
         const metadata = await extractExifMetadata(file);
 
         return {
-          id: `${getFileKey(file)}-${previewUrl}`,
-          file,
-          previewUrl,
-          metadata,
-          review: {
-            latitude: metadata.latitude != null ? String(metadata.latitude) : "",
-            longitude: metadata.longitude != null ? String(metadata.longitude) : "",
-            gpsAccuracyM: metadata.gpsAccuracyM != null ? String(metadata.gpsAccuracyM) : "",
-            notes: "",
-            locationSource: metadata.locationSource,
-          },
-          saveState: "idle",
-        } as ReviewImage;
+          image: {
+            id: `${getFileKey(file)}-${previewUrl}`,
+            file,
+            previewUrl,
+            metadata,
+            review: {
+              latitude: metadata.latitude != null ? String(metadata.latitude) : "",
+              longitude: metadata.longitude != null ? String(metadata.longitude) : "",
+              gpsAccuracyM: metadata.gpsAccuracyM != null ? String(metadata.gpsAccuracyM) : "",
+              notes: "",
+              locationSource: metadata.locationSource,
+            },
+            saveState: "idle",
+          } as ReviewImage,
+          error: null,
+        };
       })
     );
 
-    const parsedImages = nextImages.filter((image): image is ReviewImage => image != null);
+    const parsedImages = nextImages.flatMap((result) => result.image ? [result.image] : []);
+    const validationErrors = nextImages.flatMap((result) => result.error ? [result.error] : []);
     if (parsedImages.length === 0) {
-      setSelectionNotice("No se añadieron archivos. Revisa el formato o el tamaño antes de intentarlo de nuevo.");
+      setSelectionNotice(validationErrors.join(" "));
       setLoadingFiles(false);
       event.target.value = "";
       return;
@@ -197,8 +186,8 @@ export default function ImagesWorkflow() {
 
     setImages((current) => [...current, ...parsedImages]);
     setLoadingFiles(false);
-    if (parsedImages.length < pendingFiles.length) {
-      setSelectionNotice("Algunos archivos no se añadieron porque no pasaron la validación de formato o tamaño.");
+    if (validationErrors.length > 0) {
+      setSelectionNotice(`Se añadieron los archivos válidos. ${validationErrors.join(" ")}`);
     } else if (skippedCount > 0) {
       setSelectionNotice("Los archivos válidos se añadieron; los duplicados se ignoraron.");
     } else {
@@ -286,12 +275,19 @@ export default function ImagesWorkflow() {
   };
 
   const handlePersistImages = async (targetImageId?: string) => {
-    if (!treeSampleId) {
-      setSelectionNotice("Selecciona un tree_sample antes de guardar imágenes.");
+    const missingContext = [
+      !projectId && "proyecto",
+      !siteId && "sitio",
+      !eventId && "jornada de muestreo",
+      !treeSampleId && "muestra de árbol",
+    ].filter(Boolean);
+    if (missingContext.length > 0) {
+      setSelectionNotice(`Validación: falta ${missingContext.join(", ")}.`);
       return;
     }
 
-    const pendingImages = images.filter((image) => targetImageId ? image.id === targetImageId : image.saveState !== "saved" && image.saveState !== "cleanup-pending");
+    const pendingIds = new Set(getRetryableImageIds(images, targetImageId));
+    const pendingImages = images.filter((image) => pendingIds.has(image.id));
     if (pendingImages.length === 0) {
       setSelectionNotice("No hay imágenes pendientes por guardar.");
       return;
@@ -299,25 +295,35 @@ export default function ImagesWorkflow() {
 
     setIsSavingBatch(true);
     setSaveSuccessMessage(null);
+    let uploadContext: Awaited<ReturnType<typeof resolveImageUploadContext>>;
+    try {
+      uploadContext = await resolveImageUploadContext({ projectId, siteId, eventId, treeSampleId });
+    } catch (error) {
+      const message = error instanceof ImagePersistenceError ? error.message : "Autenticación: no se pudo validar la sesión y el contexto.";
+      setSelectionNotice(message);
+      setImages((current) => current.map((image) => pendingIds.has(image.id)
+        ? { ...image, saveState: "error", saveError: message, canRetry: true }
+        : image));
+      setIsSavingBatch(false);
+      return;
+    }
 
-    for (const [index, image] of pendingImages.entries()) {
-      const latitude = Number(image.review.latitude);
-      const longitude = Number(image.review.longitude);
+    let savedCount = 0;
+    for (const image of pendingImages) {
+      const latitude = image.review.latitude.trim() === "" ? undefined : Number(image.review.latitude);
+      const longitude = image.review.longitude.trim() === "" ? undefined : Number(image.review.longitude);
       const gpsAccuracyM = image.review.gpsAccuracyM.trim() === "" ? undefined : Number(image.review.gpsAccuracyM);
-      const hasValidCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
-      const numericValuesValid = image.review.gpsAccuracyM.trim() === "" || Number.isFinite(gpsAccuracyM);
-
-      if (!hasValidCoordinates || !numericValuesValid) {
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "error", saveError: "Latitud/longitud o precisión GPS inválidos." } : entry));
+      if (!isMetadataValid(image.review)) {
+        setImages((current) => current.map((entry) => entry.id === image.id ? {
+          ...entry,
+          saveState: "error",
+          saveError: "Validación: faltan metadatos requeridos o las coordenadas/precisión no son válidas.",
+          canRetry: true,
+        } : entry));
         continue;
       }
 
       setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "validating", saveError: undefined } : entry));
-      const sessionResult = await ensureAnonymousSession();
-      if (sessionResult.error || !sessionResult.session) {
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "error", saveError: sessionResult.error ?? "No se pudo obtener una sesión." } : entry));
-        continue;
-      }
 
       try {
         setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "uploading", progress: 0, canRetry: false } : entry));
@@ -325,7 +331,7 @@ export default function ImagesWorkflow() {
           ? "manual"
           : image.review.locationSource === "gps"
             ? "gps"
-            : hasValidCoordinates
+            : latitude != null && longitude != null
               ? "exif"
               : "unknown";
         const nextMetadata: ExtractedImageMetadata = {
@@ -336,50 +342,53 @@ export default function ImagesWorkflow() {
           locationSource: nextLocationSource,
         };
 
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "cleanup-in-progress", progress: 0, canRetry: false } : entry));
         const persistedRecord = await persistImageWithMetadata(
           image.file,
-          {
-            projectId: projectId ?? "",
-            siteId: siteId ?? "",
-            eventId: eventId ?? "",
-            treeSampleId,
-          },
+          uploadContext,
           nextMetadata,
           image.review.notes || "",
-          index + 1,
+          savedImages.length + images.findIndex((entry) => entry.id === image.id) + 1,
           (progress: ImageUploadProgress) => {
             setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "uploading", progress: progress.percent } : entry));
           }
         );
 
         setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saving-metadata", progress: 100, canRetry: false } : entry));
-        const signedUrl = await createSignedImageUrl(persistedRecord.storage_path);
-        setImages((current) => current.map((entry) => entry.id === image.id ? { ...entry, saveState: "saved", progress: 100, savedRecord: persistedRecord, signedUrl, canRetry: false } : entry));
-        setSavedImages((current) => [{ ...persistedRecord, annotationStatus: "not_started" }, ...current]);
-      } catch (error) {
-        const cleanupError = error instanceof ImagePersistenceError ? error : null;
-        const nextState = cleanupError?.phase === "upload"
-          ? "error"
-          : cleanupError?.cleanup.canRetry
-            ? "cleanup-completed"
-            : "cleanup-pending";
+        let signedUrl: string | undefined;
+        try {
+          signedUrl = await createSignedImageUrl(persistedRecord.storage_path);
+        } catch {
+          signedUrl = undefined;
+        }
         setImages((current) => current.map((entry) => entry.id === image.id ? {
           ...entry,
-          saveState: cleanupError ? nextState : "error",
-          saveError: cleanupError ? cleanupError.cleanup.userMessage : error instanceof Error ? error.message : "No se pudo guardar la imagen.",
-          canRetry: cleanupError ? cleanupError.cleanup.canRetry : true,
+          saveState: "saved",
           progress: 100,
+          savedRecord: persistedRecord,
+          signedUrl,
+          canRetry: false,
+          saveError: signedUrl ? undefined : "La imagen se guardó, pero no se pudo generar la vista previa privada.",
+        } : entry));
+        setSavedImages((current) => [{ ...persistedRecord, annotationStatus: "not_started" }, ...current]);
+        savedCount += 1;
+      } catch (error) {
+        const persistenceError = error instanceof ImagePersistenceError ? error : null;
+        const nextState = persistenceError?.cleanup
+          ? persistenceError.canRetry ? "cleanup-completed" : "cleanup-pending"
+          : "error";
+        setImages((current) => current.map((entry) => entry.id === image.id ? {
+          ...entry,
+          saveState: nextState,
+          saveError: persistenceError?.message ?? "Registro en base de datos: no se pudo guardar la imagen.",
+          canRetry: persistenceError?.canRetry ?? true,
+          progress: entry.progress,
         } : entry));
       }
     }
 
     setIsSavingBatch(false);
-    if (pendingImages.length > 0) {
-      const savedCount = pendingImages.filter((image) => image.saveState === "saved").length;
-      if (savedCount > 0) {
-        setSaveSuccessMessage("La imagen y su metadata fueron guardadas correctamente.");
-      }
+    if (savedCount > 0) {
+      setSaveSuccessMessage(`${savedCount} imagen(es) y sus metadatos fueron guardados correctamente.`);
     }
   };
 
@@ -405,7 +414,7 @@ export default function ImagesWorkflow() {
         <div className="mt-3 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
           {projectId || siteId || eventId || treeSampleId ? (
             <p>
-              Contexto activo: {projectId ? `proyecto ${projectId}` : "sin proyecto"}; {siteId ? `sitio ${siteId}` : "sin sitio"}; {eventId ? `jornada ${eventId}` : "sin jornada"}; {treeSampleId ? `muestreo ${treeSampleId}` : "sin muestreo"}
+              Contexto requerido: {projectId ? `proyecto ${projectId}` : "falta proyecto"}; {siteId ? `sitio ${siteId}` : "falta sitio"}; {eventId ? `jornada ${eventId}` : "falta jornada"}; {treeSampleId ? `árbol y muestra ${treeSampleId} por validar` : "faltan árbol y muestra"}.
             </p>
           ) : (
             <p>No hay contexto de árbol o muestreo seleccionado; puedes revisar imágenes de forma independiente.</p>
@@ -423,7 +432,7 @@ export default function ImagesWorkflow() {
             <button
               type="button"
               onClick={() => void handlePersistImages()}
-              disabled={isSavingBatch || images.filter((image) => image.saveState !== "saved").length === 0 || !treeSampleId}
+              disabled={isSavingBatch || images.filter((image) => image.saveState !== "saved" && image.saveState !== "cleanup-pending").length === 0 || !projectId || !siteId || !eventId || !treeSampleId}
               className="rounded border px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
               style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}
             >
@@ -431,7 +440,7 @@ export default function ImagesWorkflow() {
             </button>
             <label className="inline-flex cursor-pointer items-center justify-center rounded border px-4 py-2" style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}>
               <span>{loadingFiles ? "Leyendo archivos..." : "Elegir imágenes"}</span>
-              <input type="file" accept="image/*" multiple className="hidden" onChange={handleFileSelection} />
+              <input type="file" accept=".jpg,.jpeg,.png,image/jpeg,image/png" multiple className="hidden" onChange={handleFileSelection} />
             </label>
           </div>
         </div>
@@ -477,7 +486,8 @@ export default function ImagesWorkflow() {
                     <button
                       type="button"
                       onClick={() => removeImage(image.id)}
-                      className="rounded border px-3 py-1 text-sm"
+                      disabled={isSavingBatch}
+                      className="rounded border px-3 py-1 text-sm disabled:cursor-not-allowed disabled:opacity-50"
                       style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}
                     >
                       Quitar
@@ -577,7 +587,7 @@ export default function ImagesWorkflow() {
 
                   {(image.saveState === "error" || image.saveState === "cleanup-completed" || image.saveState === "cleanup-pending") ? (
                     <button type="button" onClick={() => void retryImageSave(image.id)} disabled={!image.canRetry} className="rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--ld-border)", color: "var(--ld-text)" }}>
-                      Reintentar
+                      Reintentar guardado
                     </button>
                   ) : null}
 

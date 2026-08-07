@@ -232,6 +232,7 @@ const SOURCE_LABELS: Record<AnnotationRegionSource, string> = {
   mobile_sam: "MobileSAM",
   manual: "Manual",
   color_assisted: "Asistida por color",
+  automatic_four_view: "Automática 4 vistas",
 };
 
 const TOOL_LABELS: Array<{ value: StudioTool; label: string }> = [

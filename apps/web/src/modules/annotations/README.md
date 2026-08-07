@@ -1,6 +1,6 @@
 # Annotations
 
-Annotation Studio administra conjuntos de anotación, morfotipos, puntos y regiones de máscara. Las capas aceptadas conservan su procedencia (`mobile_sam`, `manual` o `color_assisted`), clasificación, morfotipo, color representativo y tolerancia Delta E cuando corresponda.
+Annotation Studio administra conjuntos de anotación, morfotipos, puntos y regiones de máscara. Las capas aceptadas conservan su procedencia (`mobile_sam`, `manual`, `color_assisted` o `automatic_four_view`), clasificación, morfotipo, color representativo y tolerancia Delta E cuando corresponda.
 
 ## Finalización
 

@@ -34,13 +34,21 @@ test("reports a missing tree sample before upload", () => {
 test("rejects unsupported MIME types", () => {
   const result = validateImageFile({ name: "lichen.gif", size: 1_024, type: "image/gif" });
   assert.equal(result.valid, false);
-  assert.match(result.message ?? "", /JPEG o PNG/);
+  assert.match(result.message ?? "", /JPEG, PNG, HEIC o HEIF/);
 });
 
-test("rejects HEIC with an actionable Spanish message", () => {
+test("accepts HEIC with matching MIME and extension", () => {
   const result = validateImageFile({ name: "lichen.heic", size: 1_024, type: "image/heic" });
-  assert.equal(result.valid, false);
-  assert.match(result.message ?? "", /Convierte la imagen a JPEG o PNG/);
+  assert.deepEqual(result, { valid: true, mimeType: "image/heic", message: null });
+});
+
+test("validates HEIC signature and brand", async () => {
+  const header = new Uint8Array([
+    0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
+    0, 0, 0, 0, 0x6d, 0x69, 0x66, 0x31,
+  ]);
+  assert.equal(await validateImageSignature(new Blob([header]), "image/heic"), true);
+  assert.equal(await validateImageSignature(new Blob([new Uint8Array(20)]), "image/heic"), false);
 });
 
 test("accepts a valid JPEG", () => {

@@ -15,7 +15,7 @@ import { aggregateFourViewMetrics, dataUrlToBlob } from "./metrics";
 import type { CornerPoint, Direction, FrameClassification, VisionViewResult } from "./types";
 import type { ManualMeasurementMode } from "./manual-flow";
 
-export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.1";
+export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.2";
 export const FOUR_VIEW_TEMPLATE_VERSION = "LICHENDR-FRAME-0.2";
 
 export type CaptureSeriesRow = Database["public"]["Tables"]["capture_series"]["Row"];
@@ -467,6 +467,7 @@ export interface EvaluatedTreeRow {
   site: string;
   event: string;
   tree: string;
+  provisional: boolean;
 }
 
 export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
@@ -477,7 +478,11 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
     .order("created_at", { ascending: false });
   if (error) throw error;
   if (!series?.length) return [];
-  const { data: samples } = await supabase.from("tree_samples").select("id, tree_id, site_id, sampling_event_id").in("id", series.map((item) => item.tree_sample_id));
+  const [{ data: samples }, { data: views, error: viewsError }] = await Promise.all([
+    supabase.from("tree_samples").select("id, tree_id, site_id, sampling_event_id").in("id", series.map((item) => item.tree_sample_id)),
+    supabase.from("capture_views").select("capture_series_id, source").in("capture_series_id", series.map((item) => item.id)).eq("active", true),
+  ]);
+  if (viewsError) throw viewsError;
   const { data: trees } = await supabase.from("trees").select("id, code").in("id", (samples ?? []).map((item) => item.tree_id));
   const { data: sites } = await supabase.from("sites").select("id, name, project_id").in("id", (samples ?? []).map((item) => item.site_id));
   const { data: events } = await supabase.from("sampling_events").select("id, name").in("id", (samples ?? []).map((item) => item.sampling_event_id));
@@ -487,6 +492,9 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
   const siteMap = new Map((sites ?? []).map((item) => [item.id, item]));
   const eventMap = new Map((events ?? []).map((item) => [item.id, item.name]));
   const projectMap = new Map((projects ?? []).map((item) => [item.id, item.name]));
+  const provisionalSeries = new Set((views ?? [])
+    .filter((view) => storedClassification(view.source) === "manual_assisted_provisional")
+    .map((view) => view.capture_series_id));
   return series.flatMap((item) => {
     const sample = sampleMap.get(item.tree_sample_id);
     const site = sample ? siteMap.get(sample.site_id) : null;
@@ -501,6 +509,7 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
       site: site.name,
       event: eventMap.get(sample.sampling_event_id) ?? "Jornada",
       tree: treeMap.get(sample.tree_id) ?? "Árbol",
+      provisional: provisionalSeries.has(item.id),
     }];
   });
 }

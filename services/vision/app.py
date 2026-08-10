@@ -215,7 +215,10 @@ async def analyze_view_route(
                     round(detection.reprojection_error_px, 4)
                     if detection.reprojection_error_px is not None else None
                 ),
-                "quality_flags": ["frame_confirmation_required", "manual_selection_required"],
+                "quality_flags": (
+                    ["frame_confirmation_required", "manual_selection_required"]
+                    if normalized is None else ["frame_confirmation_required"]
+                ),
                 "quality_score": round(detection.confidence, 3),
                 "critical_errors": [],
                 "status": "needs_confirmation",

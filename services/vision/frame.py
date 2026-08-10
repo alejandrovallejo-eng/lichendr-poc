@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 TEMPLATE_VERSION = "LICHENDR-FRAME-0.2"
-ALGORITHM_VERSION = "four-view-0.2.1"
+ALGORITHM_VERSION = "four-view-0.2.2"
 CANONICAL_WIDTH = 400
 CANONICAL_HEIGHT = 2000
 PIXELS_PER_CM = 40

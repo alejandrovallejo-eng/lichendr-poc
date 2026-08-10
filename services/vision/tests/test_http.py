@@ -119,6 +119,19 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(final.json()["status"], "provisional_ai")
         self.assertEqual(final.json()["frame_detection"]["classification"], "manual_confirmed")
 
+    def test_decodable_image_without_safe_proposal_still_allows_manual_selection(self) -> None:
+        image = encode(np.full((1200, 600, 3), 127, dtype=np.uint8))
+        with patch.object(vision_app, "load_model"):
+            with TestClient(vision_app.app) as client:
+                response = client.post(
+                    "/analyze-view",
+                    files={"image": ("plain.png", image, "image/png")},
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "needs_confirmation")
+        self.assertIsNone(response.json()["corner_proposal"])
+        self.assertIn("manual_selection_required", response.json()["quality_flags"])
+
     def test_crossed_manual_points_return_recoverable_geometry_error(self) -> None:
         image = encode(synthetic_frame(missing_id=1))
         crossed = json.dumps([

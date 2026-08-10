@@ -465,8 +465,6 @@ export default function FourViewWorkflow() {
         result,
         status: result.status === "repeat_photo" ? "repeat" : "saved",
         error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
-        corners: null,
-        initialCorners: null,
       } : current[direction],
     }));
     const storedResults = await loadSeriesResults(activeSeries.id);
@@ -946,7 +944,9 @@ export default function FourViewWorkflow() {
                   <td className="p-2">{row.series.tree_lichen_coverage_percent?.toFixed(1) ?? "—"}%</td>
                   <td className="p-2">{row.series.provisional_morphotype_richness ?? "—"}</td>
                   <td className="p-2">{row.series.status}</td>
-                  <td className="p-2">{row.series.pending_view_count === 0 ? "Completa" : "Pendiente"}</td>
+                  <td className="p-2">{row.provisional
+                    ? "Provisional"
+                    : row.series.pending_view_count === 0 ? "Completa validable" : "Pendiente"}</td>
                   <td className="p-2"><button type="button" disabled={operationLocked} className="underline disabled:opacity-50" onClick={() => void openEvaluation(row)}>Ver evaluación</button></td>
                 </tr>
               ))}

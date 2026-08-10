@@ -12,9 +12,9 @@ import {
 import { IMAGE_STORAGE_BUCKET } from "@/modules/images/persistence";
 import type { Database } from "@/types/supabase";
 import { aggregateFourViewMetrics, dataUrlToBlob } from "./metrics";
-import type { Direction, VisionViewResult } from "./types";
+import type { CornerPoint, Direction, FrameClassification, VisionViewResult } from "./types";
 
-export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.0";
+export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.1";
 export const FOUR_VIEW_TEMPLATE_VERSION = "LICHENDR-FRAME-0.2";
 
 export type CaptureSeriesRow = Database["public"]["Tables"]["capture_series"]["Row"];
@@ -71,9 +71,15 @@ export async function getOrCreateCaptureSeries(treeSampleId: string): Promise<Ca
   return data;
 }
 
-export async function analyzeFourViewFile(file: File): Promise<VisionViewResult> {
+export async function analyzeFourViewFile(
+  file: File,
+  action: "detect" | "confirm_corners" | "analyze_confirmed" = "detect",
+  corners?: readonly CornerPoint[],
+): Promise<VisionViewResult> {
   const formData = new FormData();
   formData.append("image", file);
+  formData.append("action", action);
+  if (corners) formData.append("corners", JSON.stringify(corners));
   const response = await fetch("/api/vision/analyze-view", { method: "POST", body: formData });
   const body: unknown = await response.json();
   if (!response.ok) {
@@ -84,6 +90,18 @@ export async function analyzeFourViewFile(file: File): Promise<VisionViewResult>
     throw new Error(message);
   }
   return body as VisionViewResult;
+}
+
+function traceableSource(result: VisionViewResult): string {
+  const detection = result.frame_detection;
+  const markers = detection.detected_marker_ids.join(",");
+  const variant = detection.successful_variant ?? "none";
+  return `${result.source};method=${detection.method};markers=${markers};variant=${variant}`;
+}
+
+function storedClassification(source: string): FrameClassification {
+  const classification = /mobile_sam_cielab:(validated|assisted|manual_assisted)/.exec(source)?.[1];
+  return classification === "assisted" || classification === "manual_assisted" ? classification : "validated";
 }
 
 async function removeOriginal(imageId: string, storagePath: string): Promise<void> {
@@ -252,6 +270,9 @@ export async function saveProcessedView(input: {
   const uploaded: string[] = [];
   let annotationSetId: string | null = null;
   try {
+    if (!input.result.rectified_image_data_url) {
+      throw new Error("La vista confirmada no contiene una rectificación.");
+    }
     await uploadDerived(rectifiedPath, dataUrlToBlob(input.result.rectified_image_data_url));
     uploaded.push(rectifiedPath);
     await uploadDerived(unionPath, dataUrlToBlob(input.result.metrics.lichen_union_mask_data_url));
@@ -266,6 +287,7 @@ export async function saveProcessedView(input: {
       .update({
         annotation_set_id: annotationSetId,
         processing_status: "provisional_ai",
+        source: traceableSource(input.result),
         rectified_storage_path: rectifiedPath,
         union_mask_storage_path: unionPath,
         valid_area_cm2: input.result.metrics.valid_area_cm2,
@@ -278,7 +300,7 @@ export async function saveProcessedView(input: {
         reprojection_error_px: input.result.reprojection_error_px,
         quality_score: input.result.quality_score,
         quality_flags: input.result.quality_flags,
-        confidence,
+        confidence: input.result.frame_detection.confidence ?? confidence,
         processed_at: new Date().toISOString(),
       })
       .eq("id", view.id)
@@ -348,16 +370,40 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
       canonical_width: 400,
       canonical_height: 2000,
       pixels_per_cm: 40,
-      reprojection_error_px: view.reprojection_error_px ?? 0,
+      reprojection_error_px: view.reprojection_error_px,
       quality_flags: view.quality_flags.filter((flag): flag is string => typeof flag === "string"),
       quality_score: view.quality_score ?? 0,
       critical_errors: view.processing_status === "repeat_photo"
         ? view.quality_flags.filter((flag): flag is string => typeof flag === "string")
         : [],
       status: hasMetrics ? "provisional_ai" : "repeat_photo",
-      rectified_image_data_url: rectifiedUrl ?? "",
+      rectified_image_data_url: rectifiedUrl,
       model_name: view.model_name,
       source: view.source,
+      frame_detection: {
+        classification: storedClassification(view.source),
+        method: /;method=([^;]+)/.exec(view.source)?.[1] ?? "stored_result",
+        confidence: view.confidence ?? 0,
+        detected_marker_ids: (/;markers=([^;]*)/.exec(view.source)?.[1] ?? "")
+          .split(",")
+          .filter(Boolean)
+          .map(Number)
+          .filter(Number.isInteger),
+        missing_marker_ids: [],
+        rejected_candidate_count: 0,
+        successful_resolution: null,
+        successful_variant: /;variant=([^;]+)/.exec(view.source)?.[1] ?? null,
+        reprojection_error_px: view.reprojection_error_px,
+        rejection_reason: null,
+        proposal_source: null,
+        assisted_eligible: false,
+        user_confirmed: storedClassification(view.source) !== "validated",
+        source_width: 0,
+        source_height: 0,
+      },
+      corner_proposal: null,
+      source_width: 0,
+      source_height: 0,
       metrics: hasMetrics ? {
         valid_area_cm2: view.valid_area_cm2 ?? 0,
         lichen_union_area_cm2: view.lichen_union_area_cm2 ?? 0,

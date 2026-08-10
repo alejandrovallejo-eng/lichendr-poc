@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import PageHeader from "@/components/PageHeader";
 import { fetchProjects } from "@/modules/projects/client";
 import { fetchSitesByProject } from "@/modules/sites/client";
@@ -20,18 +27,45 @@ import {
   type CaptureSeriesRow,
   type EvaluatedTreeRow,
 } from "./client";
+import { classificationLabel, detectionMessage, reprojectionLabel } from "./assistance";
 import { aggregateFourViewMetrics } from "./metrics";
-import { DIRECTIONS, DIRECTION_LABELS, type Direction, type VisionViewResult } from "./types";
+import {
+  DIRECTIONS,
+  DIRECTION_LABELS,
+  type CornerPoint,
+  type Direction,
+  type VisionViewResult,
+} from "./types";
 
 type SlotState = {
   file: File | null;
   requestKey: string;
-  status: "empty" | "ready" | "processing" | "saved" | "repeat" | "error";
+  status:
+    | "empty"
+    | "ready"
+    | "processing"
+    | "needs_confirmation"
+    | "confirming"
+    | "rectification_review"
+    | "analyzing"
+    | "saved"
+    | "repeat"
+    | "error";
   error: string | null;
   result: VisionViewResult | null;
+  corners: CornerPoint[] | null;
+  initialCorners: CornerPoint[] | null;
 };
 
-const EMPTY_SLOT = (): SlotState => ({ file: null, requestKey: crypto.randomUUID(), status: "empty", error: null, result: null });
+const EMPTY_SLOT = (): SlotState => ({
+  file: null,
+  requestKey: crypto.randomUUID(),
+  status: "empty",
+  error: null,
+  result: null,
+  corners: null,
+  initialCorners: null,
+});
 const EMPTY_SLOTS = (): Record<Direction, SlotState> => ({
   N: EMPTY_SLOT(), E: EMPTY_SLOT(), S: EMPTY_SLOT(), W: EMPTY_SLOT(),
 });
@@ -57,9 +91,88 @@ function statusLabel(slot: SlotState): string {
   if (slot.status === "empty") return "Sin fotografía";
   if (slot.status === "ready") return "Lista para procesar";
   if (slot.status === "processing") return "Validando y analizando…";
+  if (slot.status === "needs_confirmation") return "Área propuesta · necesita confirmación";
+  if (slot.status === "confirming") return "Validando las cuatro esquinas…";
+  if (slot.status === "rectification_review") return "Rectificación lista para revisión";
+  if (slot.status === "analyzing") return "Analizando el área confirmada…";
   if (slot.status === "saved") return "Procesada por IA · pendiente de revisión";
   if (slot.status === "repeat") return "Repetir fotografía";
   return "Error";
+}
+
+function CornerEditor({
+  file,
+  corners,
+  onChange,
+}: {
+  file: File;
+  corners: CornerPoint[];
+  onChange: (corners: CornerPoint[]) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef<number | null>(null);
+  const source = useMemo(() => URL.createObjectURL(file), [file]);
+  useEffect(() => () => URL.revokeObjectURL(source), [source]);
+
+  const moveCorner = (index: number, clientX: number, clientY: number) => {
+    const bounds = containerRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const next = corners.map((point) => ({ ...point }));
+    next[index] = {
+      x: Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (clientY - bounds.top) / bounds.height)),
+    };
+    onChange(next);
+  };
+  const handleMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragging.current === null) return;
+    event.preventDefault();
+    moveCorner(dragging.current, event.clientX, event.clientY);
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative mt-3 w-full touch-none overflow-hidden rounded border bg-slate-100"
+      style={{ borderColor: "var(--ld-border)" }}
+      onPointerMove={handleMove}
+      onPointerUp={() => { dragging.current = null; }}
+      onPointerCancel={() => { dragging.current = null; }}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={source} alt="Fotografía con la abertura propuesta" className="block h-auto w-full" />
+      <svg
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 h-full w-full"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+      >
+        <polygon
+          points={corners.map((point) => `${point.x},${point.y}`).join(" ")}
+          fill="rgba(16, 185, 129, 0.14)"
+          stroke="#047857"
+          strokeWidth="0.006"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      {corners.map((point, index) => (
+        <button
+          key={index}
+          type="button"
+          aria-label={`Mover esquina ${index + 1}`}
+          className="absolute h-11 w-11 touch-none rounded-full border-4 border-white bg-emerald-700 text-sm font-bold text-white shadow"
+          style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%`, transform: "translate(-50%, -50%)" }}
+          onPointerDown={(event) => {
+            dragging.current = index;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            moveCorner(index, event.clientX, event.clientY);
+          }}
+        >
+          {index + 1}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function ResultVisual({ slot, layer }: { slot: SlotState; layer: string }) {
@@ -67,14 +180,16 @@ function ResultVisual({ slot, layer }: { slot: SlotState; layer: string }) {
   const original = slot.file ? URL.createObjectURL(slot.file) : slot.result.rectified_image_data_url;
   const rectified = slot.result.rectified_image_data_url;
   const mask = slot.result.metrics?.lichen_union_mask_data_url;
+  const source = layer === "original" ? original : rectified;
+  if (!source) return null;
   return (
     <div className="relative mt-3 h-72 overflow-hidden rounded border bg-slate-100" style={{ borderColor: "var(--ld-border)" }}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={layer === "original" ? original : rectified}
+        src={source}
         alt={slot.file ? `Vista ${slot.file.name}` : "Vista rectificada"}
         className={`h-full w-full object-contain ${layer !== "original" && layer !== "grid" ? "saturate-50 opacity-70" : ""}`}
-        onLoad={() => { if (slot.file) URL.revokeObjectURL(original); }}
+        onLoad={() => { if (slot.file && original) URL.revokeObjectURL(original); }}
       />
       {mask && (layer === "lichen" || layer === "morphotypes") ? (
         // eslint-disable-next-line @next/next/no-img-element
@@ -176,8 +291,17 @@ export default function FourViewWorkflow() {
     const file = event.target.files?.[0] ?? null;
     setSlots((current) => ({
       ...current,
-      [direction]: file ? { file, requestKey: crypto.randomUUID(), status: "ready", error: null, result: null } : EMPTY_SLOT(),
+      [direction]: file ? {
+        file,
+        requestKey: crypto.randomUUID(),
+        status: "ready",
+        error: null,
+        result: null,
+        corners: null,
+        initialCorners: null,
+      } : EMPTY_SLOT(),
     }));
+    event.currentTarget.value = "";
   };
 
   const processAll = async () => {
@@ -202,6 +326,20 @@ export default function FourViewWorkflow() {
         setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "processing", error: null } }));
         try {
           const result = await analyzeFourViewFile(file);
+          if (result.status === "needs_confirmation") {
+            setSlots((current) => ({
+              ...current,
+              [direction]: {
+                ...current[direction],
+                result,
+                status: "needs_confirmation",
+                error: null,
+                corners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
+                initialCorners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
+              },
+            }));
+            continue;
+          }
           await saveProcessedView({
             file,
             direction,
@@ -218,6 +356,8 @@ export default function FourViewWorkflow() {
               result,
               status: result.status === "repeat_photo" ? "repeat" : "saved",
               error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
+              corners: null,
+              initialCorners: null,
             },
           }));
         } catch (reason) {
@@ -232,6 +372,137 @@ export default function FourViewWorkflow() {
       setGlobalError(reason instanceof Error ? reason.message : "No se pudo completar la serie.");
     } finally {
       setProcessing(false);
+    }
+  };
+
+  const saveSingleResult = async (direction: Direction, result: VisionViewResult) => {
+    const slot = slots[direction];
+    const file = slot.file;
+    if (!file || !projectId || !siteId || !eventId || !treeId) {
+      throw new Error("No se conserva la imagen o el contexto necesario para guardar esta vista.");
+    }
+    const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
+    const activeSeries = series ?? await getOrCreateCaptureSeries(treeSampleId);
+    if (!series) setSeries(activeSeries);
+    await saveProcessedView({
+      file,
+      direction,
+      result,
+      series: activeSeries,
+      requestKey: slot.requestKey,
+      context: { projectId, siteId, eventId, treeSampleId },
+    });
+    setSlots((current) => ({
+      ...current,
+      [direction]: {
+        ...current[direction],
+        result,
+        status: result.status === "repeat_photo" ? "repeat" : "saved",
+        error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
+        corners: null,
+        initialCorners: null,
+      },
+    }));
+    const updatedResults = DIRECTIONS.map((item) => {
+      if (item === direction) return result;
+      return slots[item].result?.status === "provisional_ai" ? slots[item].result : null;
+    });
+    const updatedSeries = await finalizeSeries(activeSeries.id, updatedResults);
+    setSeries(updatedSeries);
+    setEvaluated(await listEvaluatedTrees());
+  };
+
+  const updateCorners = (direction: Direction, corners: CornerPoint[]) => {
+    setSlots((current) => ({
+      ...current,
+      [direction]: { ...current[direction], corners },
+    }));
+  };
+
+  const confirmArea = async (direction: Direction) => {
+    const slot = slots[direction];
+    if (!slot.file || !slot.corners) return;
+    setSlots((current) => ({
+      ...current,
+      [direction]: { ...current[direction], status: "confirming", error: null },
+    }));
+    try {
+      const result = await analyzeFourViewFile(slot.file, "confirm_corners", slot.corners);
+      setSlots((current) => ({
+        ...current,
+        [direction]: {
+          ...current[direction],
+          result,
+          status: "rectification_review",
+          error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
+        },
+      }));
+    } catch (reason) {
+      setSlots((current) => ({
+        ...current,
+        [direction]: {
+          ...current[direction],
+          status: "needs_confirmation",
+          error: reason instanceof Error ? reason.message : "No se pudieron validar las esquinas.",
+        },
+      }));
+    }
+  };
+
+  const analyzeConfirmedArea = async (direction: Direction) => {
+    const slot = slots[direction];
+    if (!slot.file || !slot.corners) return;
+    setSlots((current) => ({
+      ...current,
+      [direction]: { ...current[direction], status: "analyzing", error: null },
+    }));
+    try {
+      const result = await analyzeFourViewFile(slot.file, "analyze_confirmed", slot.corners);
+      await saveSingleResult(direction, result);
+    } catch (reason) {
+      setSlots((current) => ({
+        ...current,
+        [direction]: {
+          ...current[direction],
+          status: "rectification_review",
+          error: reason instanceof Error ? reason.message : "No se pudo analizar el área confirmada.",
+        },
+      }));
+    }
+  };
+
+  const retryDetection = async (direction: Direction) => {
+    const slot = slots[direction];
+    if (!slot.file) return;
+    setSlots((current) => ({
+      ...current,
+      [direction]: { ...current[direction], status: "processing", error: null },
+    }));
+    try {
+      const result = await analyzeFourViewFile(slot.file);
+      if (result.status === "needs_confirmation") {
+        setSlots((current) => ({
+          ...current,
+          [direction]: {
+            ...current[direction],
+            result,
+            status: "needs_confirmation",
+            corners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
+            initialCorners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
+          },
+        }));
+      } else {
+        await saveSingleResult(direction, result);
+      }
+    } catch (reason) {
+      setSlots((current) => ({
+        ...current,
+        [direction]: {
+          ...current[direction],
+          status: "error",
+          error: reason instanceof Error ? reason.message : "No se pudo reintentar la detección.",
+        },
+      }));
     }
   };
 
@@ -265,6 +536,8 @@ export default function FourViewWorkflow() {
           result,
           status: result?.status === "provisional_ai" ? "saved" : result ? "repeat" : "empty",
           error: result?.critical_errors.join(", ") || null,
+          corners: null,
+          initialCorners: null,
         }];
       })) as Record<Direction, SlotState>);
       setSeries(row.series);
@@ -348,13 +621,24 @@ export default function FourViewWorkflow() {
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {DIRECTIONS.map((direction) => {
           const slot = slots[direction];
+          const fileInputId = `four-view-file-${direction}`;
+          const awaitingArea = ["needs_confirmation", "confirming"].includes(slot.status);
+          const reviewingArea = ["rectification_review", "analyzing"].includes(slot.status);
           return (
-            <article key={direction} className="min-h-64 rounded-lg border p-4" style={{ background: "var(--ld-card)", borderColor: suggestion === direction ? "#D9BD67" : "var(--ld-border)" }}>
+            <article
+              key={direction}
+              className={`min-h-64 rounded-lg border p-4 ${awaitingArea || reviewingArea ? "xl:col-span-2" : ""}`}
+              style={{ background: "var(--ld-card)", borderColor: suggestion === direction ? "#D9BD67" : "var(--ld-border)" }}
+            >
               <h2 className="text-xl font-bold">{DIRECTION_LABELS[direction]}</h2>
               <p className="mt-1 text-sm">{statusLabel(slot)}</p>
-              <label className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || processing || series?.status === "confirmed" ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
+              <label
+                htmlFor={fileInputId}
+                className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || processing || series?.status === "confirmed" ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
+              >
                 {series?.status === "confirmed" ? "Evaluación confirmada" : slot.file || slot.result ? "Reemplazar imagen" : "Tomar foto o elegir archivo"}
                 <input
+                  id={fileInputId}
                   className="sr-only"
                   type="file"
                   accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif"
@@ -365,6 +649,104 @@ export default function FourViewWorkflow() {
               </label>
               {slot.file ? <p className="mt-3 break-all text-xs">{slot.file.name}</p> : null}
               {slot.error ? <p className="mt-3 text-sm text-red-700">{slot.error}</p> : null}
+              {slot.result ? (
+                <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 rounded bg-slate-50 p-3 text-xs">
+                  <div><dt className="font-semibold">Método</dt><dd className="break-words">{slot.result.frame_detection.method}</dd></div>
+                  <div><dt className="font-semibold">Confianza</dt><dd>{Math.round(slot.result.frame_detection.confidence * 100)}%</dd></div>
+                  <div><dt className="font-semibold">Marcadores</dt><dd>{slot.result.frame_detection.detected_marker_ids.join(", ") || "Ninguno"}</dd></div>
+                  <div><dt className="font-semibold">Reproyección</dt><dd>{reprojectionLabel(slot.result.reprojection_error_px)}</dd></div>
+                  <div className="col-span-2">
+                    <dt className="font-semibold">Trazabilidad</dt>
+                    <dd>{classificationLabel(slot.result.frame_detection.classification)}</dd>
+                  </div>
+                </dl>
+              ) : null}
+              {awaitingArea && slot.file && slot.corners ? (
+                <div className="mt-4">
+                  <p className="font-medium text-amber-900">{detectionMessage(slot.result!.frame_detection)}</p>
+                  <p className="mt-1 text-sm">Encontramos el marco, pero necesitamos tu confirmación.</p>
+                  <p className="mt-1 text-sm">Mueve las cuatro esquinas hasta coincidir con la abertura de 10 × 50 cm.</p>
+                  <CornerEditor
+                    file={slot.file}
+                    corners={slot.corners}
+                    onChange={(corners) => updateCorners(direction, corners)}
+                  />
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={slot.status === "confirming"}
+                      className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
+                      onClick={() => void confirmArea(direction)}
+                    >
+                      {slot.status === "confirming" ? "Validando área…" : "Confirmar área"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={slot.status === "confirming" || !slot.initialCorners}
+                      className="rounded border px-3 py-2 text-sm disabled:opacity-50"
+                      onClick={() => {
+                        if (slot.initialCorners) updateCorners(direction, slot.initialCorners.map((point) => ({ ...point })));
+                      }}
+                    >
+                      Restaurar propuesta automática
+                    </button>
+                    <button
+                      type="button"
+                      disabled={slot.status === "confirming"}
+                      className="rounded border px-3 py-2 text-sm disabled:opacity-50"
+                      onClick={() => void retryDetection(direction)}
+                    >
+                      Reintentar detección
+                    </button>
+                    <label htmlFor={fileInputId} className="cursor-pointer rounded border px-3 py-2 text-sm">
+                      Reemplazar imagen
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+              {reviewingArea && slot.result?.rectified_image_data_url ? (
+                <div className="mt-4">
+                  <p className="font-medium">Revisa la rectificación antes de continuar.</p>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={slot.result.rectified_image_data_url}
+                    alt={`Rectificación de la vista ${DIRECTION_LABELS[direction]}`}
+                    className="mx-auto mt-3 max-h-[36rem] rounded border object-contain"
+                  />
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={slot.status === "analyzing" || slot.result.critical_errors.length > 0}
+                      className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
+                      onClick={() => void analyzeConfirmedArea(direction)}
+                    >
+                      {slot.status === "analyzing" ? "Analizando área…" : "Continuar con esta área"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={slot.status === "analyzing"}
+                      className="rounded border px-3 py-2 text-sm disabled:opacity-50"
+                      onClick={() => setSlots((current) => ({
+                        ...current,
+                        [direction]: { ...current[direction], status: "needs_confirmation" },
+                      }))}
+                    >
+                      Ajustar esquinas
+                    </button>
+                    <button
+                      type="button"
+                      disabled={slot.status === "analyzing"}
+                      className="rounded border px-3 py-2 text-sm disabled:opacity-50"
+                      onClick={() => void retryDetection(direction)}
+                    >
+                      Reintentar detección
+                    </button>
+                    <label htmlFor={fileInputId} className="cursor-pointer rounded border px-3 py-2 text-sm">
+                      Reemplazar imagen
+                    </label>
+                  </div>
+                </div>
+              ) : null}
               {slot.status === "repeat" ? (
                 <button type="button" className="mt-3 rounded border px-3 py-2 text-sm" onClick={() => repeat(direction)}>Repetir esta vista</button>
               ) : null}

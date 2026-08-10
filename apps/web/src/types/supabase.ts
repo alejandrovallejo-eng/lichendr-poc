@@ -442,6 +442,7 @@ export type Database = {
         Update: {
           annotation_set_id?: string | null; active?: boolean;
           processing_status?: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          source?: string; model_name?: string; model_version?: string | null;
           rectified_storage_path?: string | null; union_mask_storage_path?: string | null;
           valid_area_cm2?: number | null; lichen_union_area_cm2?: number | null; lichen_coverage_percent?: number | null;
           component_count?: number | null; occupied_cells?: number | null; provisional_morphotype_richness?: number | null;

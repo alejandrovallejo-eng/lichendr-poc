@@ -252,9 +252,11 @@ export async function saveProcessedView(input: {
       .from("capture_views")
       .update({
         processing_status: "repeat_photo",
+        source: traceableSource(input.result),
         reprojection_error_px: input.result.reprojection_error_px,
         quality_score: input.result.quality_score,
         quality_flags: input.result.quality_flags,
+        confidence: input.result.frame_detection.confidence,
         processed_at: new Date().toISOString(),
       })
       .eq("id", view.id)

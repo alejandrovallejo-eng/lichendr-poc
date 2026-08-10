@@ -226,8 +226,11 @@ export default function FourViewWorkflow() {
   const [layer, setLayer] = useState("lichen");
   const [heading, setHeading] = useState<number | null>(null);
   const [evaluated, setEvaluated] = useState<EvaluatedTreeRow[]>([]);
+  const assistedOperation = useRef(false);
+  const operationTokens = useRef<Partial<Record<Direction, string>>>({});
 
   const resetCapture = () => {
+    operationTokens.current = {};
     setSlots(EMPTY_SLOTS());
     setSeries(null);
     setContextConfirmed(false);
@@ -282,6 +285,11 @@ export default function FourViewWorkflow() {
   const capturedCount = DIRECTIONS.filter((direction) => slots[direction].file || slots[direction].result).length;
   const summary = useMemo(() => aggregateFourViewMetrics(DIRECTIONS.map((direction) => slots[direction].result)), [slots]);
   const suggestion = suggestedDirection(heading);
+  const assistedBusy = DIRECTIONS.some((direction) => (
+    ["processing", "confirming", "analyzing"].includes(slots[direction].status)
+  ));
+  const operationLocked = processing || assistedBusy;
+  const captureLocked = operationLocked || series?.status === "confirmed";
   const canProcess = contextConfirmed
     && series?.status !== "confirmed"
     && DIRECTIONS.every((direction) => slots[direction].file || slots[direction].result?.status === "provisional_ai")
@@ -289,6 +297,7 @@ export default function FourViewWorkflow() {
 
   const chooseFile = (direction: Direction, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
+    operationTokens.current[direction] = crypto.randomUUID();
     setSlots((current) => ({
       ...current,
       [direction]: file ? {
@@ -375,10 +384,15 @@ export default function FourViewWorkflow() {
     }
   };
 
-  const saveSingleResult = async (direction: Direction, result: VisionViewResult) => {
-    const slot = slots[direction];
-    const file = slot.file;
-    if (!file || !projectId || !siteId || !eventId || !treeId) {
+  const saveSingleResult = async (
+    direction: Direction,
+    result: VisionViewResult,
+    file: File,
+    requestKey: string,
+    operationToken: string,
+  ) => {
+    if (operationTokens.current[direction] !== operationToken) return;
+    if (!projectId || !siteId || !eventId || !treeId) {
       throw new Error("No se conserva la imagen o el contexto necesario para guardar esta vista.");
     }
     const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
@@ -389,25 +403,26 @@ export default function FourViewWorkflow() {
       direction,
       result,
       series: activeSeries,
-      requestKey: slot.requestKey,
+      requestKey,
       context: { projectId, siteId, eventId, treeSampleId },
     });
+    if (operationTokens.current[direction] !== operationToken) return;
     setSlots((current) => ({
       ...current,
-      [direction]: {
+      [direction]: current[direction].requestKey === requestKey ? {
         ...current[direction],
         result,
         status: result.status === "repeat_photo" ? "repeat" : "saved",
         error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
         corners: null,
         initialCorners: null,
-      },
+      } : current[direction],
     }));
-    const updatedResults = DIRECTIONS.map((item) => {
-      if (item === direction) return result;
-      return slots[item].result?.status === "provisional_ai" ? slots[item].result : null;
-    });
-    const updatedSeries = await finalizeSeries(activeSeries.id, updatedResults);
+    const storedResults = await loadSeriesResults(activeSeries.id);
+    const updatedSeries = await finalizeSeries(
+      activeSeries.id,
+      DIRECTIONS.map((item) => storedResults[item] ?? null),
+    );
     setSeries(updatedSeries);
     setEvaluated(await listEvaluatedTrees());
   };
@@ -421,13 +436,17 @@ export default function FourViewWorkflow() {
 
   const confirmArea = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || !slot.corners) return;
+    if (!slot.file || !slot.corners || assistedOperation.current) return;
+    assistedOperation.current = true;
+    const operationToken = crypto.randomUUID();
+    operationTokens.current[direction] = operationToken;
     setSlots((current) => ({
       ...current,
       [direction]: { ...current[direction], status: "confirming", error: null },
     }));
     try {
       const result = await analyzeFourViewFile(slot.file, "confirm_corners", slot.corners);
+      if (operationTokens.current[direction] !== operationToken) return;
       setSlots((current) => ({
         ...current,
         [direction]: {
@@ -438,6 +457,7 @@ export default function FourViewWorkflow() {
         },
       }));
     } catch (reason) {
+      if (operationTokens.current[direction] !== operationToken) return;
       setSlots((current) => ({
         ...current,
         [direction]: {
@@ -446,20 +466,30 @@ export default function FourViewWorkflow() {
           error: reason instanceof Error ? reason.message : "No se pudieron validar las esquinas.",
         },
       }));
+    } finally {
+      if (operationTokens.current[direction] === operationToken) {
+        delete operationTokens.current[direction];
+      }
+      assistedOperation.current = false;
     }
   };
 
   const analyzeConfirmedArea = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || !slot.corners) return;
+    if (!slot.file || !slot.corners || assistedOperation.current) return;
+    assistedOperation.current = true;
+    const operationToken = crypto.randomUUID();
+    operationTokens.current[direction] = operationToken;
     setSlots((current) => ({
       ...current,
       [direction]: { ...current[direction], status: "analyzing", error: null },
     }));
     try {
       const result = await analyzeFourViewFile(slot.file, "analyze_confirmed", slot.corners);
-      await saveSingleResult(direction, result);
+      if (operationTokens.current[direction] !== operationToken) return;
+      await saveSingleResult(direction, result, slot.file, slot.requestKey, operationToken);
     } catch (reason) {
+      if (operationTokens.current[direction] !== operationToken) return;
       setSlots((current) => ({
         ...current,
         [direction]: {
@@ -468,18 +498,27 @@ export default function FourViewWorkflow() {
           error: reason instanceof Error ? reason.message : "No se pudo analizar el área confirmada.",
         },
       }));
+    } finally {
+      if (operationTokens.current[direction] === operationToken) {
+        delete operationTokens.current[direction];
+      }
+      assistedOperation.current = false;
     }
   };
 
   const retryDetection = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file) return;
+    if (!slot.file || assistedOperation.current) return;
+    assistedOperation.current = true;
+    const operationToken = crypto.randomUUID();
+    operationTokens.current[direction] = operationToken;
     setSlots((current) => ({
       ...current,
       [direction]: { ...current[direction], status: "processing", error: null },
     }));
     try {
       const result = await analyzeFourViewFile(slot.file);
+      if (operationTokens.current[direction] !== operationToken) return;
       if (result.status === "needs_confirmation") {
         setSlots((current) => ({
           ...current,
@@ -492,9 +531,10 @@ export default function FourViewWorkflow() {
           },
         }));
       } else {
-        await saveSingleResult(direction, result);
+        await saveSingleResult(direction, result, slot.file, slot.requestKey, operationToken);
       }
     } catch (reason) {
+      if (operationTokens.current[direction] !== operationToken) return;
       setSlots((current) => ({
         ...current,
         [direction]: {
@@ -503,6 +543,11 @@ export default function FourViewWorkflow() {
           error: reason instanceof Error ? reason.message : "No se pudo reintentar la detección.",
         },
       }));
+    } finally {
+      if (operationTokens.current[direction] === operationToken) {
+        delete operationTokens.current[direction];
+      }
+      assistedOperation.current = false;
     }
   };
 
@@ -560,28 +605,28 @@ export default function FourViewWorkflow() {
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
         <div className="grid gap-4 md:grid-cols-4">
           <label className="text-sm">Proyecto
-            <select className="mt-1 w-full rounded border p-2" value={projectId} onChange={(event) => {
+            <select disabled={operationLocked} className="mt-1 w-full rounded border p-2 disabled:opacity-50" value={projectId} onChange={(event) => {
               resetCapture(); setProjectId(event.target.value); setSiteId(""); setEventId(""); setTreeId(""); setSites([]); setEvents([]); setTrees([]);
             }}>
               {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="text-sm">Sitio
-            <select className="mt-1 w-full rounded border p-2" value={siteId} onChange={(event) => {
+            <select disabled={operationLocked} className="mt-1 w-full rounded border p-2 disabled:opacity-50" value={siteId} onChange={(event) => {
               resetCapture(); setSiteId(event.target.value); setEventId(""); setTreeId(""); setEvents([]); setTrees([]);
             }}>
               {sites.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="text-sm">Jornada
-            <select className="mt-1 w-full rounded border p-2" value={eventId} onChange={(event) => {
+            <select disabled={operationLocked} className="mt-1 w-full rounded border p-2 disabled:opacity-50" value={eventId} onChange={(event) => {
               resetCapture(); setEventId(event.target.value);
             }}>
               {events.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label className="text-sm">Árbol existente
-            <select className="mt-1 w-full rounded border p-2" value={treeId} onChange={(event) => {
+            <select disabled={operationLocked} className="mt-1 w-full rounded border p-2 disabled:opacity-50" value={treeId} onChange={(event) => {
               resetCapture(); setTreeId(event.target.value);
             }}>
               {trees.map((item) => <option key={item.id} value={item.id}>{item.code}</option>)}
@@ -596,7 +641,7 @@ export default function FourViewWorkflow() {
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            disabled={!eventId || !treeId || contextConfirmed}
+            disabled={!eventId || !treeId || contextConfirmed || operationLocked}
             onClick={() => setContextConfirmed(true)}
             className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
           >
@@ -634,7 +679,7 @@ export default function FourViewWorkflow() {
               <p className="mt-1 text-sm">{statusLabel(slot)}</p>
               <label
                 htmlFor={fileInputId}
-                className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || processing || series?.status === "confirmed" ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
+                className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || captureLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
               >
                 {series?.status === "confirmed" ? "Evaluación confirmada" : slot.file || slot.result ? "Reemplazar imagen" : "Tomar foto o elegir archivo"}
                 <input
@@ -643,7 +688,7 @@ export default function FourViewWorkflow() {
                   type="file"
                   accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif"
                   capture="environment"
-                  disabled={!contextConfirmed || processing || series?.status === "confirmed"}
+                  disabled={!contextConfirmed || captureLocked}
                   onChange={(event) => chooseFile(direction, event)}
                 />
               </label>
@@ -669,12 +714,14 @@ export default function FourViewWorkflow() {
                   <CornerEditor
                     file={slot.file}
                     corners={slot.corners}
-                    onChange={(corners) => updateCorners(direction, corners)}
+                    onChange={(corners) => {
+                      if (!operationLocked) updateCorners(direction, corners);
+                    }}
                   />
                   <div className="mt-4 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      disabled={slot.status === "confirming"}
+                      disabled={operationLocked}
                       className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
                       onClick={() => void confirmArea(direction)}
                     >
@@ -682,7 +729,7 @@ export default function FourViewWorkflow() {
                     </button>
                     <button
                       type="button"
-                      disabled={slot.status === "confirming" || !slot.initialCorners}
+                      disabled={operationLocked || !slot.initialCorners}
                       className="rounded border px-3 py-2 text-sm disabled:opacity-50"
                       onClick={() => {
                         if (slot.initialCorners) updateCorners(direction, slot.initialCorners.map((point) => ({ ...point })));
@@ -692,13 +739,13 @@ export default function FourViewWorkflow() {
                     </button>
                     <button
                       type="button"
-                      disabled={slot.status === "confirming"}
+                      disabled={operationLocked}
                       className="rounded border px-3 py-2 text-sm disabled:opacity-50"
                       onClick={() => void retryDetection(direction)}
                     >
                       Reintentar detección
                     </button>
-                    <label htmlFor={fileInputId} className="cursor-pointer rounded border px-3 py-2 text-sm">
+                    <label htmlFor={fileInputId} className={`rounded border px-3 py-2 text-sm ${captureLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
                       Reemplazar imagen
                     </label>
                   </div>
@@ -716,7 +763,7 @@ export default function FourViewWorkflow() {
                   <div className="mt-4 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      disabled={slot.status === "analyzing" || slot.result.critical_errors.length > 0}
+                      disabled={operationLocked || slot.result.critical_errors.length > 0}
                       className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
                       onClick={() => void analyzeConfirmedArea(direction)}
                     >
@@ -724,7 +771,7 @@ export default function FourViewWorkflow() {
                     </button>
                     <button
                       type="button"
-                      disabled={slot.status === "analyzing"}
+                      disabled={operationLocked}
                       className="rounded border px-3 py-2 text-sm disabled:opacity-50"
                       onClick={() => setSlots((current) => ({
                         ...current,
@@ -735,20 +782,20 @@ export default function FourViewWorkflow() {
                     </button>
                     <button
                       type="button"
-                      disabled={slot.status === "analyzing"}
+                      disabled={operationLocked}
                       className="rounded border px-3 py-2 text-sm disabled:opacity-50"
                       onClick={() => void retryDetection(direction)}
                     >
                       Reintentar detección
                     </button>
-                    <label htmlFor={fileInputId} className="cursor-pointer rounded border px-3 py-2 text-sm">
+                    <label htmlFor={fileInputId} className={`rounded border px-3 py-2 text-sm ${captureLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
                       Reemplazar imagen
                     </label>
                   </div>
                 </div>
               ) : null}
               {slot.status === "repeat" ? (
-                <button type="button" className="mt-3 rounded border px-3 py-2 text-sm" onClick={() => repeat(direction)}>Repetir esta vista</button>
+                <button type="button" disabled={operationLocked} className="mt-3 rounded border px-3 py-2 text-sm disabled:opacity-50" onClick={() => repeat(direction)}>Repetir esta vista</button>
               ) : null}
             </article>
           );
@@ -758,7 +805,7 @@ export default function FourViewWorkflow() {
       {globalError ? <div className="rounded border border-red-300 bg-red-50 p-4 text-sm text-red-800">{globalError}</div> : null}
       <button
         type="button"
-        disabled={processing || !canProcess}
+        disabled={operationLocked || !canProcess}
         onClick={() => void processAll()}
         className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
       >
@@ -805,7 +852,7 @@ export default function FourViewWorkflow() {
             })}
           </div>
           <div className="flex flex-wrap gap-3">
-            <button type="button" disabled={summary.validViews !== 4 || series.status === "confirmed"} onClick={() => void confirm()} className="rounded bg-emerald-800 px-4 py-2 text-white disabled:opacity-50">Confirmar evaluación</button>
+            <button type="button" disabled={operationLocked || summary.validViews !== 4 || series.status === "confirmed"} onClick={() => void confirm()} className="rounded bg-emerald-800 px-4 py-2 text-white disabled:opacity-50">Confirmar evaluación</button>
             <Link href="/annotations" className="rounded border px-4 py-2">Corregir propuesta</Link>
           </div>
         </section>
@@ -826,7 +873,7 @@ export default function FourViewWorkflow() {
                   <td className="p-2">{row.series.provisional_morphotype_richness ?? "—"}</td>
                   <td className="p-2">{row.series.status}</td>
                   <td className="p-2">{row.series.pending_view_count === 0 ? "Completa" : "Pendiente"}</td>
-                  <td className="p-2"><button type="button" className="underline" onClick={() => void openEvaluation(row)}>Ver evaluación</button></td>
+                  <td className="p-2"><button type="button" disabled={operationLocked} className="underline disabled:opacity-50" onClick={() => void openEvaluation(row)}>Ver evaluación</button></td>
                 </tr>
               ))}
             </tbody>

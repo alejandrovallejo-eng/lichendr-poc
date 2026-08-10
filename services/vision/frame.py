@@ -143,6 +143,8 @@ def decode_image(raw: bytes, mime: str) -> tuple[np.ndarray, dict[str, Any]]:
             }
             image = ImageOps.exif_transpose(source).convert("RGB")
             rgb = np.asarray(image).copy()
+    except FrameValidationError:
+        raise
     except (OSError, ValueError) as exc:
         raise FrameValidationError("invalid_image", "No se pudo decodificar la imagen.") from exc
     if rgb.shape[0] < 600 or rgb.shape[1] < 300:
@@ -189,7 +191,7 @@ def _pyramid_sizes(width: int, height: int) -> list[tuple[int, int]]:
     targets = [first, 3072, 2304, 1728, 1152]
     result: list[tuple[int, int]] = []
     for target in targets:
-        if target > first or target < 900:
+        if target > first or (target < 900 and target != first):
             continue
         scale = target / longest
         size = (max(1, round(width * scale)), max(1, round(height * scale)))
@@ -458,7 +460,6 @@ def inspect_frame(rgb: np.ndarray) -> FrameDetection:
             for marker_id in set(attempt_ids):
                 if attempt_ids.count(marker_id) > 1:
                     duplicate_ids.add(marker_id)
-            expected_count = 0
             for marker_corners, marker_id in zip(corners, attempt_ids):
                 if marker_id not in EXPECTED_MARKER_IDS:
                     unknown_ids.add(marker_id)
@@ -471,7 +472,6 @@ def inspect_frame(rgb: np.ndarray) -> FrameDetection:
                     (level_width, level_height),
                     variant_name,
                 ))
-                expected_count += 1
             candidate = (len(set(attempt_ids) & EXPECTED_MARKER_IDS), (level_width, level_height), variant_name)
             if best_attempt is None or candidate[0] > best_attempt[0]:
                 best_attempt = candidate
@@ -492,6 +492,8 @@ def inspect_frame(rgb: np.ndarray) -> FrameDetection:
     homography, reprojection_error = _fit_board_homography(markers)
     successful_resolution = best_attempt[1] if best_attempt else None
     successful_variant = best_attempt[2] if best_attempt else None
+    if not missing_ids and best_attempt is not None and best_attempt[0] < 4:
+        successful_variant = "consolidated"
     rejection_reason: str | None = None
     method = "aruco_board_multiscale"
     confidence = 0.0

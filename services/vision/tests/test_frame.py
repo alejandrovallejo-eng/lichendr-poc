@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import struct
 import unittest
+import zlib
 
 import numpy as np
 from PIL import Image
@@ -191,6 +193,16 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(validate_image_payload(jpeg, "image/jpeg"), "image/jpeg")
         with self.assertRaises(FrameValidationError):
             validate_image_payload(b"not-png", "image/png")
+
+    def test_decoded_pixel_limit_reports_a_specific_error(self) -> None:
+        output = io.BytesIO()
+        Image.new("RGB", (1, 1), "white").save(output, format="PNG")
+        raw = bytearray(output.getvalue())
+        struct.pack_into(">II", raw, 16, 10_000, 7_000)
+        struct.pack_into(">I", raw, 29, zlib.crc32(raw[12:29]))
+        with self.assertRaises(FrameValidationError) as raised:
+            decode_image(bytes(raw), "image/png")
+        self.assertEqual(raised.exception.code, "decoded_image_too_large")
 
     def test_real_heif_signature_and_decode(self) -> None:
         try:

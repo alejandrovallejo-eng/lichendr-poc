@@ -60,17 +60,24 @@ class DevScriptTests(unittest.TestCase):
                 process.kill()
                 process.wait(timeout=3)
 
-    def run_preflight(self, frontend_port: int, vision_port: int | None = None) -> subprocess.CompletedProcess[str]:
+    def run_preflight(
+        self,
+        frontend_port: int,
+        vision_port: int | None = None,
+        *,
+        force_lsof_failure: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
         environment = {
             **os.environ,
             "NEXTJS_PORT": str(frontend_port),
             "VISION_PORT": str(vision_port or available_port()),
         }
+        override = "lsof() { return 1; }; " if force_lsof_failure else ""
         return subprocess.run(
             [
                 "bash",
                 "-c",
-                f'source "{SCRIPT}"; preflight_listeners; printf "next=%s vision=%s\\n" "$REUSE_NEXTJS" "$REUSE_VISION"',
+                f'source "{SCRIPT}"; {override}preflight_listeners; printf "next=%s vision=%s\\n" "$REUSE_NEXTJS" "$REUSE_VISION"',
             ],
             check=False,
             capture_output=True,
@@ -85,6 +92,14 @@ class DevScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("next=true vision=false", result.stdout)
         self.assertIn("Reusing this repository's Next.js listener", result.stdout)
+        self.assertIsNone(process.poll())
+
+    def test_falls_back_to_ss_when_lsof_cannot_see_nextjs(self) -> None:
+        port = available_port()
+        process = self.start_listener(port, repository_next=True)
+        result = self.run_preflight(port, force_lsof_failure=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("next=true vision=false", result.stdout)
         self.assertIsNone(process.poll())
 
     def test_refuses_foreign_frontend_without_stopping_it_or_starting_vision(self) -> None:

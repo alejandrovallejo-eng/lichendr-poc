@@ -13,11 +13,19 @@ NEXTJS_PORT="${NEXTJS_PORT:-3000}"
 
 VISION_PID=""
 NEXTJS_PID=""
+VISION_PROCESS_GROUP=""
+NEXTJS_PROCESS_GROUP=""
 REUSE_VISION=false
 REUSE_NEXTJS=false
 
 listener_pids() {
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | sort -u
+    local port="$1"
+    local pids
+    pids="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN -t 2>/dev/null || true)"
+    if [ -z "${pids}" ] && command -v ss >/dev/null 2>&1; then
+        pids="$(ss -H -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p')"
+    fi
+    printf '%s\n' "${pids}" | sed '/^$/d' | sort -u
 }
 
 process_working_directory() {
@@ -55,6 +63,11 @@ vision_listener_is_local() {
     local pid="$1"
     local addresses
     addresses="$(lsof -nP -a -p "${pid}" -iTCP:"${VISION_PORT}" -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n//p')"
+    if [ -z "${addresses}" ] && command -v ss >/dev/null 2>&1; then
+        addresses="$(ss -H -ltnp "sport = :${VISION_PORT}" 2>/dev/null \
+            | grep "pid=${pid}," \
+            | awk '{print $4}')"
+    fi
     [ -n "${addresses}" ] || return 1
     while IFS= read -r address; do
         [[ "${address}" == 127.0.0.1:* || "${address}" == "[::1]":* ]] || return 1
@@ -103,8 +116,18 @@ preflight_listeners() {
 
 stop_owned_process() {
     local pid="$1"
+    local process_group="$2"
+    local child
     [ -n "${pid}" ] || return 0
-    pkill -TERM -P "${pid}" 2>/dev/null || true
+    if [ -n "${process_group}" ]; then
+        kill -TERM -- "-${process_group}" 2>/dev/null || true
+        return
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+        while IFS= read -r child; do
+            [ -n "${child}" ] && stop_owned_process "${child}" ""
+        done < <(pgrep -P "${pid}" 2>/dev/null || true)
+    fi
     kill "${pid}" 2>/dev/null || true
 }
 
@@ -114,8 +137,8 @@ cleanup() {
     fi
     echo ""
     echo "Shutting down services started by this script …"
-    stop_owned_process "${VISION_PID}"
-    stop_owned_process "${NEXTJS_PID}"
+    stop_owned_process "${VISION_PID}" "${VISION_PROCESS_GROUP}"
+    stop_owned_process "${NEXTJS_PID}" "${NEXTJS_PROCESS_GROUP}"
     wait 2>/dev/null || true
     echo "Done."
 }
@@ -169,10 +192,16 @@ main() {
 
     if [ "${REUSE_NEXTJS}" = false ]; then
         echo "Starting Next.js on 0.0.0.0:${NEXTJS_PORT} …"
-        (
-            cd "${WEB_DIR}"
-            exec npm run dev -- --hostname 0.0.0.0 --port "${NEXTJS_PORT}"
-        ) &
+        if command -v setsid >/dev/null 2>&1; then
+            setsid bash -c 'cd "$1"; exec npm run dev -- --hostname 0.0.0.0 --port "$2"' \
+                bash "${WEB_DIR}" "${NEXTJS_PORT}" &
+            NEXTJS_PROCESS_GROUP=$!
+        else
+            (
+                cd "${WEB_DIR}"
+                exec npm run dev -- --hostname 0.0.0.0 --port "${NEXTJS_PORT}"
+            ) &
+        fi
         NEXTJS_PID=$!
         wait_for_frontend
     fi
@@ -183,12 +212,22 @@ main() {
             bash "${SCRIPT_DIR}/setup-vision-service.sh"
         fi
         echo "Starting Vision Service on ${VISION_HOST}:${VISION_PORT} …"
-        "${VENV_DIR}/bin/uvicorn" app:app \
-            --host "${VISION_HOST}" \
-            --port "${VISION_PORT}" \
-            --app-dir "${SERVICE_DIR}" \
-            --workers 1 \
-            --log-level info &
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "${VENV_DIR}/bin/uvicorn" app:app \
+                --host "${VISION_HOST}" \
+                --port "${VISION_PORT}" \
+                --app-dir "${SERVICE_DIR}" \
+                --workers 1 \
+                --log-level info &
+            VISION_PROCESS_GROUP=$!
+        else
+            "${VENV_DIR}/bin/uvicorn" app:app \
+                --host "${VISION_HOST}" \
+                --port "${VISION_PORT}" \
+                --app-dir "${SERVICE_DIR}" \
+                --workers 1 \
+                --log-level info &
+        fi
         VISION_PID=$!
         wait_for_vision
     fi

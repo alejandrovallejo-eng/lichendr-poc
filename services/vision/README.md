@@ -53,10 +53,10 @@ Frees the session immediately.
 
 - `POST /template/validate`: validates JPEG/PNG/HEIC/HEIF signatures and the four expected `DICT_5X5_50` IDs.
 - `POST /rectify`: applies the physical frame homography and returns the exact 400 × 2000 inner window.
-- `POST /analyze-view`: rectifies, runs reproducible automatic MobileSAM prompts, filters/merges masks, performs provisional CIELAB grouping, and calculates union-based metrics.
+- `POST /analyze-view`: uses multipart `action=detect|confirm_corners|analyze_confirmed`. Detection either returns a validated result or a four-corner proposal; confirmation returns a rectification for review; only the final reviewed action runs MobileSAM and calculates metrics.
 - `GET /processing/status`: reports readiness and confirms that inference is sequential.
 
-The automatic labels `LQ-001`, `LQ-002`, … are provisional visual morphotypes. They are not taxonomic identifications. A view with critical blur, exposure, resolution, marker, or homography errors returns `repeat_photo` without a silent coverage percentage.
+Every frame response reports detected/missing IDs, rejected candidates, successful pyramid level and variant, method, confidence, reprojection error and a specific rejection reason. The automatic labels `LQ-001`, `LQ-002`, … are provisional visual morphotypes. They are not taxonomic identifications. A view with critical blur, exposure, resolution or homography errors returns `repeat_photo` without a silent coverage percentage.
 
 ## Constraints
 

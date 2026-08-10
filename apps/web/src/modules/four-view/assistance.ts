@@ -11,6 +11,8 @@ const CLASSIFICATION_LABELS: Record<FrameClassification, string> = {
   validated: "Automático validado",
   assisted: "Automático asistido",
   manual_assisted: "Manual asistido",
+  manual_confirmed: "Manual confirmado · elegible para métricas validadas",
+  manual_assisted_provisional: "Manual provisional · geometría estimada",
 };
 
 export function detectionMessage(detection: FrameDetectionDetails): string {
@@ -24,7 +26,7 @@ export function detectionMessage(detection: FrameDetectionDetails): string {
 }
 
 export function classificationLabel(classification: FrameClassification | null): string {
-  return classification ? CLASSIFICATION_LABELS[classification] : "Pendiente de confirmación";
+  return classification ? CLASSIFICATION_LABELS[classification] : "Sin clasificación final";
 }
 
 export function reprojectionLabel(error: number | null): string {

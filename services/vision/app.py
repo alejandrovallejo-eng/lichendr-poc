@@ -190,6 +190,7 @@ async def analyze_view_route(
     image: UploadFile = File(...),
     action: str = Form("detect"),
     corners: str | None = Form(None),
+    manual_mode: str = Form("manual_confirmed"),
 ) -> dict:
     raw = await image.read()
     try:
@@ -201,16 +202,9 @@ async def analyze_view_route(
                 masks = automatic_segment_image(rectification.canonical_rgb)
                 return analyze_rectification(rectification, metadata, masks)
             if detection.proposal is None:
-                detail = detection_payload(detection, rgb.shape[1], rgb.shape[0])
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": detection.rejection_reason or "frame_not_found",
-                        "message": "No pudimos localizar una abertura segura. Reemplaza la imagen o reintenta la detección.",
-                        "frame_detection": detail,
-                    },
-                )
-            normalized = detection.proposal.corners / [rgb.shape[1] - 1, rgb.shape[0] - 1]
+                normalized = None
+            else:
+                normalized = detection.proposal.corners / [rgb.shape[1] - 1, rgb.shape[0] - 1]
             return {
                 "template_version": TEMPLATE_VERSION,
                 "algorithm_version": ALGORITHM_VERSION,
@@ -221,7 +215,7 @@ async def analyze_view_route(
                     round(detection.reprojection_error_px, 4)
                     if detection.reprojection_error_px is not None else None
                 ),
-                "quality_flags": ["frame_confirmation_required"],
+                "quality_flags": ["frame_confirmation_required", "manual_selection_required"],
                 "quality_score": round(detection.confidence, 3),
                 "critical_errors": [],
                 "status": "needs_confirmation",
@@ -231,17 +225,20 @@ async def analyze_view_route(
                 "source": detection.method,
                 "metrics": None,
                 "frame_detection": detection_payload(detection, rgb.shape[1], rgb.shape[0]),
-                "corner_proposal": [
-                    {"x": round(float(point[0]), 7), "y": round(float(point[1]), 7)}
-                    for point in normalized
-                ],
+                "corner_proposal": (
+                    [
+                        {"x": round(float(point[0]), 7), "y": round(float(point[1]), 7)}
+                        for point in normalized
+                    ]
+                    if normalized is not None else None
+                ),
                 "source_width": rgb.shape[1],
                 "source_height": rgb.shape[0],
             }
         if action not in {"confirm_corners", "analyze_confirmed"}:
             raise FrameValidationError("invalid_action", "La acción solicitada no es válida.")
         submitted_corners = _parse_corners(corners)
-        rectification = confirmed_rectification(rgb, submitted_corners, detection)
+        rectification = confirmed_rectification(rgb, submitted_corners, detection, manual_mode)
         if action == "confirm_corners":
             from frame import _encode_image
             critical = sorted(set(rectification.quality_flags) & {
@@ -282,9 +279,13 @@ async def analyze_view_route(
             "insufficient_resolution",
             "high_reprojection_error",
         } for flag in rectification.quality_flags):
-            return analyze_rectification(rectification, metadata, [])
+            result = analyze_rectification(rectification, metadata, [])
+            result["corner_proposal"] = submitted_corners
+            return result
         masks = automatic_segment_image(rectification.canonical_rgb)
-        return analyze_rectification(rectification, metadata, masks)
+        result = analyze_rectification(rectification, metadata, masks)
+        result["corner_proposal"] = submitted_corners
+        return result
     except FrameValidationError as exc:
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
     except RuntimeError as exc:

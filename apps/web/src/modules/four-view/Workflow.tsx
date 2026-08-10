@@ -28,6 +28,13 @@ import {
   type EvaluatedTreeRow,
 } from "./client";
 import { classificationLabel, detectionMessage, reprojectionLabel } from "./assistance";
+import {
+  CORNER_LABELS,
+  ManualOperationGate,
+  cornerGeometryError,
+  defaultManualCorners,
+  runManualOperation,
+} from "./manual-flow";
 import { aggregateFourViewMetrics } from "./metrics";
 import {
   DIRECTIONS,
@@ -45,8 +52,7 @@ type SlotState = {
     | "ready"
     | "processing"
     | "needs_confirmation"
-    | "confirming"
-    | "rectification_review"
+    | "four_points_ready"
     | "analyzing"
     | "saved"
     | "repeat"
@@ -55,6 +61,8 @@ type SlotState = {
   result: VisionViewResult | null;
   corners: CornerPoint[] | null;
   initialCorners: CornerPoint[] | null;
+  estimatedGeometry: boolean;
+  provisionalAcknowledged: boolean;
 };
 
 const EMPTY_SLOT = (): SlotState => ({
@@ -65,6 +73,8 @@ const EMPTY_SLOT = (): SlotState => ({
   result: null,
   corners: null,
   initialCorners: null,
+  estimatedGeometry: false,
+  provisionalAcknowledged: false,
 });
 const EMPTY_SLOTS = (): Record<Direction, SlotState> => ({
   N: EMPTY_SLOT(), E: EMPTY_SLOT(), S: EMPTY_SLOT(), W: EMPTY_SLOT(),
@@ -90,27 +100,28 @@ function suggestedDirection(heading: number | null): Direction | null {
 function statusLabel(slot: SlotState): string {
   if (slot.status === "empty") return "Sin fotografía";
   if (slot.status === "ready") return "Lista para procesar";
-  if (slot.status === "processing") return "Validando y analizando…";
-  if (slot.status === "needs_confirmation") return "Área propuesta · necesita confirmación";
-  if (slot.status === "confirming") return "Validando las cuatro esquinas…";
-  if (slot.status === "rectification_review") return "Rectificación lista para revisión";
-  if (slot.status === "analyzing") return "Analizando el área confirmada…";
-  if (slot.status === "saved") return "Procesada por IA · pendiente de revisión";
-  if (slot.status === "repeat") return "Repetir fotografía";
-  return "Error";
+  if (slot.status === "processing") return "Detectando marco";
+  if (slot.status === "needs_confirmation") return "Necesita confirmación manual";
+  if (slot.status === "four_points_ready") return "Cuatro puntos listos";
+  if (slot.status === "analyzing") return "Procesando análisis";
+  if (slot.status === "saved") return "Analizada";
+  return "Error recuperable";
 }
 
 function CornerEditor({
   file,
   corners,
+  disabled,
   onChange,
 }: {
   file: File;
   corners: CornerPoint[];
+  disabled: boolean;
   onChange: (corners: CornerPoint[]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef<number | null>(null);
+  const [activeCorner, setActiveCorner] = useState<number | null>(null);
   const source = useMemo(() => URL.createObjectURL(file), [file]);
   useEffect(() => () => URL.revokeObjectURL(source), [source]);
 
@@ -136,20 +147,28 @@ function CornerEditor({
       className="relative mt-3 w-full touch-none overflow-hidden rounded border bg-slate-100"
       style={{ borderColor: "var(--ld-border)" }}
       onPointerMove={handleMove}
-      onPointerUp={() => { dragging.current = null; }}
-      onPointerCancel={() => { dragging.current = null; }}
+      onPointerUp={() => { dragging.current = null; setActiveCorner(null); }}
+      onPointerCancel={() => { dragging.current = null; setActiveCorner(null); }}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={source} alt="Fotografía con la abertura propuesta" className="block h-auto w-full" />
+      <p className="absolute inset-x-2 top-2 z-20 rounded bg-slate-950/80 p-2 text-center text-xs font-semibold text-white">
+        Coloca los puntos en las cuatro esquinas de la abertura interior de 10 × 50 cm, no sobre los marcadores ArUco.
+      </p>
       <svg
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 h-full w-full"
         viewBox="0 0 1 1"
         preserveAspectRatio="none"
       >
+        <path
+          d={`M 0 0 H 1 V 1 H 0 Z M ${corners.map((point) => `${point.x} ${point.y}`).join(" L ")} Z`}
+          fill="rgba(15, 23, 42, 0.28)"
+          fillRule="evenodd"
+        />
         <polygon
           points={corners.map((point) => `${point.x},${point.y}`).join(" ")}
-          fill="rgba(16, 185, 129, 0.14)"
+          fill="rgba(16, 185, 129, 0.08)"
           stroke="#047857"
           strokeWidth="0.006"
           vectorEffect="non-scaling-stroke"
@@ -159,11 +178,14 @@ function CornerEditor({
         <button
           key={index}
           type="button"
-          aria-label={`Mover esquina ${index + 1}`}
+          aria-label={`${index + 1}. ${CORNER_LABELS[index]}`}
+          disabled={disabled}
           className="absolute h-11 w-11 touch-none rounded-full border-4 border-white bg-emerald-700 text-sm font-bold text-white shadow"
           style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%`, transform: "translate(-50%, -50%)" }}
           onPointerDown={(event) => {
+            if (disabled) return;
             dragging.current = index;
+            setActiveCorner(index);
             event.currentTarget.setPointerCapture(event.pointerId);
             moveCorner(index, event.clientX, event.clientY);
           }}
@@ -171,6 +193,21 @@ function CornerEditor({
           {index + 1}
         </button>
       ))}
+      {activeCorner !== null ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute right-3 top-20 z-30 h-32 w-32 rounded-full border-4 border-white shadow-xl"
+          style={{
+            backgroundImage: `url("${source}")`,
+            backgroundPosition: `${corners[activeCorner].x * 100}% ${corners[activeCorner].y * 100}%`,
+            backgroundRepeat: "no-repeat",
+            backgroundSize: "500%",
+          }}
+        >
+          <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-red-600" />
+          <span className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-red-600" />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -226,11 +263,12 @@ export default function FourViewWorkflow() {
   const [layer, setLayer] = useState("lichen");
   const [heading, setHeading] = useState<number | null>(null);
   const [evaluated, setEvaluated] = useState<EvaluatedTreeRow[]>([]);
-  const assistedOperation = useRef(false);
+  const manualOperations = useRef(new ManualOperationGate());
   const operationTokens = useRef<Partial<Record<Direction, string>>>({});
 
   const resetCapture = () => {
     operationTokens.current = {};
+    DIRECTIONS.forEach((direction) => manualOperations.current.invalidate(direction));
     setSlots(EMPTY_SLOTS());
     setSeries(null);
     setContextConfirmed(false);
@@ -286,7 +324,7 @@ export default function FourViewWorkflow() {
   const summary = useMemo(() => aggregateFourViewMetrics(DIRECTIONS.map((direction) => slots[direction].result)), [slots]);
   const suggestion = suggestedDirection(heading);
   const assistedBusy = DIRECTIONS.some((direction) => (
-    ["processing", "confirming", "analyzing"].includes(slots[direction].status)
+    ["processing", "analyzing"].includes(slots[direction].status)
   ));
   const operationLocked = processing || assistedBusy;
   const captureLocked = operationLocked || series?.status === "confirmed";
@@ -297,6 +335,7 @@ export default function FourViewWorkflow() {
 
   const chooseFile = (direction: Direction, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
+    manualOperations.current.invalidate(direction);
     operationTokens.current[direction] = crypto.randomUUID();
     setSlots((current) => ({
       ...current,
@@ -308,6 +347,8 @@ export default function FourViewWorkflow() {
         result: null,
         corners: null,
         initialCorners: null,
+        estimatedGeometry: false,
+        provisionalAcknowledged: false,
       } : EMPTY_SLOT(),
     }));
     event.currentTarget.value = "";
@@ -336,15 +377,23 @@ export default function FourViewWorkflow() {
         try {
           const result = await analyzeFourViewFile(file);
           if (result.status === "needs_confirmation") {
+            const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
+            const geometryError = cornerGeometryError(
+              proposedCorners,
+              result.source_width,
+              result.source_height,
+            );
             setSlots((current) => ({
               ...current,
               [direction]: {
                 ...current[direction],
                 result,
-                status: "needs_confirmation",
-                error: null,
-                corners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
-                initialCorners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
+                status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
+                error: geometryError,
+                corners: proposedCorners,
+                initialCorners: proposedCorners?.map((point) => ({ ...point })) ?? null,
+                estimatedGeometry: false,
+                provisionalAcknowledged: false,
               },
             }));
             continue;
@@ -367,6 +416,8 @@ export default function FourViewWorkflow() {
               error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
               corners: null,
               initialCorners: null,
+              estimatedGeometry: false,
+              provisionalAcknowledged: false,
             },
           }));
         } catch (reason) {
@@ -430,86 +481,75 @@ export default function FourViewWorkflow() {
   const updateCorners = (direction: Direction, corners: CornerPoint[]) => {
     setSlots((current) => ({
       ...current,
-      [direction]: { ...current[direction], corners },
+      [direction]: {
+        ...current[direction],
+        corners,
+        status: cornerGeometryError(
+          corners,
+          current[direction].result?.source_width ?? 0,
+          current[direction].result?.source_height ?? 0,
+        ) ? "needs_confirmation" : "four_points_ready",
+        error: null,
+      },
     }));
   };
 
-  const confirmArea = async (direction: Direction) => {
+  const startManualSelection = (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || !slot.corners || assistedOperation.current) return;
-    assistedOperation.current = true;
-    const operationToken = crypto.randomUUID();
-    operationTokens.current[direction] = operationToken;
+    if (!slot.file || !slot.result) return;
+    const corners = slot.corners ?? defaultManualCorners(slot.result.source_width, slot.result.source_height);
+    const error = cornerGeometryError(corners, slot.result.source_width, slot.result.source_height);
     setSlots((current) => ({
       ...current,
-      [direction]: { ...current[direction], status: "confirming", error: null },
+      [direction]: {
+        ...current[direction],
+        corners,
+        initialCorners: current[direction].initialCorners ?? corners.map((point) => ({ ...point })),
+        status: error ? "needs_confirmation" : "four_points_ready",
+        error,
+      },
     }));
-    try {
-      const result = await analyzeFourViewFile(slot.file, "confirm_corners", slot.corners);
-      if (operationTokens.current[direction] !== operationToken) return;
-      setSlots((current) => ({
-        ...current,
-        [direction]: {
-          ...current[direction],
-          result,
-          status: "rectification_review",
-          error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
-        },
-      }));
-    } catch (reason) {
-      if (operationTokens.current[direction] !== operationToken) return;
-      setSlots((current) => ({
-        ...current,
-        [direction]: {
-          ...current[direction],
-          status: "needs_confirmation",
-          error: reason instanceof Error ? reason.message : "No se pudieron validar las esquinas.",
-        },
-      }));
-    } finally {
-      if (operationTokens.current[direction] === operationToken) {
-        delete operationTokens.current[direction];
-      }
-      assistedOperation.current = false;
-    }
   };
 
-  const analyzeConfirmedArea = async (direction: Direction) => {
+  const analyzeManualArea = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || !slot.corners || assistedOperation.current) return;
-    assistedOperation.current = true;
-    const operationToken = crypto.randomUUID();
-    operationTokens.current[direction] = operationToken;
-    setSlots((current) => ({
-      ...current,
-      [direction]: { ...current[direction], status: "analyzing", error: null },
-    }));
-    try {
-      const result = await analyzeFourViewFile(slot.file, "analyze_confirmed", slot.corners);
-      if (operationTokens.current[direction] !== operationToken) return;
-      await saveSingleResult(direction, result, slot.file, slot.requestKey, operationToken);
-    } catch (reason) {
-      if (operationTokens.current[direction] !== operationToken) return;
-      setSlots((current) => ({
-        ...current,
-        [direction]: {
-          ...current[direction],
-          status: "rectification_review",
-          error: reason instanceof Error ? reason.message : "No se pudo analizar el área confirmada.",
-        },
-      }));
-    } finally {
-      if (operationTokens.current[direction] === operationToken) {
-        delete operationTokens.current[direction];
-      }
-      assistedOperation.current = false;
-    }
+    if (!slot.file || !slot.corners || !["four_points_ready", "error"].includes(slot.status)) return;
+    const geometryError = cornerGeometryError(slot.corners, slot.result?.source_width ?? 0, slot.result?.source_height ?? 0);
+    if (geometryError || (slot.estimatedGeometry && !slot.provisionalAcknowledged)) return;
+    const mode = slot.estimatedGeometry ? "manual_assisted_provisional" : "manual_confirmed";
+    await runManualOperation({
+      gate: manualOperations.current,
+      key: direction,
+      onStart: (operationToken) => {
+        operationTokens.current[direction] = operationToken;
+        setSlots((current) => ({
+          ...current,
+          [direction]: { ...current[direction], status: "analyzing", error: null },
+        }));
+      },
+      request: () => analyzeFourViewFile(slot.file!, "analyze_confirmed", slot.corners!, mode),
+      onSuccess: async (result, operationToken) => {
+        if (result.status !== "provisional_ai" || !result.metrics) {
+          throw new Error(result.critical_errors.join(", ") || "El análisis no produjo métricas utilizables.");
+        }
+        await saveSingleResult(direction, result, slot.file!, slot.requestKey, operationToken);
+      },
+      onError: (error) => {
+        setSlots((current) => ({
+          ...current,
+          [direction]: {
+            ...current[direction],
+            status: "error",
+            error: error.message,
+          },
+        }));
+      },
+    });
   };
 
   const retryDetection = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || assistedOperation.current) return;
-    assistedOperation.current = true;
+    if (!slot.file || ["processing", "analyzing"].includes(slot.status)) return;
     const operationToken = crypto.randomUUID();
     operationTokens.current[direction] = operationToken;
     setSlots((current) => ({
@@ -520,14 +560,19 @@ export default function FourViewWorkflow() {
       const result = await analyzeFourViewFile(slot.file);
       if (operationTokens.current[direction] !== operationToken) return;
       if (result.status === "needs_confirmation") {
+        const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
+        const geometryError = cornerGeometryError(proposedCorners, result.source_width, result.source_height);
         setSlots((current) => ({
           ...current,
           [direction]: {
             ...current[direction],
             result,
-            status: "needs_confirmation",
-            corners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
-            initialCorners: result.corner_proposal?.map((point) => ({ ...point })) ?? null,
+            status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
+            error: geometryError,
+            corners: proposedCorners,
+            initialCorners: proposedCorners?.map((point) => ({ ...point })) ?? null,
+            estimatedGeometry: false,
+            provisionalAcknowledged: false,
           },
         }));
       } else {
@@ -547,12 +592,11 @@ export default function FourViewWorkflow() {
       if (operationTokens.current[direction] === operationToken) {
         delete operationTokens.current[direction];
       }
-      assistedOperation.current = false;
     }
   };
 
   const confirm = async () => {
-    if (!series || summary.validViews !== 4) return;
+    if (!series || summary.validViews !== 4 || summary.isProvisional) return;
     try {
       await confirmSeries(series.id);
       setSeries({ ...series, status: "confirmed", review_status: "confirmed", confirmed_at: new Date().toISOString() });
@@ -563,6 +607,7 @@ export default function FourViewWorkflow() {
   };
 
   const repeat = (direction: Direction) => {
+    manualOperations.current.invalidate(direction);
     setSlots((current) => ({ ...current, [direction]: EMPTY_SLOT() }));
   };
 
@@ -583,6 +628,8 @@ export default function FourViewWorkflow() {
           error: result?.critical_errors.join(", ") || null,
           corners: null,
           initialCorners: null,
+          estimatedGeometry: result?.frame_detection.classification === "manual_assisted_provisional",
+          provisionalAcknowledged: false,
         }];
       })) as Record<Direction, SlotState>);
       setSeries(row.series);
@@ -667,12 +714,22 @@ export default function FourViewWorkflow() {
         {DIRECTIONS.map((direction) => {
           const slot = slots[direction];
           const fileInputId = `four-view-file-${direction}`;
-          const awaitingArea = ["needs_confirmation", "confirming"].includes(slot.status);
-          const reviewingArea = ["rectification_review", "analyzing"].includes(slot.status);
+          const editingArea = Boolean(slot.file && slot.corners && [
+            "needs_confirmation",
+            "four_points_ready",
+            "analyzing",
+            "error",
+          ].includes(slot.status));
+          const geometryError = cornerGeometryError(
+            slot.corners,
+            slot.result?.source_width ?? 0,
+            slot.result?.source_height ?? 0,
+          );
+          const requiresProvisionalConfirmation = slot.estimatedGeometry && !slot.provisionalAcknowledged;
           return (
             <article
               key={direction}
-              className={`min-h-64 rounded-lg border p-4 ${awaitingArea || reviewingArea ? "xl:col-span-2" : ""}`}
+              className={`min-h-64 rounded-lg border p-4 ${editingArea ? "xl:col-span-2" : ""}`}
               style={{ background: "var(--ld-card)", borderColor: suggestion === direction ? "#D9BD67" : "var(--ld-border)" }}
             >
               <h2 className="text-xl font-bold">{DIRECTION_LABELS[direction]}</h2>
@@ -697,7 +754,7 @@ export default function FourViewWorkflow() {
               {slot.result ? (
                 <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 rounded bg-slate-50 p-3 text-xs">
                   <div><dt className="font-semibold">Método</dt><dd className="break-words">{slot.result.frame_detection.method}</dd></div>
-                  <div><dt className="font-semibold">Confianza</dt><dd>{Math.round(slot.result.frame_detection.confidence * 100)}%</dd></div>
+                  <div><dt className="font-semibold">Confianza automática previa</dt><dd>{Math.round(slot.result.frame_detection.confidence * 100)}%</dd></div>
                   <div><dt className="font-semibold">Marcadores</dt><dd>{slot.result.frame_detection.detected_marker_ids.join(", ") || "Ninguno"}</dd></div>
                   <div><dt className="font-semibold">Reproyección</dt><dd>{reprojectionLabel(slot.result.reprojection_error_px)}</dd></div>
                   <div className="col-span-2">
@@ -706,26 +763,82 @@ export default function FourViewWorkflow() {
                   </div>
                 </dl>
               ) : null}
-              {awaitingArea && slot.file && slot.corners ? (
+              {slot.file && slot.result && !slot.corners && ["needs_confirmation", "repeat", "error"].includes(slot.status) ? (
+                <button
+                  type="button"
+                  disabled={operationLocked}
+                  className="mt-4 w-full rounded border border-emerald-800 px-4 py-3 text-sm font-semibold text-emerald-900 disabled:opacity-50"
+                  onClick={() => startManualSelection(direction)}
+                >
+                  Seleccionar abertura manualmente
+                </button>
+              ) : null}
+              {editingArea && slot.file && slot.corners ? (
                 <div className="mt-4">
-                  <p className="font-medium text-amber-900">{detectionMessage(slot.result!.frame_detection)}</p>
-                  <p className="mt-1 text-sm">Encontramos el marco, pero necesitamos tu confirmación.</p>
-                  <p className="mt-1 text-sm">Mueve las cuatro esquinas hasta coincidir con la abertura de 10 × 50 cm.</p>
+                  {slot.result ? <p className="font-medium text-amber-900">{detectionMessage(slot.result.frame_detection)}</p> : null}
+                  <p className="mt-1 text-sm font-semibold">
+                    Coloca los puntos en las cuatro esquinas de la abertura interior de 10 × 50 cm, no sobre los marcadores ArUco.
+                  </p>
+                  <ol className="mt-2 grid grid-cols-2 gap-1 text-xs">
+                    {CORNER_LABELS.map((label, index) => <li key={label}>{index + 1}. {label}</li>)}
+                  </ol>
                   <CornerEditor
                     file={slot.file}
                     corners={slot.corners}
+                    disabled={operationLocked}
                     onChange={(corners) => {
                       if (!operationLocked) updateCorners(direction, corners);
                     }}
                   />
+                  {geometryError ? <p className="mt-2 text-sm text-red-700">{geometryError}</p> : null}
+                  <label className="mt-3 flex gap-2 rounded bg-amber-50 p-3 text-sm text-amber-950">
+                    <input
+                      type="checkbox"
+                      checked={slot.estimatedGeometry}
+                      disabled={operationLocked}
+                      onChange={(event) => setSlots((current) => ({
+                        ...current,
+                        [direction]: {
+                          ...current[direction],
+                          estimatedGeometry: event.target.checked,
+                          provisionalAcknowledged: false,
+                        },
+                      }))}
+                    />
+                    Una esquina o un borde no es visible y tuve que estimar su posición.
+                  </label>
+                  {slot.estimatedGeometry ? (
+                    <label className="mt-2 flex gap-2 rounded border border-amber-300 p-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={slot.provisionalAcknowledged}
+                        disabled={operationLocked}
+                        onChange={(event) => setSlots((current) => ({
+                          ...current,
+                          [direction]: {
+                            ...current[direction],
+                            provisionalAcknowledged: event.target.checked,
+                          },
+                        }))}
+                      />
+                      Confirmo que esta geometría es estimada, provisional y no equivale a una medición científica validada.
+                    </label>
+                  ) : null}
                   <div className="mt-4 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      disabled={operationLocked}
-                      className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
-                      onClick={() => void confirmArea(direction)}
+                      disabled={operationLocked || Boolean(geometryError) || requiresProvisionalConfirmation}
+                      className="inline-flex items-center gap-2 rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
+                      onClick={() => void analyzeManualArea(direction)}
                     >
-                      {slot.status === "confirming" ? "Validando área…" : "Confirmar área"}
+                      {slot.status === "analyzing" ? (
+                        <>
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          Rectificando y analizando…
+                        </>
+                      ) : slot.status === "error"
+                        ? "Corregir puntos y reintentar"
+                        : "Confirmar 4 puntos y analizar esta vista"}
                     </button>
                     <button
                       type="button"
@@ -735,50 +848,7 @@ export default function FourViewWorkflow() {
                         if (slot.initialCorners) updateCorners(direction, slot.initialCorners.map((point) => ({ ...point })));
                       }}
                     >
-                      Restaurar propuesta automática
-                    </button>
-                    <button
-                      type="button"
-                      disabled={operationLocked}
-                      className="rounded border px-3 py-2 text-sm disabled:opacity-50"
-                      onClick={() => void retryDetection(direction)}
-                    >
-                      Reintentar detección
-                    </button>
-                    <label htmlFor={fileInputId} className={`rounded border px-3 py-2 text-sm ${captureLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}>
-                      Reemplazar imagen
-                    </label>
-                  </div>
-                </div>
-              ) : null}
-              {reviewingArea && slot.result?.rectified_image_data_url ? (
-                <div className="mt-4">
-                  <p className="font-medium">Revisa la rectificación antes de continuar.</p>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={slot.result.rectified_image_data_url}
-                    alt={`Rectificación de la vista ${DIRECTION_LABELS[direction]}`}
-                    className="mx-auto mt-3 max-h-[36rem] rounded border object-contain"
-                  />
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={operationLocked || slot.result.critical_errors.length > 0}
-                      className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
-                      onClick={() => void analyzeConfirmedArea(direction)}
-                    >
-                      {slot.status === "analyzing" ? "Analizando área…" : "Continuar con esta área"}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={operationLocked}
-                      className="rounded border px-3 py-2 text-sm disabled:opacity-50"
-                      onClick={() => setSlots((current) => ({
-                        ...current,
-                        [direction]: { ...current[direction], status: "needs_confirmation" },
-                      }))}
-                    >
-                      Ajustar esquinas
+                      Restaurar puntos iniciales
                     </button>
                     <button
                       type="button"
@@ -815,14 +885,16 @@ export default function FourViewWorkflow() {
       {series ? (
         <section className="space-y-4 rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
           <div className="grid gap-3 md:grid-cols-5">
-            <div><strong className="text-2xl">{summary.coveragePercent?.toFixed(1) ?? "—"}%</strong><p className="text-xs">Cobertura liquénica total</p></div>
+            <div><strong className="text-2xl">{summary.coveragePercent?.toFixed(1) ?? "—"}%</strong><p className="text-xs">Cobertura liquénica {summary.isProvisional ? "provisional" : "total"}</p></div>
             <div><strong className="text-2xl">{summary.totalValidAreaCm2.toFixed(0)}</strong><p className="text-xs">Área analizada cm²</p></div>
             <div><strong className="text-2xl">{summary.totalLichenAreaCm2.toFixed(1)}</strong><p className="text-xs">Área estimada de liquen cm²</p></div>
             <div><strong className="text-2xl">{summary.morphotypeRichness}</strong><p className="text-xs">Morfotipos visuales provisionales</p></div>
             <div><strong className="text-2xl">{summary.occupiedCells}/20</strong><p className="text-xs">Celdas ocupadas</p></div>
           </div>
           <p className="rounded bg-amber-50 p-3 text-sm text-amber-900">
-            Cobertura liquénica estimada por IA · {series.review_status === "confirmed" ? "Confirmada" : "Pendiente de revisión"}.
+            Cobertura liquénica estimada por IA · {summary.isProvisional
+              ? `Total provisional: ${summary.provisionalViews} vista(s) usan geometría estimada y no son medición científica validada.`
+              : series.review_status === "confirmed" ? "Confirmada" : "Pendiente de revisión"}.
             Los grupos LQ son morfotipos provisionales, no especies.
           </p>
           <label className="block text-sm">Visualización
@@ -852,7 +924,9 @@ export default function FourViewWorkflow() {
             })}
           </div>
           <div className="flex flex-wrap gap-3">
-            <button type="button" disabled={operationLocked || summary.validViews !== 4 || series.status === "confirmed"} onClick={() => void confirm()} className="rounded bg-emerald-800 px-4 py-2 text-white disabled:opacity-50">Confirmar evaluación</button>
+            <button type="button" disabled={operationLocked || summary.validViews !== 4 || summary.isProvisional || series.status === "confirmed"} onClick={() => void confirm()} className="rounded bg-emerald-800 px-4 py-2 text-white disabled:opacity-50">
+              {summary.isProvisional ? "Evaluación provisional · no validable" : "Confirmar evaluación"}
+            </button>
             <Link href="/annotations" className="rounded border px-4 py-2">Corregir propuesta</Link>
           </div>
         </section>

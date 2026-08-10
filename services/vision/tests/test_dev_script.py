@@ -138,6 +138,45 @@ class DevScriptTests(unittest.TestCase):
         self.assertIn("Reusing the healthy Vision Service", result.stdout)
         self.assertIsNone(server.poll())
 
+    def test_waits_past_sixty_seconds_for_mobilesam(self) -> None:
+        environment = {
+            **os.environ,
+            "VISION_STARTUP_TIMEOUT": "180",
+            "VISION_STARTUP_GRACE": "1",
+            "SERVICE_WAIT_INTERVAL": "0",
+        }
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    f'source "{SCRIPT}"; '
+                    "checks=0; VISION_PID=$$; "
+                    "vision_service_is_healthy() { checks=$((checks + 1)); [ \"$checks\" -gt 60 ]; }; "
+                    "kill() { return 0; }; "
+                    "wait_for_vision; printf ' checks=%s\\n' \"$checks\""
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ready.", result.stdout)
+        self.assertIn("checks=61", result.stdout)
+
+    def test_rejects_startup_timeout_below_three_minutes(self) -> None:
+        result = subprocess.run(
+            ["bash", "-c", f'source "{SCRIPT}"'],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "VISION_STARTUP_TIMEOUT": "60"},
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("at least 180 seconds", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

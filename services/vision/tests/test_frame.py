@@ -123,8 +123,27 @@ class FrameTests(unittest.TestCase):
             detection,
         )
         self.assertEqual(result.canonical_rgb.shape, (CANONICAL_HEIGHT, CANONICAL_WIDTH, 3))
-        self.assertEqual(result.frame_detection["classification"], "manual_assisted")
+        self.assertEqual(result.frame_detection["classification"], "manual_confirmed")
+        self.assertIn("manual_geometry_confirmed", result.quality_flags)
         self.assertIsNone(result.reprojection_error_px)
+
+    def test_estimated_manual_geometry_is_explicitly_provisional(self) -> None:
+        image = synthetic_frame(missing_ids={0, 1, 2, 3})
+        corners = [
+            {"x": 0.22, "y": 0.08},
+            {"x": 0.78, "y": 0.08},
+            {"x": 0.78, "y": 0.92},
+            {"x": 0.22, "y": 0.92},
+        ]
+        result = confirmed_rectification(
+            image,
+            corners,
+            inspect_frame(image),
+            "manual_assisted_provisional",
+        )
+        self.assertEqual(result.frame_detection["classification"], "manual_assisted_provisional")
+        self.assertEqual(result.frame_detection["method"], "manual_estimated_corners")
+        self.assertIn("manual_estimated_geometry", result.quality_flags)
 
     def test_crossed_and_out_of_bounds_quadrilaterals_are_rejected(self) -> None:
         with self.assertRaisesRegex(FrameValidationError, "cruzado"):

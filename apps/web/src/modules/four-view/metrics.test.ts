@@ -89,3 +89,15 @@ test("rechaza una vista que excede el máximo físico de 500 cm²", () => {
   assert.equal(summary.coveragePercent, null);
   assert.equal(summary.validViews, 3);
 });
+
+test("identifica claramente un total con geometría manual provisional", () => {
+  const provisional = result(50);
+  provisional.frame_detection.classification = "manual_assisted_provisional";
+  provisional.quality_flags = ["manual_estimated_geometry"];
+  const summary = aggregateFourViewMetrics([result(50), result(50), result(50), provisional]);
+  assert.equal(summary.validViews, 4);
+  assert.equal(summary.validatedViews, 3);
+  assert.equal(summary.provisionalViews, 1);
+  assert.equal(summary.isProvisional, true);
+  assert.equal(summary.coveragePercent, 10);
+});

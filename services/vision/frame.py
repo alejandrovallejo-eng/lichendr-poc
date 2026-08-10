@@ -740,6 +740,7 @@ def confirmed_rectification(
     rgb: np.ndarray,
     normalized_corners: list[dict[str, float]],
     detection: FrameDetection | None = None,
+    manual_mode: str = "manual_confirmed",
 ) -> Rectification:
     height, width = rgb.shape[:2]
     if len(normalized_corners) != 4:
@@ -753,14 +754,15 @@ def confirmed_rectification(
     absolute = normalized * np.float32([width - 1, height - 1])
     absolute = validate_window_corners(absolute, width, height)
     current_detection = detection or inspect_frame(rgb)
-    matches_proposal = False
-    if current_detection.proposal is not None:
-        proposed_normalized = current_detection.proposal.corners / np.float32([width - 1, height - 1])
-        matches_proposal = float(np.mean(np.linalg.norm(normalized - proposed_normalized, axis=1))) <= 0.008
-    classification = "assisted" if current_detection.assisted_eligible and matches_proposal else "manual_assisted"
-    method = current_detection.method if classification == "assisted" else "manual_confirmed_corners"
-    confidence = min(0.92, max(current_detection.confidence, 0.72)) if classification == "assisted" else 0.6
-    reprojection_error = current_detection.reprojection_error_px if classification == "assisted" else None
+    if manual_mode not in {"manual_confirmed", "manual_assisted_provisional"}:
+        raise FrameValidationError("invalid_manual_mode", "El modo de confirmación manual no es válido.")
+    classification = manual_mode
+    method = (
+        "manual_confirmed_corners"
+        if manual_mode == "manual_confirmed"
+        else "manual_estimated_corners"
+    )
+    reprojection_error = None
     homography = cv2.getPerspectiveTransform(absolute.astype(np.float32), _CANONICAL_WINDOW)
     if not np.isfinite(homography).all() or abs(float(np.linalg.det(homography))) < 1e-10:
         raise FrameValidationError("invalid_homography", "La homografía confirmada no es válida.")
@@ -769,12 +771,15 @@ def confirmed_rectification(
         width,
         height,
         classification=classification,
-        confidence=confidence,
+        confidence=current_detection.confidence,
         method=method,
         reprojection_error=reprojection_error,
         user_confirmed=True,
     )
-    return _quality_rectification(rgb, homography, reprojection_error, payload)
+    flags = ["manual_geometry_confirmed"]
+    if manual_mode == "manual_assisted_provisional":
+        flags.append("manual_estimated_geometry")
+    return _quality_rectification(rgb, homography, reprojection_error, payload, flags)
 
 
 def critical_quality_flags(flags: list[str]) -> list[str]:

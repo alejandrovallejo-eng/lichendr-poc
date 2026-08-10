@@ -4,6 +4,7 @@ const VISION_SERVICE_URL = process.env.VISION_SERVICE_URL ?? "http://127.0.0.1:8
 const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPTED_MIMES = new Set(["image/jpeg", "image/png", "image/heic", "image/heif"]);
 const ACTIONS = new Set(["detect", "confirm_corners", "analyze_confirmed"]);
+const MANUAL_MODES = new Set(["manual_confirmed", "manual_assisted_provisional"]);
 
 export const dynamic = "force-dynamic";
 
@@ -34,10 +35,18 @@ export async function POST(request: NextRequest) {
   if (normalizedAction !== "detect" && !validCorners(corners)) {
     return Response.json({ error: "Las cuatro esquinas confirmadas no son válidas." }, { status: 400 });
   }
+  const manualMode = formData.get("manual_mode");
+  const normalizedManualMode = typeof manualMode === "string" && manualMode
+    ? manualMode
+    : "manual_confirmed";
+  if (normalizedAction !== "detect" && !MANUAL_MODES.has(normalizedManualMode)) {
+    return Response.json({ error: "El modo de confirmación manual no es válido." }, { status: 400 });
+  }
   const upstream = new FormData();
   upstream.append("image", image);
   upstream.append("action", normalizedAction);
   if (typeof corners === "string") upstream.append("corners", corners);
+  if (normalizedAction !== "detect") upstream.append("manual_mode", normalizedManualMode);
   try {
     const response = await fetch(`${VISION_SERVICE_URL}/analyze-view`, {
       method: "POST",

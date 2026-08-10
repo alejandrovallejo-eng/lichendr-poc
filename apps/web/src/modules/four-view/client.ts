@@ -13,6 +13,7 @@ import { IMAGE_STORAGE_BUCKET } from "@/modules/images/persistence";
 import type { Database } from "@/types/supabase";
 import { aggregateFourViewMetrics, dataUrlToBlob } from "./metrics";
 import type { CornerPoint, Direction, FrameClassification, VisionViewResult } from "./types";
+import type { ManualMeasurementMode } from "./manual-flow";
 
 export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.1";
 export const FOUR_VIEW_TEMPLATE_VERSION = "LICHENDR-FRAME-0.2";
@@ -75,11 +76,13 @@ export async function analyzeFourViewFile(
   file: File,
   action: "detect" | "confirm_corners" | "analyze_confirmed" = "detect",
   corners?: readonly CornerPoint[],
+  manualMode: ManualMeasurementMode = "manual_confirmed",
 ): Promise<VisionViewResult> {
   const formData = new FormData();
   formData.append("image", file);
   formData.append("action", action);
   if (corners) formData.append("corners", JSON.stringify(corners));
+  if (action !== "detect") formData.append("manual_mode", manualMode);
   const response = await fetch("/api/vision/analyze-view", { method: "POST", body: formData });
   const body: unknown = await response.json();
   if (!response.ok) {
@@ -96,12 +99,40 @@ function traceableSource(result: VisionViewResult): string {
   const detection = result.frame_detection;
   const markers = detection.detected_marker_ids.join(",");
   const variant = detection.successful_variant ?? "none";
-  return `${result.source};method=${detection.method};markers=${markers};variant=${variant}`;
+  const corners = result.corner_proposal
+    ?.map((point) => `${point.x.toFixed(7)},${point.y.toFixed(7)}`)
+    .join("|") ?? "none";
+  return `${result.source};method=${detection.method};markers=${markers};variant=${variant};size=${result.source_width}x${result.source_height};autoConfidence=${detection.confidence.toFixed(4)};corners=${corners}`;
 }
 
 function storedClassification(source: string): FrameClassification {
-  const classification = /mobile_sam_cielab:(validated|assisted|manual_assisted)/.exec(source)?.[1];
-  return classification === "assisted" || classification === "manual_assisted" ? classification : "validated";
+  const classification = /mobile_sam_cielab:(validated|assisted|manual_assisted|manual_confirmed|manual_assisted_provisional)/.exec(source)?.[1];
+  return classification === "assisted"
+    || classification === "manual_assisted"
+    || classification === "manual_confirmed"
+    || classification === "manual_assisted_provisional"
+    ? classification
+    : "validated";
+}
+
+function storedCorners(source: string): CornerPoint[] | null {
+  const encoded = /;corners=([^;]+)/.exec(source)?.[1];
+  if (!encoded || encoded === "none") return null;
+  const corners = encoded.split("|").map((point) => {
+    const [x, y] = point.split(",").map(Number);
+    return { x, y };
+  });
+  return corners.length === 4 && corners.every(({ x, y }) => (
+    Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1
+  )) ? corners : null;
+}
+
+function storedSourceSize(source: string): { width: number; height: number } {
+  const match = /;size=(\d+)x(\d+)/.exec(source);
+  return {
+    width: match ? Number(match[1]) : 0,
+    height: match ? Number(match[2]) : 0,
+  };
 }
 
 async function removeOriginal(imageId: string, storagePath: string): Promise<void> {
@@ -366,6 +397,7 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
       signedDerivedUrl(view.union_mask_storage_path),
     ]);
     const hasMetrics = view.valid_area_cm2 !== null && view.lichen_union_area_cm2 !== null && view.lichen_coverage_percent !== null;
+    const sourceSize = storedSourceSize(view.source);
     const result: VisionViewResult = {
       template_version: view.template_version,
       algorithm_version: view.algorithm_version,
@@ -400,12 +432,12 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
         proposal_source: null,
         assisted_eligible: false,
         user_confirmed: storedClassification(view.source) !== "validated",
-        source_width: 0,
-        source_height: 0,
+        source_width: sourceSize.width,
+        source_height: sourceSize.height,
       },
-      corner_proposal: null,
-      source_width: 0,
-      source_height: 0,
+      corner_proposal: storedCorners(view.source),
+      source_width: sourceSize.width,
+      source_height: sourceSize.height,
       metrics: hasMetrics ? {
         valid_area_cm2: view.valid_area_cm2 ?? 0,
         lichen_union_area_cm2: view.lichen_union_area_cm2 ?? 0,

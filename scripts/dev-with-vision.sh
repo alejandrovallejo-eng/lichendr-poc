@@ -10,6 +10,15 @@ WEB_DIR="${REPO_ROOT}/apps/web"
 VISION_HOST="127.0.0.1"
 VISION_PORT="${VISION_PORT:-8000}"
 NEXTJS_PORT="${NEXTJS_PORT:-3000}"
+VISION_STARTUP_TIMEOUT="${VISION_STARTUP_TIMEOUT:-180}"
+VISION_STARTUP_GRACE="${VISION_STARTUP_GRACE:-15}"
+NEXTJS_STARTUP_TIMEOUT="${NEXTJS_STARTUP_TIMEOUT:-60}"
+SERVICE_WAIT_INTERVAL="${SERVICE_WAIT_INTERVAL:-1}"
+
+if ! [[ "${VISION_STARTUP_TIMEOUT}" =~ ^[0-9]+$ ]] || [ "${VISION_STARTUP_TIMEOUT}" -lt 180 ]; then
+    echo "VISION_STARTUP_TIMEOUT must be an integer of at least 180 seconds." >&2
+    exit 2
+fi
 
 VISION_PID=""
 NEXTJS_PID=""
@@ -82,6 +91,12 @@ vision_service_is_healthy() {
         && [[ "${health}" =~ \"model\"[[:space:]]*:[[:space:]]*\"MobileSAM[[:space:]]vit_t\" ]]
 }
 
+frontend_service_is_healthy() {
+    local status
+    status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${NEXTJS_PORT}/" 2>/dev/null || true)"
+    [[ "${status}" =~ ^(2|3)[0-9][0-9]$ ]]
+}
+
 preflight_listeners() {
     local frontend_pids
     local vision_pids
@@ -93,6 +108,10 @@ preflight_listeners() {
                 return 1
             fi
         done <<< "${frontend_pids}"
+        if ! frontend_service_is_healthy; then
+            echo "ERROR: This repository's Next.js listener on port ${NEXTJS_PORT} is not healthy. It was not stopped." >&2
+            return 1
+        fi
         REUSE_NEXTJS=true
         echo "Reusing this repository's Next.js listener on port ${NEXTJS_PORT}."
     fi
@@ -145,8 +164,8 @@ cleanup() {
 
 wait_for_frontend() {
     echo -n "Waiting for Next.js …"
-    for i in $(seq 1 60); do
-        if listener_pids "${NEXTJS_PORT}" >/dev/null 2>&1; then
+    for i in $(seq 1 "${NEXTJS_STARTUP_TIMEOUT}"); do
+        if frontend_service_is_healthy; then
             echo " ready."
             return
         fi
@@ -154,18 +173,18 @@ wait_for_frontend() {
             echo " FAILED — Next.js exited before listening." >&2
             return 1
         fi
-        if [ "${i}" -eq 60 ]; then
-            echo " TIMEOUT — Next.js did not listen in 60 s." >&2
+        if [ "${i}" -eq "${NEXTJS_STARTUP_TIMEOUT}" ]; then
+            echo " TIMEOUT — Next.js was not healthy in ${NEXTJS_STARTUP_TIMEOUT} s." >&2
             return 1
         fi
         echo -n "."
-        sleep 1
+        sleep "${SERVICE_WAIT_INTERVAL}"
     done
 }
 
 wait_for_vision() {
     echo -n "Waiting for Vision Service …"
-    for i in $(seq 1 60); do
+    for i in $(seq 1 "${VISION_STARTUP_TIMEOUT}"); do
         if vision_service_is_healthy; then
             echo " ready."
             return
@@ -174,13 +193,27 @@ wait_for_vision() {
             echo " FAILED — Vision Service exited before becoming healthy." >&2
             return 1
         fi
-        if [ "${i}" -eq 60 ]; then
-            echo " TIMEOUT — Vision Service did not start in 60 s." >&2
+        echo -n "."
+        sleep "${SERVICE_WAIT_INTERVAL}"
+    done
+    echo ""
+    echo -n "Vision is still loading after ${VISION_STARTUP_TIMEOUT} s; allowing ${VISION_STARTUP_GRACE} s grace …"
+    for _ in $(seq 1 "${VISION_STARTUP_GRACE}"); do
+        if vision_service_is_healthy; then
+            echo " ready."
+            return
+        fi
+        if ! kill -0 "${VISION_PID}" 2>/dev/null; then
+            echo " FAILED — Vision Service exited during startup grace." >&2
             return 1
         fi
         echo -n "."
-        sleep 1
+        sleep "${SERVICE_WAIT_INTERVAL}"
     done
+    echo " TIMEOUT — Vision Service was not healthy after $((VISION_STARTUP_TIMEOUT + VISION_STARTUP_GRACE)) s." >&2
+    echo "PID ${VISION_PID}; listener(s): $(listener_pids "${VISION_PORT}" | paste -sd, - || echo none)" >&2
+    echo "Command: $(process_command "${VISION_PID}")" >&2
+    return 1
 }
 
 main() {
@@ -240,7 +273,9 @@ main() {
     echo "═══════════════════════════════════════════════════════"
     echo ""
 
-    if [ -n "${NEXTJS_PID}" ]; then
+    if [ -n "${NEXTJS_PID}" ] && [ -n "${VISION_PID}" ]; then
+        wait -n "${NEXTJS_PID}" "${VISION_PID}"
+    elif [ -n "${NEXTJS_PID}" ]; then
         wait "${NEXTJS_PID}"
     elif [ -n "${VISION_PID}" ]; then
         wait "${VISION_PID}"

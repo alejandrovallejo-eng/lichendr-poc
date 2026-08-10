@@ -35,6 +35,9 @@ test("explica la trazabilidad automática, asistida y manual", () => {
   assert.equal(classificationLabel("validated"), "Automático validado");
   assert.equal(classificationLabel("assisted"), "Automático asistido");
   assert.equal(classificationLabel("manual_assisted"), "Manual asistido");
+  assert.equal(classificationLabel("manual_confirmed"), "Manual confirmado · elegible para métricas validadas");
+  assert.equal(classificationLabel("manual_assisted_provisional"), "Manual provisional · geometría estimada");
+  assert.equal(classificationLabel(null), "Sin clasificación final");
   assert.equal(reprojectionLabel(null), "No disponible (confirmación manual)");
   assert.equal(reprojectionLabel(0.567), "0.57 px");
 });

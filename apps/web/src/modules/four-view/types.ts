@@ -8,7 +8,12 @@ export const DIRECTION_LABELS: Record<Direction, string> = {
   W: "Oeste",
 };
 
-export type FrameClassification = "validated" | "assisted" | "manual_assisted";
+export type FrameClassification =
+  | "validated"
+  | "assisted"
+  | "manual_assisted"
+  | "manual_confirmed"
+  | "manual_assisted_provisional";
 export type VisionViewStatus =
   | "needs_confirmation"
   | "rectification_review"
@@ -85,5 +90,8 @@ export interface TreeMetricSummary {
   occupiedCells: number;
   morphotypeRichness: number;
   validViews: number;
+  validatedViews: number;
+  provisionalViews: number;
+  isProvisional: boolean;
   pendingViews: number;
 }

@@ -106,7 +106,7 @@ class DevScriptTests(unittest.TestCase):
                     "import sys; from http.server import BaseHTTPRequestHandler, HTTPServer; "
                     "H=type('H',(BaseHTTPRequestHandler,),{"
                     "'do_GET':lambda self:(self.send_response(200),self.send_header('Content-Type','application/json'),"
-                    "self.end_headers(),self.wfile.write(b'{\"status\":\"ok\",\"model\":\"MobileSAM vit_t\"}')),"
+                    "self.end_headers(),self.wfile.write(b'{\"status\":\"ok\",\"model_loaded\":true,\"model\":\"MobileSAM vit_t\"}')),"
                     "'log_message':lambda *args:None}); "
                     "HTTPServer(('127.0.0.1',int(sys.argv[1])),H).serve_forever()"
                 ),

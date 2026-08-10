@@ -651,7 +651,13 @@ def _quality_rectification(
     source_window = cv2.perspectiveTransform(_CANONICAL_WINDOW.reshape(-1, 1, 2), inverse).reshape(4, 2)
     height, width = rgb.shape[:2]
     validate_window_corners(source_window, width, height, require_order=False)
-    if reprojection_error is not None and reprojection_error > MAX_VALIDATED_REPROJECTION_ERROR_PX:
+    classification = detection_payload.get("classification")
+    reprojection_limit = (
+        MAX_ASSISTED_REPROJECTION_ERROR_PX
+        if classification == "assisted"
+        else MAX_VALIDATED_REPROJECTION_ERROR_PX
+    )
+    if reprojection_error is not None and reprojection_error > reprojection_limit:
         flags.append("high_reprojection_error")
 
     canonical = cv2.warpPerspective(

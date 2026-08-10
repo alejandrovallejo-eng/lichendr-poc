@@ -65,6 +65,7 @@ vision_service_is_healthy() {
     local health
     health="$(curl -fsS --max-time 3 "http://${VISION_HOST}:${VISION_PORT}/health" 2>/dev/null || true)"
     [[ "${health}" =~ \"status\"[[:space:]]*:[[:space:]]*\"ok\" ]] \
+        && [[ "${health}" =~ \"model_loaded\"[[:space:]]*:[[:space:]]*true ]] \
         && [[ "${health}" =~ \"model\"[[:space:]]*:[[:space:]]*\"MobileSAM[[:space:]]vit_t\" ]]
 }
 

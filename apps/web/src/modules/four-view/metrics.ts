@@ -14,6 +14,10 @@ export function aggregateFourViewMetrics(results: readonly (VisionViewResult | n
   const totalValidAreaCm2 = valid.reduce((sum, result) => sum + result.metrics.valid_area_cm2, 0);
   const totalLichenAreaCm2 = valid.reduce((sum, result) => sum + result.metrics.lichen_union_area_cm2, 0);
   const morphotypes = new Set(valid.flatMap((result) => Object.keys(result.metrics.morphotype_coverage)));
+  const provisionalViews = valid.filter((result) => (
+    result.frame_detection.classification === "manual_assisted_provisional"
+    || result.quality_flags.includes("manual_estimated_geometry")
+  )).length;
   return {
     totalValidAreaCm2,
     totalLichenAreaCm2,
@@ -21,6 +25,9 @@ export function aggregateFourViewMetrics(results: readonly (VisionViewResult | n
     occupiedCells: valid.reduce((sum, result) => sum + result.metrics.occupied_cells, 0),
     morphotypeRichness: morphotypes.size,
     validViews: valid.length,
+    validatedViews: valid.length - provisionalViews,
+    provisionalViews,
+    isProvisional: provisionalViews > 0,
     pendingViews: 4 - valid.length,
   };
 }

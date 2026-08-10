@@ -53,10 +53,12 @@ Frees the session immediately.
 
 - `POST /template/validate`: validates JPEG/PNG/HEIC/HEIF signatures and the four expected `DICT_5X5_50` IDs.
 - `POST /rectify`: applies the physical frame homography and returns the exact 400 × 2000 inner window.
-- `POST /analyze-view`: rectifies, runs reproducible automatic MobileSAM prompts, filters/merges masks, performs provisional CIELAB grouping, and calculates union-based metrics.
+- `POST /analyze-view`: uses multipart `action=detect|confirm_corners|analyze_confirmed`. Every decodable image can enter manual selection, even with zero ArUco or no safe proposal. `analyze_confirmed` validates the ordered inner-opening corners, rectifies to 400 × 2000 px, and runs MobileSAM only after the explicit button action. `manual_mode=manual_confirmed|manual_assisted_provisional` records whether all corners were visible or any geometry was estimated.
 - `GET /processing/status`: reports readiness and confirms that inference is sequential.
 
-The automatic labels `LQ-001`, `LQ-002`, … are provisional visual morphotypes. They are not taxonomic identifications. A view with critical blur, exposure, resolution, marker, or homography errors returns `repeat_photo` without a silent coverage percentage.
+Every frame response reports detected/missing IDs, rejected candidates, successful pyramid level and variant, method, confidence, reprojection error and a specific rejection reason. The automatic labels `LQ-001`, `LQ-002`, … are provisional visual morphotypes. They are not taxonomic identifications. A view with critical blur, exposure, resolution or homography errors returns `repeat_photo` without a silent coverage percentage.
+
+`scripts/dev-with-vision.sh` waits at least 180 seconds for MobileSAM by default. Increase `VISION_STARTUP_TIMEOUT` when needed; values below 180 are rejected. A short configurable `VISION_STARTUP_GRACE` prevents a backend that finishes immediately after the main timeout from being terminated.
 
 ## Constraints
 

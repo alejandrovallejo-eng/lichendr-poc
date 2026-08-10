@@ -17,7 +17,27 @@ function result(area: number, morphotypes: Record<string, number> = { "LQ-001": 
     status: "provisional_ai",
     rectified_image_data_url: "data:image/jpeg;base64,AA==",
     model_name: "MobileSAM vit_t",
-    source: "mobile_sam_cielab",
+    source: "mobile_sam_cielab:validated",
+    frame_detection: {
+      classification: "validated",
+      method: "aruco_board_multiscale",
+      confidence: 0.99,
+      detected_marker_ids: [0, 1, 2, 3],
+      missing_marker_ids: [],
+      rejected_candidate_count: 0,
+      successful_resolution: { width: 720, height: 2320 },
+      successful_variant: "grayscale",
+      reprojection_error_px: 0,
+      rejection_reason: null,
+      proposal_source: null,
+      assisted_eligible: false,
+      user_confirmed: false,
+      source_width: 720,
+      source_height: 2320,
+    },
+    corner_proposal: null,
+    source_width: 720,
+    source_height: 2320,
     metrics: {
       valid_area_cm2: 500,
       lichen_union_area_cm2: area,
@@ -68,4 +88,16 @@ test("rechaza una vista que excede el máximo físico de 500 cm²", () => {
   assert.equal(summary.totalValidAreaCm2, 1500);
   assert.equal(summary.coveragePercent, null);
   assert.equal(summary.validViews, 3);
+});
+
+test("identifica claramente un total con geometría manual provisional", () => {
+  const provisional = result(50);
+  provisional.frame_detection.classification = "manual_assisted_provisional";
+  provisional.quality_flags = ["manual_estimated_geometry"];
+  const summary = aggregateFourViewMetrics([result(50), result(50), result(50), provisional]);
+  assert.equal(summary.validViews, 4);
+  assert.equal(summary.validatedViews, 3);
+  assert.equal(summary.provisionalViews, 1);
+  assert.equal(summary.isProvisional, true);
+  assert.equal(summary.coveragePercent, 10);
 });

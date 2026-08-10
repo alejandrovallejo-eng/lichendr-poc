@@ -61,9 +61,14 @@ def load_model(checkpoint_path: str) -> None:
         if _model_loaded:
             return
         logger.info("Loading MobileSAM vit_t from %s …", checkpoint_path)
-        _predictor = _load_mobilesam(checkpoint_path)
+        started = time.monotonic()
+        try:
+            _predictor = _load_mobilesam(checkpoint_path)
+        except Exception:
+            logger.exception("MobileSAM vit_t failed to load after %.1f s.", time.monotonic() - started)
+            raise
         _model_loaded = True
-        logger.info("MobileSAM vit_t loaded on CPU.")
+        logger.info("MobileSAM vit_t loaded on CPU in %.1f s.", time.monotonic() - started)
 
 
 def is_model_loaded() -> bool:

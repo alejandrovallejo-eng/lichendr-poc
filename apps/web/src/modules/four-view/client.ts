@@ -12,9 +12,11 @@ import {
 import { IMAGE_STORAGE_BUCKET } from "@/modules/images/persistence";
 import type { Database } from "@/types/supabase";
 import { aggregateFourViewMetrics, dataUrlToBlob } from "./metrics";
-import type { Direction, VisionViewResult } from "./types";
+import { hasProvisionalGeometry, storedFrameClassification } from "./assistance";
+import type { CornerPoint, Direction, VisionViewResult } from "./types";
+import type { ManualMeasurementMode } from "./manual-flow";
 
-export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.0";
+export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.2";
 export const FOUR_VIEW_TEMPLATE_VERSION = "LICHENDR-FRAME-0.2";
 
 export type CaptureSeriesRow = Database["public"]["Tables"]["capture_series"]["Row"];
@@ -71,9 +73,17 @@ export async function getOrCreateCaptureSeries(treeSampleId: string): Promise<Ca
   return data;
 }
 
-export async function analyzeFourViewFile(file: File): Promise<VisionViewResult> {
+export async function analyzeFourViewFile(
+  file: File,
+  action: "detect" | "confirm_corners" | "analyze_confirmed" = "detect",
+  corners?: readonly CornerPoint[],
+  manualMode: ManualMeasurementMode = "manual_confirmed",
+): Promise<VisionViewResult> {
   const formData = new FormData();
   formData.append("image", file);
+  formData.append("action", action);
+  if (corners) formData.append("corners", JSON.stringify(corners));
+  if (action !== "detect") formData.append("manual_mode", manualMode);
   const response = await fetch("/api/vision/analyze-view", { method: "POST", body: formData });
   const body: unknown = await response.json();
   if (!response.ok) {
@@ -84,6 +94,36 @@ export async function analyzeFourViewFile(file: File): Promise<VisionViewResult>
     throw new Error(message);
   }
   return body as VisionViewResult;
+}
+
+function traceableSource(result: VisionViewResult): string {
+  const detection = result.frame_detection;
+  const markers = detection.detected_marker_ids.join(",");
+  const variant = detection.successful_variant ?? "none";
+  const corners = result.corner_proposal
+    ?.map((point) => `${point.x.toFixed(7)},${point.y.toFixed(7)}`)
+    .join("|") ?? "none";
+  return `${result.source};method=${detection.method};markers=${markers};variant=${variant};size=${result.source_width}x${result.source_height};autoConfidence=${detection.confidence.toFixed(4)};corners=${corners}`;
+}
+
+function storedCorners(source: string): CornerPoint[] | null {
+  const encoded = /;corners=([^;]+)/.exec(source)?.[1];
+  if (!encoded || encoded === "none") return null;
+  const corners = encoded.split("|").map((point) => {
+    const [x, y] = point.split(",").map(Number);
+    return { x, y };
+  });
+  return corners.length === 4 && corners.every(({ x, y }) => (
+    Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1
+  )) ? corners : null;
+}
+
+function storedSourceSize(source: string): { width: number; height: number } {
+  const match = /;size=(\d+)x(\d+)/.exec(source);
+  return {
+    width: match ? Number(match[1]) : 0,
+    height: match ? Number(match[2]) : 0,
+  };
 }
 
 async function removeOriginal(imageId: string, storagePath: string): Promise<void> {
@@ -234,9 +274,11 @@ export async function saveProcessedView(input: {
       .from("capture_views")
       .update({
         processing_status: "repeat_photo",
+        source: traceableSource(input.result),
         reprojection_error_px: input.result.reprojection_error_px,
         quality_score: input.result.quality_score,
         quality_flags: input.result.quality_flags,
+        confidence: input.result.frame_detection.confidence,
         processed_at: new Date().toISOString(),
       })
       .eq("id", view.id)
@@ -252,6 +294,9 @@ export async function saveProcessedView(input: {
   const uploaded: string[] = [];
   let annotationSetId: string | null = null;
   try {
+    if (!input.result.rectified_image_data_url) {
+      throw new Error("La vista confirmada no contiene una rectificación.");
+    }
     await uploadDerived(rectifiedPath, dataUrlToBlob(input.result.rectified_image_data_url));
     uploaded.push(rectifiedPath);
     await uploadDerived(unionPath, dataUrlToBlob(input.result.metrics.lichen_union_mask_data_url));
@@ -266,6 +311,7 @@ export async function saveProcessedView(input: {
       .update({
         annotation_set_id: annotationSetId,
         processing_status: "provisional_ai",
+        source: traceableSource(input.result),
         rectified_storage_path: rectifiedPath,
         union_mask_storage_path: unionPath,
         valid_area_cm2: input.result.metrics.valid_area_cm2,
@@ -278,7 +324,7 @@ export async function saveProcessedView(input: {
         reprojection_error_px: input.result.reprojection_error_px,
         quality_score: input.result.quality_score,
         quality_flags: input.result.quality_flags,
-        confidence,
+        confidence: input.result.frame_detection.confidence ?? confidence,
         processed_at: new Date().toISOString(),
       })
       .eq("id", view.id)
@@ -321,6 +367,15 @@ export async function finalizeSeries(
 }
 
 export async function confirmSeries(seriesId: string): Promise<void> {
+  const { data: views, error: viewsError } = await supabase
+    .from("capture_views")
+    .select("source")
+    .eq("capture_series_id", seriesId)
+    .eq("active", true);
+  if (viewsError) throw viewsError;
+  if (hasProvisionalGeometry((views ?? []).map((view) => view.source))) {
+    throw new Error("La serie contiene geometría manual estimada y no puede confirmarse como medición científica validada.");
+  }
   const { error } = await supabase.rpc("confirm_capture_series", { p_series_id: seriesId });
   if (error) throw error;
 }
@@ -342,22 +397,47 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
       signedDerivedUrl(view.union_mask_storage_path),
     ]);
     const hasMetrics = view.valid_area_cm2 !== null && view.lichen_union_area_cm2 !== null && view.lichen_coverage_percent !== null;
+    const sourceSize = storedSourceSize(view.source);
     const result: VisionViewResult = {
       template_version: view.template_version,
       algorithm_version: view.algorithm_version,
       canonical_width: 400,
       canonical_height: 2000,
       pixels_per_cm: 40,
-      reprojection_error_px: view.reprojection_error_px ?? 0,
+      reprojection_error_px: view.reprojection_error_px,
       quality_flags: view.quality_flags.filter((flag): flag is string => typeof flag === "string"),
       quality_score: view.quality_score ?? 0,
       critical_errors: view.processing_status === "repeat_photo"
         ? view.quality_flags.filter((flag): flag is string => typeof flag === "string")
         : [],
       status: hasMetrics ? "provisional_ai" : "repeat_photo",
-      rectified_image_data_url: rectifiedUrl ?? "",
+      rectified_image_data_url: rectifiedUrl,
       model_name: view.model_name,
       source: view.source,
+      frame_detection: {
+        classification: storedFrameClassification(view.source),
+        method: /;method=([^;]+)/.exec(view.source)?.[1] ?? "stored_result",
+        confidence: view.confidence ?? 0,
+        detected_marker_ids: (/;markers=([^;]*)/.exec(view.source)?.[1] ?? "")
+          .split(",")
+          .filter(Boolean)
+          .map(Number)
+          .filter(Number.isInteger),
+        missing_marker_ids: [],
+        rejected_candidate_count: 0,
+        successful_resolution: null,
+        successful_variant: /;variant=([^;]+)/.exec(view.source)?.[1] ?? null,
+        reprojection_error_px: view.reprojection_error_px,
+        rejection_reason: null,
+        proposal_source: null,
+        assisted_eligible: false,
+        user_confirmed: storedFrameClassification(view.source) !== "validated",
+        source_width: sourceSize.width,
+        source_height: sourceSize.height,
+      },
+      corner_proposal: storedCorners(view.source),
+      source_width: sourceSize.width,
+      source_height: sourceSize.height,
       metrics: hasMetrics ? {
         valid_area_cm2: view.valid_area_cm2 ?? 0,
         lichen_union_area_cm2: view.lichen_union_area_cm2 ?? 0,
@@ -387,6 +467,7 @@ export interface EvaluatedTreeRow {
   site: string;
   event: string;
   tree: string;
+  provisional: boolean;
 }
 
 export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
@@ -397,7 +478,11 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
     .order("created_at", { ascending: false });
   if (error) throw error;
   if (!series?.length) return [];
-  const { data: samples } = await supabase.from("tree_samples").select("id, tree_id, site_id, sampling_event_id").in("id", series.map((item) => item.tree_sample_id));
+  const [{ data: samples }, { data: views, error: viewsError }] = await Promise.all([
+    supabase.from("tree_samples").select("id, tree_id, site_id, sampling_event_id").in("id", series.map((item) => item.tree_sample_id)),
+    supabase.from("capture_views").select("capture_series_id, source").in("capture_series_id", series.map((item) => item.id)).eq("active", true),
+  ]);
+  if (viewsError) throw viewsError;
   const { data: trees } = await supabase.from("trees").select("id, code").in("id", (samples ?? []).map((item) => item.tree_id));
   const { data: sites } = await supabase.from("sites").select("id, name, project_id").in("id", (samples ?? []).map((item) => item.site_id));
   const { data: events } = await supabase.from("sampling_events").select("id, name").in("id", (samples ?? []).map((item) => item.sampling_event_id));
@@ -407,6 +492,9 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
   const siteMap = new Map((sites ?? []).map((item) => [item.id, item]));
   const eventMap = new Map((events ?? []).map((item) => [item.id, item.name]));
   const projectMap = new Map((projects ?? []).map((item) => [item.id, item.name]));
+  const provisionalSeries = new Set((views ?? [])
+    .filter((view) => storedFrameClassification(view.source) === "manual_assisted_provisional")
+    .map((view) => view.capture_series_id));
   return series.flatMap((item) => {
     const sample = sampleMap.get(item.tree_sample_id);
     const site = sample ? siteMap.get(sample.site_id) : null;
@@ -421,6 +509,7 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
       site: site.name,
       event: eventMap.get(sample.sampling_event_id) ?? "Jornada",
       tree: treeMap.get(sample.tree_id) ?? "Árbol",
+      provisional: provisionalSeries.has(item.id),
     }];
   });
 }

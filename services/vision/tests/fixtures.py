@@ -7,7 +7,14 @@ import numpy as np
 from PIL import Image
 
 
-def synthetic_frame(*, perspective: bool = False, missing_id: int | None = None, wrong_id: int | None = None) -> np.ndarray:
+def synthetic_frame(
+    *,
+    perspective: bool = False,
+    missing_id: int | None = None,
+    missing_ids: set[int] | None = None,
+    wrong_id: int | None = None,
+    occluded_id: int | None = None,
+) -> np.ndarray:
     canvas = np.full((2320, 720, 3), 238, dtype=np.uint8)
     y_grid, x_grid = np.indices((2000, 400))
     texture = ((x_grid // 12 + y_grid // 12) % 2) * 32
@@ -20,11 +27,16 @@ def synthetic_frame(*, perspective: bool = False, missing_id: int | None = None,
     cv2.rectangle(canvas, (210, 1300), (470, 1650), (150, 162, 90), -1)
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
     centres = [(100, 100), (620, 100), (100, 2220), (620, 2220)]
+    omitted = set(missing_ids or ())
+    if missing_id is not None:
+        omitted.add(missing_id)
     for marker_id, (x, y) in enumerate(centres):
-        if marker_id == missing_id:
+        if marker_id in omitted:
             continue
         actual_id = wrong_id if marker_id == 3 and wrong_id is not None else marker_id
         marker = cv2.aruco.generateImageMarker(dictionary, actual_id, 80)
+        if marker_id == occluded_id:
+            marker[:, 30:50] = 255
         canvas[y - 40:y + 40, x - 40:x + 40] = cv2.cvtColor(marker, cv2.COLOR_GRAY2RGB)
     if not perspective:
         return canvas
@@ -38,4 +50,3 @@ def encode(rgb: np.ndarray, image_format: str = "PNG") -> bytes:
     output = io.BytesIO()
     Image.fromarray(rgb).save(output, format=image_format)
     return output.getvalue()
-

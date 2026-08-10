@@ -1,6 +1,7 @@
 """FastAPI application for MobileSAM vision service."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -19,9 +20,17 @@ from model import (
     segment_session,
 )
 from frame import (
+    ALGORITHM_VERSION,
+    CANONICAL_HEIGHT,
+    CANONICAL_WIDTH,
     FrameValidationError,
-    analyze_view,
+    TEMPLATE_VERSION,
+    analyze_rectification,
+    confirmed_rectification,
+    detection_payload,
     decode_image,
+    inspect_frame,
+    rectify_detected_frame,
     rectify_frame,
 )
 from schemas import (
@@ -152,6 +161,7 @@ async def validate_template(image: UploadFile = File(...)) -> dict:
         "templateVersion": "LICHENDR-FRAME-0.2",
         "reprojectionErrorPx": round(rectification.reprojection_error_px, 4),
         "qualityFlags": rectification.quality_flags,
+        "frameDetection": rectification.frame_detection,
     }
 
 
@@ -171,17 +181,110 @@ async def rectify(image: UploadFile = File(...)) -> dict:
         "reprojectionErrorPx": round(result.reprojection_error_px, 4),
         "qualityFlags": result.quality_flags,
         "rectifiedImageDataUrl": _encode_image(result.canonical_rgb, "JPEG"),
+        "frameDetection": result.frame_detection,
     }
 
 
 @app.post("/analyze-view")
-async def analyze_view_route(image: UploadFile = File(...)) -> dict:
+async def analyze_view_route(
+    image: UploadFile = File(...),
+    action: str = Form("detect"),
+    corners: str | None = Form(None),
+) -> dict:
     raw = await image.read()
     try:
-        rgb, _ = decode_image(raw, image.content_type or "")
-        rectification = rectify_frame(rgb)
+        rgb, metadata = decode_image(raw, image.content_type or "")
+        detection = inspect_frame(rgb)
+        if action == "detect":
+            if not detection.missing_ids and detection.rejection_reason is None:
+                rectification = rectify_detected_frame(rgb, detection)
+                masks = automatic_segment_image(rectification.canonical_rgb)
+                return analyze_rectification(rectification, metadata, masks)
+            if detection.proposal is None:
+                detail = detection_payload(detection, rgb.shape[1], rgb.shape[0])
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": detection.rejection_reason or "frame_not_found",
+                        "message": "No pudimos localizar una abertura segura. Reemplaza la imagen o reintenta la detección.",
+                        "frame_detection": detail,
+                    },
+                )
+            normalized = detection.proposal.corners / [rgb.shape[1] - 1, rgb.shape[0] - 1]
+            return {
+                "template_version": TEMPLATE_VERSION,
+                "algorithm_version": ALGORITHM_VERSION,
+                "canonical_width": CANONICAL_WIDTH,
+                "canonical_height": CANONICAL_HEIGHT,
+                "pixels_per_cm": 40,
+                "reprojection_error_px": (
+                    round(detection.reprojection_error_px, 4)
+                    if detection.reprojection_error_px is not None else None
+                ),
+                "quality_flags": ["frame_confirmation_required"],
+                "quality_score": round(detection.confidence, 3),
+                "critical_errors": [],
+                "status": "needs_confirmation",
+                "rectified_image_data_url": None,
+                "preserved_metadata": metadata,
+                "model_name": MODEL_NAME,
+                "source": detection.method,
+                "metrics": None,
+                "frame_detection": detection_payload(detection, rgb.shape[1], rgb.shape[0]),
+                "corner_proposal": [
+                    {"x": round(float(point[0]), 7), "y": round(float(point[1]), 7)}
+                    for point in normalized
+                ],
+                "source_width": rgb.shape[1],
+                "source_height": rgb.shape[0],
+            }
+        if action not in {"confirm_corners", "analyze_confirmed"}:
+            raise FrameValidationError("invalid_action", "La acción solicitada no es válida.")
+        submitted_corners = _parse_corners(corners)
+        rectification = confirmed_rectification(rgb, submitted_corners, detection)
+        if action == "confirm_corners":
+            from frame import _encode_image
+            critical = sorted(set(rectification.quality_flags) & {
+                "blur",
+                "overexposure",
+                "underexposure",
+                "insufficient_resolution",
+                "high_reprojection_error",
+            })
+            return {
+                "template_version": TEMPLATE_VERSION,
+                "algorithm_version": ALGORITHM_VERSION,
+                "canonical_width": CANONICAL_WIDTH,
+                "canonical_height": CANONICAL_HEIGHT,
+                "pixels_per_cm": 40,
+                "reprojection_error_px": (
+                    round(rectification.reprojection_error_px, 4)
+                    if rectification.reprojection_error_px is not None else None
+                ),
+                "quality_flags": sorted(set(rectification.quality_flags)),
+                "quality_score": round(rectification.quality_score, 3),
+                "critical_errors": critical,
+                "status": "rectification_review",
+                "rectified_image_data_url": _encode_image(rectification.canonical_rgb, "JPEG"),
+                "preserved_metadata": metadata,
+                "model_name": MODEL_NAME,
+                "source": f"mobile_sam_cielab:{rectification.frame_detection['classification']}",
+                "metrics": None,
+                "frame_detection": rectification.frame_detection,
+                "corner_proposal": submitted_corners,
+                "source_width": rgb.shape[1],
+                "source_height": rgb.shape[0],
+            }
+        if any(flag in {
+            "blur",
+            "overexposure",
+            "underexposure",
+            "insufficient_resolution",
+            "high_reprojection_error",
+        } for flag in rectification.quality_flags):
+            return analyze_rectification(rectification, metadata, [])
         masks = automatic_segment_image(rectification.canonical_rgb)
-        return analyze_view(raw, image.content_type or "", masks)
+        return analyze_rectification(rectification, metadata, masks)
     except FrameValidationError as exc:
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
     except RuntimeError as exc:
@@ -218,3 +321,20 @@ def _validate_image_magic(raw: bytes, mime: str) -> None:
         return
     if not any(raw.startswith(sig) for sig in signatures):
         raise HTTPException(status_code=422, detail="Image content does not match declared MIME type.")
+
+
+def _parse_corners(raw: str | None) -> list[dict[str, float]]:
+    if raw is None or len(raw) > 2048:
+        raise FrameValidationError("invalid_corners", "Faltan las cuatro esquinas confirmadas.")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FrameValidationError("invalid_corners", "Las esquinas confirmadas no contienen JSON válido.") from exc
+    if not isinstance(value, list) or len(value) != 4:
+        raise FrameValidationError("invalid_corners", "Debes confirmar exactamente cuatro esquinas.")
+    result: list[dict[str, float]] = []
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("x"), (int, float)) or not isinstance(item.get("y"), (int, float)):
+            raise FrameValidationError("invalid_corners", "Las coordenadas de las esquinas no son válidas.")
+        result.append({"x": float(item["x"]), "y": float(item["y"])})
+    return result

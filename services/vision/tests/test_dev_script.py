@@ -177,6 +177,34 @@ class DevScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("at least 180 seconds", result.stderr)
 
+    def test_accepts_vision_becoming_healthy_at_grace_deadline(self) -> None:
+        environment = {
+            **os.environ,
+            "VISION_STARTUP_TIMEOUT": "180",
+            "VISION_STARTUP_GRACE": "15",
+            "SERVICE_WAIT_INTERVAL": "0",
+        }
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    f'source "{SCRIPT}"; '
+                    "checks=0; VISION_PID=$$; "
+                    "vision_service_is_healthy() { checks=$((checks + 1)); [ \"$checks\" -ge 196 ]; }; "
+                    "kill() { return 0; }; "
+                    "wait_for_vision; printf ' checks=%s\\n' \"$checks\""
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ready.", result.stdout)
+        self.assertIn("checks=196", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

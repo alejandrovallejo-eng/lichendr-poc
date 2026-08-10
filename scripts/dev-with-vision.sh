@@ -210,6 +210,14 @@ wait_for_vision() {
         echo -n "."
         sleep "${SERVICE_WAIT_INTERVAL}"
     done
+    if vision_service_is_healthy; then
+        echo " ready."
+        return
+    fi
+    if ! kill -0 "${VISION_PID}" 2>/dev/null; then
+        echo " FAILED — Vision Service exited at the startup deadline." >&2
+        return 1
+    fi
     echo " TIMEOUT — Vision Service was not healthy after $((VISION_STARTUP_TIMEOUT + VISION_STARTUP_GRACE)) s." >&2
     echo "PID ${VISION_PID}; listener(s): $(listener_pids "${VISION_PORT}" | paste -sd, - || echo none)" >&2
     echo "Command: $(process_command "${VISION_PID}")" >&2

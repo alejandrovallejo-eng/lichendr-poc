@@ -467,13 +467,17 @@ export default function FourViewWorkflow() {
         error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
       } : current[direction],
     }));
-    const storedResults = await loadSeriesResults(activeSeries.id);
-    const updatedSeries = await finalizeSeries(
-      activeSeries.id,
-      DIRECTIONS.map((item) => storedResults[item] ?? null),
-    );
-    setSeries(updatedSeries);
-    setEvaluated(await listEvaluatedTrees());
+    try {
+      const storedResults = await loadSeriesResults(activeSeries.id);
+      const updatedSeries = await finalizeSeries(
+        activeSeries.id,
+        DIRECTIONS.map((item) => storedResults[item] ?? null),
+      );
+      setSeries(updatedSeries);
+      setEvaluated(await listEvaluatedTrees());
+    } catch {
+      setGlobalError("La vista quedó analizada y guardada, pero no se pudo actualizar el resumen. Recarga para reintentar la sincronización.");
+    }
   };
 
   const updateCorners = (direction: Direction, corners: CornerPoint[]) => {

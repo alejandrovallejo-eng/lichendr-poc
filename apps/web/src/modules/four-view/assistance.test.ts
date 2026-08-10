@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classificationLabel, detectionMessage, reprojectionLabel } from "./assistance";
+import {
+  classificationLabel,
+  detectionMessage,
+  hasProvisionalGeometry,
+  reprojectionLabel,
+  storedFrameClassification,
+} from "./assistance";
 import type { FrameDetectionDetails } from "./types";
 
 function detection(overrides: Partial<FrameDetectionDetails> = {}): FrameDetectionDetails {
@@ -29,6 +35,13 @@ test("describe marcadores detectados y faltantes por posición", () => {
     detectionMessage(detection()),
     "Detectamos 2 de 4 marcadores: faltan superior izquierdo y superior derecho.",
   );
+});
+
+test("conserva la clasificación provisional completa al recargar", () => {
+  const source = "mobile_sam_cielab:manual_assisted_provisional;method=manual_estimated_corners";
+  assert.equal(storedFrameClassification(source), "manual_assisted_provisional");
+  assert.equal(hasProvisionalGeometry([source]), true);
+  assert.equal(hasProvisionalGeometry(["mobile_sam_cielab:manual_confirmed;method=manual_confirmed_corners"]), false);
 });
 
 test("explica la trazabilidad automática, asistida y manual", () => {

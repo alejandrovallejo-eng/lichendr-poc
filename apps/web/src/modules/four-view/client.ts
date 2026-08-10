@@ -12,7 +12,8 @@ import {
 import { IMAGE_STORAGE_BUCKET } from "@/modules/images/persistence";
 import type { Database } from "@/types/supabase";
 import { aggregateFourViewMetrics, dataUrlToBlob } from "./metrics";
-import type { CornerPoint, Direction, FrameClassification, VisionViewResult } from "./types";
+import { hasProvisionalGeometry, storedFrameClassification } from "./assistance";
+import type { CornerPoint, Direction, VisionViewResult } from "./types";
 import type { ManualMeasurementMode } from "./manual-flow";
 
 export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.2";
@@ -103,16 +104,6 @@ function traceableSource(result: VisionViewResult): string {
     ?.map((point) => `${point.x.toFixed(7)},${point.y.toFixed(7)}`)
     .join("|") ?? "none";
   return `${result.source};method=${detection.method};markers=${markers};variant=${variant};size=${result.source_width}x${result.source_height};autoConfidence=${detection.confidence.toFixed(4)};corners=${corners}`;
-}
-
-function storedClassification(source: string): FrameClassification {
-  const classification = /mobile_sam_cielab:(validated|assisted|manual_assisted|manual_confirmed|manual_assisted_provisional)/.exec(source)?.[1];
-  return classification === "assisted"
-    || classification === "manual_assisted"
-    || classification === "manual_confirmed"
-    || classification === "manual_assisted_provisional"
-    ? classification
-    : "validated";
 }
 
 function storedCorners(source: string): CornerPoint[] | null {
@@ -376,6 +367,15 @@ export async function finalizeSeries(
 }
 
 export async function confirmSeries(seriesId: string): Promise<void> {
+  const { data: views, error: viewsError } = await supabase
+    .from("capture_views")
+    .select("source")
+    .eq("capture_series_id", seriesId)
+    .eq("active", true);
+  if (viewsError) throw viewsError;
+  if (hasProvisionalGeometry((views ?? []).map((view) => view.source))) {
+    throw new Error("La serie contiene geometría manual estimada y no puede confirmarse como medición científica validada.");
+  }
   const { error } = await supabase.rpc("confirm_capture_series", { p_series_id: seriesId });
   if (error) throw error;
 }
@@ -415,7 +415,7 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
       model_name: view.model_name,
       source: view.source,
       frame_detection: {
-        classification: storedClassification(view.source),
+        classification: storedFrameClassification(view.source),
         method: /;method=([^;]+)/.exec(view.source)?.[1] ?? "stored_result",
         confidence: view.confidence ?? 0,
         detected_marker_ids: (/;markers=([^;]*)/.exec(view.source)?.[1] ?? "")
@@ -431,7 +431,7 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
         rejection_reason: null,
         proposal_source: null,
         assisted_eligible: false,
-        user_confirmed: storedClassification(view.source) !== "validated",
+        user_confirmed: storedFrameClassification(view.source) !== "validated",
         source_width: sourceSize.width,
         source_height: sourceSize.height,
       },
@@ -493,7 +493,7 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
   const eventMap = new Map((events ?? []).map((item) => [item.id, item.name]));
   const projectMap = new Map((projects ?? []).map((item) => [item.id, item.name]));
   const provisionalSeries = new Set((views ?? [])
-    .filter((view) => storedClassification(view.source) === "manual_assisted_provisional")
+    .filter((view) => storedFrameClassification(view.source) === "manual_assisted_provisional")
     .map((view) => view.capture_series_id));
   return series.flatMap((item) => {
     const sample = sampleMap.get(item.tree_sample_id);

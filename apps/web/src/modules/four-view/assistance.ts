@@ -32,3 +32,17 @@ export function classificationLabel(classification: FrameClassification | null):
 export function reprojectionLabel(error: number | null): string {
   return error === null ? "No disponible (confirmación manual)" : `${error.toFixed(2)} px`;
 }
+
+export function storedFrameClassification(source: string): FrameClassification {
+  const classification = /mobile_sam_cielab:(manual_assisted_provisional|manual_confirmed|manual_assisted|assisted|validated)(?:;|$)/.exec(source)?.[1];
+  return classification === "assisted"
+    || classification === "manual_assisted"
+    || classification === "manual_confirmed"
+    || classification === "manual_assisted_provisional"
+    ? classification
+    : "validated";
+}
+
+export function hasProvisionalGeometry(sources: readonly string[]): boolean {
+  return sources.some((source) => storedFrameClassification(source) === "manual_assisted_provisional");
+}

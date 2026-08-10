@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from model import (
-    automatic_segment_image,
     delete_session,
     is_model_loaded,
     load_model,
@@ -199,8 +198,7 @@ async def analyze_view_route(
         if action == "detect":
             if not detection.missing_ids and detection.rejection_reason is None:
                 rectification = rectify_detected_frame(rgb, detection)
-                masks = automatic_segment_image(rectification.canonical_rgb)
-                return analyze_rectification(rectification, metadata, masks)
+                return analyze_rectification(rectification, metadata, source_rgb=rgb)
             if detection.proposal is None:
                 normalized = None
             else:
@@ -237,6 +235,7 @@ async def analyze_view_route(
                 ),
                 "source_width": rgb.shape[1],
                 "source_height": rgb.shape[0],
+                "trunk_estimate": None,
             }
         if action not in {"confirm_corners", "analyze_confirmed"}:
             raise FrameValidationError("invalid_action", "La acción solicitada no es válida.")
@@ -274,6 +273,7 @@ async def analyze_view_route(
                 "corner_proposal": submitted_corners,
                 "source_width": rgb.shape[1],
                 "source_height": rgb.shape[0],
+                "trunk_estimate": None,
             }
         if any(flag in {
             "blur",
@@ -282,11 +282,10 @@ async def analyze_view_route(
             "insufficient_resolution",
             "high_reprojection_error",
         } for flag in rectification.quality_flags):
-            result = analyze_rectification(rectification, metadata, [])
+            result = analyze_rectification(rectification, metadata, source_rgb=rgb)
             result["corner_proposal"] = submitted_corners
             return result
-        masks = automatic_segment_image(rectification.canonical_rgb)
-        result = analyze_rectification(rectification, metadata, masks)
+        result = analyze_rectification(rectification, metadata, source_rgb=rgb)
         result["corner_proposal"] = submitted_corners
         return result
     except FrameValidationError as exc:

@@ -386,29 +386,44 @@ export type Database = {
       capture_series: {
         Row: {
           id: string; tree_sample_id: string; request_key: string; template_version: string; algorithm_version: string;
-          status: "capturing" | "processing" | "needs_retake" | "provisional_ai" | "confirmed";
+          status: "capture_draft" | "capture_calibrated" | "annotation_pending" | "annotation_in_progress" | "annotation_completed" | "analysis_ready" | "completed";
           review_status: "pending" | "confirmed" | "correction_requested";
           total_valid_area_cm2: number | null; total_lichen_area_cm2: number | null; tree_lichen_coverage_percent: number | null;
           occupied_cells: number | null; provisional_morphotype_richness: number | null;
           valid_view_count: number; pending_view_count: number; calculated_at: string | null; confirmed_at: string | null;
+          field_circumference_cm: number | null; field_diameter_cm: number | null; field_measurement_height_m: number | null;
+          trunk_estimated_width_cm: number | null; trunk_estimated_circumference_cm: number | null;
+          trunk_estimate_min_cm: number | null; trunk_estimate_max_cm: number | null; trunk_confidence: "low" | "medium" | "high" | null;
+          trunk_views_used: string[]; trunk_geometric_assumption: string | null; trunk_measurement_method: "field_tape" | "frame_assisted_ai_estimate" | null;
+          trunk_algorithm_version: string | null; trunk_quality_flags: unknown[];
           created_at: string; updated_at: string;
         };
         Insert: {
           id?: string; tree_sample_id: string; request_key?: string; template_version?: string; algorithm_version: string;
-          status?: "capturing" | "processing" | "needs_retake" | "provisional_ai" | "confirmed";
+          status?: "capture_draft" | "capture_calibrated" | "annotation_pending" | "annotation_in_progress" | "annotation_completed" | "analysis_ready" | "completed";
           review_status?: "pending" | "confirmed" | "correction_requested";
           total_valid_area_cm2?: number | null; total_lichen_area_cm2?: number | null; tree_lichen_coverage_percent?: number | null;
           occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
           valid_view_count?: number; pending_view_count?: number; calculated_at?: string | null; confirmed_at?: string | null;
+          field_circumference_cm?: number | null; field_diameter_cm?: number | null; field_measurement_height_m?: number | null;
+          trunk_estimated_width_cm?: number | null; trunk_estimated_circumference_cm?: number | null;
+          trunk_estimate_min_cm?: number | null; trunk_estimate_max_cm?: number | null; trunk_confidence?: "low" | "medium" | "high" | null;
+          trunk_views_used?: string[]; trunk_geometric_assumption?: string | null; trunk_measurement_method?: "field_tape" | "frame_assisted_ai_estimate" | null;
+          trunk_algorithm_version?: string | null; trunk_quality_flags?: unknown[];
           created_at?: string; updated_at?: string;
         };
         Update: {
           tree_sample_id?: string; request_key?: string; template_version?: string; algorithm_version?: string;
-          status?: "capturing" | "processing" | "needs_retake" | "provisional_ai" | "confirmed";
+          status?: "capture_draft" | "capture_calibrated" | "annotation_pending" | "annotation_in_progress" | "annotation_completed" | "analysis_ready" | "completed";
           review_status?: "pending" | "confirmed" | "correction_requested";
           total_valid_area_cm2?: number | null; total_lichen_area_cm2?: number | null; tree_lichen_coverage_percent?: number | null;
           occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
           valid_view_count?: number; pending_view_count?: number; calculated_at?: string | null; confirmed_at?: string | null;
+          field_circumference_cm?: number | null; field_diameter_cm?: number | null; field_measurement_height_m?: number | null;
+          trunk_estimated_width_cm?: number | null; trunk_estimated_circumference_cm?: number | null;
+          trunk_estimate_min_cm?: number | null; trunk_estimate_max_cm?: number | null; trunk_confidence?: "low" | "medium" | "high" | null;
+          trunk_views_used?: string[]; trunk_geometric_assumption?: string | null; trunk_measurement_method?: "field_tape" | "frame_assisted_ai_estimate" | null;
+          trunk_algorithm_version?: string | null; trunk_quality_flags?: unknown[];
           updated_at?: string;
         };
         Relationships: [{
@@ -420,34 +435,52 @@ export type Database = {
         Row: {
           id: string; capture_series_id: string; image_id: string; annotation_set_id: string | null; request_key: string;
           direction: "N" | "E" | "S" | "W"; active: boolean; replaces_view_id: string | null;
-          processing_status: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          processing_status: "uploaded" | "processing" | "repeat_photo" | "calibrated" | "annotation_pending" | "annotation_in_progress" | "annotation_completed" | "failed";
           template_version: string; algorithm_version: string; source: string; model_name: string; model_version: string | null;
           rectified_storage_path: string | null; union_mask_storage_path: string | null;
           valid_area_cm2: number | null; lichen_union_area_cm2: number | null; lichen_coverage_percent: number | null;
           component_count: number | null; occupied_cells: number | null; provisional_morphotype_richness: number | null;
           morphotype_coverage: Record<string, number>; reprojection_error_px: number | null; quality_score: number | null;
           quality_flags: unknown[]; confidence: number | null; processed_at: string | null; created_at: string; updated_at: string;
+          rectified_width_px: number | null; rectified_height_px: number | null; valid_pixel_count: number | null;
+          cm2_per_pixel: number | null; pixels_per_cm: number | null; calibration_method: "automatic" | "manual_confirmed" | "manual_provisional" | "legacy_four_view" | null;
+          confirmed_corners: unknown[] | null; excluded_area_cm2: number | null;
+          trunk_width_cm: number | null; trunk_width_min_cm: number | null; trunk_width_max_cm: number | null;
+          trunk_left_x_normalized: number | null; trunk_right_x_normalized: number | null; trunk_scale_cm_per_pixel: number | null;
+          trunk_estimation_method: "automatic" | "manual_corrected" | null; trunk_confidence: "low" | "medium" | "high" | null; trunk_quality_flags: unknown[];
         };
         Insert: {
           id?: string; capture_series_id: string; image_id: string; annotation_set_id?: string | null; request_key?: string;
           direction: "N" | "E" | "S" | "W"; active?: boolean; replaces_view_id?: string | null;
-          processing_status?: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          processing_status?: "uploaded" | "processing" | "repeat_photo" | "calibrated" | "annotation_pending" | "annotation_in_progress" | "annotation_completed" | "failed";
           template_version?: string; algorithm_version: string; source?: string; model_name?: string; model_version?: string | null;
           rectified_storage_path?: string | null; union_mask_storage_path?: string | null;
           valid_area_cm2?: number | null; lichen_union_area_cm2?: number | null; lichen_coverage_percent?: number | null;
           component_count?: number | null; occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
           morphotype_coverage?: Record<string, number>; reprojection_error_px?: number | null; quality_score?: number | null;
           quality_flags?: unknown[]; confidence?: number | null; processed_at?: string | null; created_at?: string; updated_at?: string;
+          rectified_width_px?: number | null; rectified_height_px?: number | null; valid_pixel_count?: number | null;
+          cm2_per_pixel?: number | null; pixels_per_cm?: number | null; calibration_method?: "automatic" | "manual_confirmed" | "manual_provisional" | "legacy_four_view" | null;
+          confirmed_corners?: unknown[] | null; excluded_area_cm2?: number | null;
+          trunk_width_cm?: number | null; trunk_width_min_cm?: number | null; trunk_width_max_cm?: number | null;
+          trunk_left_x_normalized?: number | null; trunk_right_x_normalized?: number | null; trunk_scale_cm_per_pixel?: number | null;
+          trunk_estimation_method?: "automatic" | "manual_corrected" | null; trunk_confidence?: "low" | "medium" | "high" | null; trunk_quality_flags?: unknown[];
         };
         Update: {
           annotation_set_id?: string | null; active?: boolean;
-          processing_status?: "uploaded" | "processing" | "repeat_photo" | "provisional_ai" | "confirmed" | "failed";
+          processing_status?: "uploaded" | "processing" | "repeat_photo" | "calibrated" | "annotation_pending" | "annotation_in_progress" | "annotation_completed" | "failed";
           source?: string; model_name?: string; model_version?: string | null;
           rectified_storage_path?: string | null; union_mask_storage_path?: string | null;
           valid_area_cm2?: number | null; lichen_union_area_cm2?: number | null; lichen_coverage_percent?: number | null;
           component_count?: number | null; occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
           morphotype_coverage?: Record<string, number>; reprojection_error_px?: number | null; quality_score?: number | null;
           quality_flags?: unknown[]; confidence?: number | null; processed_at?: string | null; updated_at?: string;
+          rectified_width_px?: number | null; rectified_height_px?: number | null; valid_pixel_count?: number | null;
+          cm2_per_pixel?: number | null; pixels_per_cm?: number | null; calibration_method?: "automatic" | "manual_confirmed" | "manual_provisional" | "legacy_four_view" | null;
+          confirmed_corners?: unknown[] | null; excluded_area_cm2?: number | null;
+          trunk_width_cm?: number | null; trunk_width_min_cm?: number | null; trunk_width_max_cm?: number | null;
+          trunk_left_x_normalized?: number | null; trunk_right_x_normalized?: number | null; trunk_scale_cm_per_pixel?: number | null;
+          trunk_estimation_method?: "automatic" | "manual_corrected" | null; trunk_confidence?: "low" | "medium" | "high" | null; trunk_quality_flags?: unknown[];
         };
         Relationships: [
           { foreignKeyName: "capture_views_capture_series_id_fkey"; columns: ["capture_series_id"]; referencedRelation: "capture_series"; referencedColumns: ["id"]; },
@@ -472,6 +505,10 @@ export type Database = {
           completed_at: string | null;
           created_at: string;
           updated_at: string;
+          capture_view_id: string | null;
+          target_storage_path: string | null;
+          target_width_px: number | null;
+          target_height_px: number | null;
         };
         Insert: {
           image_id: string;
@@ -488,6 +525,10 @@ export type Database = {
           completed_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          capture_view_id?: string | null;
+          target_storage_path?: string | null;
+          target_width_px?: number | null;
+          target_height_px?: number | null;
         };
         Update: {
           image_id?: string;
@@ -504,6 +545,10 @@ export type Database = {
           completed_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          capture_view_id?: string | null;
+          target_storage_path?: string | null;
+          target_width_px?: number | null;
+          target_height_px?: number | null;
         };
         Relationships: [
           {
@@ -609,7 +654,7 @@ export type Database = {
         Row: {
           id: string;
           annotation_set_id: string;
-          classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+          classification: "lichen" | "bark" | "moss" | "algae" | "paint" | "damage" | "shadow" | "glare" | "unknown";
           morphotype_id: string | null;
           source: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
           model_name: string;
@@ -637,7 +682,7 @@ export type Database = {
         Insert: {
           id?: string;
           annotation_set_id: string;
-          classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+          classification: "lichen" | "bark" | "moss" | "algae" | "paint" | "damage" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;
           source?: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
           model_name: string;
@@ -664,7 +709,7 @@ export type Database = {
         };
         Update: {
           annotation_set_id?: string;
-          classification?: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+          classification?: "lichen" | "bark" | "moss" | "algae" | "paint" | "damage" | "shadow" | "glare" | "unknown";
           morphotype_id?: string | null;
           source?: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
           model_name?: string;
@@ -942,6 +987,10 @@ export type Database = {
         Returns: Database["public"]["Tables"]["capture_views"]["Row"];
       };
       confirm_capture_series: {
+        Args: { p_series_id: string };
+        Returns: Database["public"]["Tables"]["capture_series"]["Row"];
+      };
+      refresh_capture_series_metrics: {
         Args: { p_series_id: string };
         Returns: Database["public"]["Tables"]["capture_series"]["Row"];
       };

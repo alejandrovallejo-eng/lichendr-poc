@@ -4,7 +4,7 @@ import { ensureAnonymousSession } from "@/modules/auth/client";
 import { supabase } from "@/lib/supabase/client";
 import type { Database } from "@/types/supabase";
 
-export const ANNOTATION_REGION_CLASSES = ["lichen", "bark", "moss", "algae", "shadow", "glare", "unknown"] as const;
+export const ANNOTATION_REGION_CLASSES = ["lichen", "bark", "moss", "algae", "paint", "damage", "shadow", "glare", "unknown"] as const;
 export const SIGNED_URL_TTL_SECONDS = 10 * 60;
 const MASK_BUCKET = "lichen-images";
 const MAX_MASK_BYTES = 10 * 1024 * 1024;
@@ -90,15 +90,19 @@ async function ensureSession(): Promise<void> {
   if (result.error || !result.session) throw new Error(result.error ?? "No se pudo validar la sesión.");
 }
 
-async function assertDraftAnnotationSet(annotationSetId: string): Promise<void> {
+async function assertDraftAnnotationSet(annotationSetId: string): Promise<{
+  target_width_px: number | null;
+  target_height_px: number | null;
+}> {
   const { data, error } = await supabase
     .from("annotation_sets")
-    .select("id")
+    .select("id, target_width_px, target_height_px")
     .eq("id", annotationSetId)
     .eq("status", "draft")
     .is("completed_at", null)
     .maybeSingle();
   if (error || !data) throw new Error("Reabre la evaluación antes de modificar sus regiones.");
+  return data;
 }
 
 async function assertPngMask(mask: Blob): Promise<void> {
@@ -218,7 +222,14 @@ export async function saveAcceptedRegion(input: RegionSaveInput): Promise<Annota
   assertNormalizedPoints(input.negativePoints);
   await assertPngMask(input.mask);
   await ensureSession();
-  await assertDraftAnnotationSet(annotationSetId);
+  const target = await assertDraftAnnotationSet(annotationSetId);
+  if (
+    target.target_width_px !== null
+    && target.target_height_px !== null
+    && (input.width !== target.target_width_px || input.height !== target.target_height_px)
+  ) {
+    throw new Error("La máscara no coincide con las dimensiones de la vista rectificada.");
+  }
   const { data: userData, error: userError } = await supabase.auth.getUser();
   const user = userData.user;
   if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");
@@ -287,7 +298,14 @@ export async function replaceAcceptedTrunkRegion(
   assertNormalizedPoints(input.negativePoints);
   await assertPngMask(input.mask);
   await ensureSession();
-  await assertDraftAnnotationSet(input.annotationSetId);
+  const target = await assertDraftAnnotationSet(input.annotationSetId);
+  if (
+    target.target_width_px !== null
+    && target.target_height_px !== null
+    && (input.width !== target.target_width_px || input.height !== target.target_height_px)
+  ) {
+    throw new Error("La máscara no coincide con las dimensiones de la vista rectificada.");
+  }
   const { data: userData, error: userError } = await supabase.auth.getUser();
   const user = userData.user;
   if (userError || !user?.id) throw new Error("No se pudo validar el usuario.");

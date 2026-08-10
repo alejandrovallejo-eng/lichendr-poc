@@ -40,9 +40,17 @@ alter table public.annotation_sets
   add column if not exists target_width_px integer,
   add column if not exists target_height_px integer;
 
+alter table public.annotation_regions drop constraint if exists annotation_regions_classification_allowed;
+alter table public.annotation_regions add constraint annotation_regions_classification_allowed check (
+  classification in ('lichen', 'bark', 'moss', 'algae', 'paint', 'damage', 'shadow', 'glare', 'unknown')
+);
+
 create unique index if not exists idx_annotation_sets_capture_view
   on public.annotation_sets(capture_view_id)
   where capture_view_id is not null;
+
+alter table public.capture_series drop constraint if exists capture_series_status_allowed;
+alter table public.capture_views drop constraint if exists capture_views_processing_status_allowed;
 
 update public.capture_views
 set rectified_width_px = coalesce(rectified_width_px, 400),
@@ -80,6 +88,7 @@ set processing_status = case
 end;
 
 alter table public.capture_series drop constraint if exists capture_series_status_allowed;
+alter table public.capture_series alter column status set default 'capture_draft';
 alter table public.capture_series add constraint capture_series_status_allowed check (
   status in (
     'capture_draft',
@@ -297,7 +306,7 @@ declare
 begin
   update public.capture_views view
   set processing_status = case
-        when annotation.status = 'completed' then 'annotation_completed'
+        when annotation.status = 'completed' and metrics.annotation_set_id is not null then 'annotation_completed'
         else 'annotation_in_progress'
       end,
       lichen_union_area_cm2 = case
@@ -320,7 +329,7 @@ begin
       component_count = case when annotation.status = 'completed' then metrics.lichen_region_count else null end,
       provisional_morphotype_richness = case when annotation.status = 'completed' then metrics.morphotype_count else null end,
       quality_flags = case
-        when annotation.status = 'completed' then view.quality_flags || metrics.quality_flags
+        when annotation.status = 'completed' then view.quality_flags || coalesce(metrics.quality_flags, '[]'::jsonb)
         else view.quality_flags
       end
   from public.annotation_sets annotation

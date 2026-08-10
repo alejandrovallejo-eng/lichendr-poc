@@ -38,6 +38,7 @@ function result(area: number, morphotypes: Record<string, number> = { "LQ-001": 
     corner_proposal: null,
     source_width: 720,
     source_height: 2320,
+    trunk_estimate: null,
     metrics: {
       valid_area_cm2: 500,
       lichen_union_area_cm2: area,

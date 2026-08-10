@@ -2,7 +2,7 @@ import { ensureAnonymousSession } from "@/modules/auth/client";
 import { supabase } from "@/lib/supabase/client";
 import type { Database } from "@/types/supabase";
 
-const VALID_REGION_CLASSIFICATIONS = ["lichen", "bark", "moss", "algae", "shadow", "glare", "unknown"] as const;
+const VALID_REGION_CLASSIFICATIONS = ["lichen", "bark", "moss", "algae", "paint", "damage", "shadow", "glare", "unknown"] as const;
 
 export type AnnotationSetRow = Database["public"]["Tables"]["annotation_sets"]["Row"];
 export type MorphotypeRow = Database["public"]["Tables"]["morphotypes"]["Row"];
@@ -12,7 +12,7 @@ export type AnnotationMetricsRow = Database["public"]["Tables"]["annotation_metr
 export type AnnotationSetStatus = "draft" | "completed";
 export type AnnotationMethod = "systematic_point_count" | "manual_free_points" | "ai_assisted_segmentation";
 export type MorphotypeGrowthForm = "crustose" | "foliose" | "fruticose" | "squamulose" | "unknown";
-export type AnnotationPointClassification = "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
+export type AnnotationPointClassification = "lichen" | "bark" | "moss" | "algae" | "paint" | "damage" | "shadow" | "glare" | "unknown";
 export type AnnotationPointConfidenceLevel = "low" | "medium" | "high";
 
 export interface AccessibleImageRecord {
@@ -162,7 +162,11 @@ export async function listAnnotationImages(): Promise<AnnotationImageListItem[]>
 
   const imageIds = images.map((image) => image.id);
   const treeSampleIds = [...new Set(images.map((image) => image.tree_sample_id))];
-  const [{ data: annotationSets, error: annotationSetsError }, { data: treeSamples, error: treeSamplesError }] = await Promise.all([
+  const [
+    { data: annotationSets, error: annotationSetsError },
+    { data: treeSamples, error: treeSamplesError },
+    { data: captureViews, error: captureViewsError },
+  ] = await Promise.all([
     supabase
       .from("annotation_sets")
       .select("id, image_id, status, completed_at")
@@ -172,9 +176,15 @@ export async function listAnnotationImages(): Promise<AnnotationImageListItem[]>
       .from("tree_samples")
       .select("id, tree_id, sampling_event_id, site_id")
       .in("id", treeSampleIds),
+    supabase
+      .from("capture_views")
+      .select("image_id, rectified_storage_path, direction")
+      .in("image_id", imageIds)
+      .eq("active", true),
   ]);
   if (annotationSetsError) throw annotationSetsError;
   if (treeSamplesError) throw treeSamplesError;
+  if (captureViewsError) throw captureViewsError;
 
   const samples = treeSamples ?? [];
   const treeIds = [...new Set(samples.map((sample) => sample.tree_id))];
@@ -232,6 +242,7 @@ export async function listAnnotationImages(): Promise<AnnotationImageListItem[]>
   const projectById = new Map((projects ?? []).map((project) => [project.id, project]));
   const morphotypeById = new Map((morphotypesResult.data ?? []).map((morphotype) => [morphotype.id, morphotype]));
   const metricsBySetId = new Map((metricsResult.data ?? []).map((metrics) => [metrics.annotation_set_id, metrics]));
+  const captureViewByImageId = new Map((captureViews ?? []).map((view) => [view.image_id, view]));
 
   return images.flatMap((image) => {
     const sample = sampleById.get(image.tree_sample_id);
@@ -255,8 +266,13 @@ export async function listAnnotationImages(): Promise<AnnotationImageListItem[]>
     }))];
     const isCompleted = annotationSet?.status === "completed" && Boolean(annotationSet.completed_at);
 
+    const captureView = captureViewByImageId.get(image.id);
     return [{
       ...image,
+      storage_path: captureView?.rectified_storage_path ?? image.storage_path,
+      original_filename: captureView
+        ? `Vista ${captureView.direction} · abertura rectificada 10 × 50 cm`
+        : image.original_filename,
       annotationSetId: annotationSet?.id ?? null,
       annotationStatus: isCompleted ? "completed" : annotationSet ? "draft" : "not_started",
       completedAt: isCompleted ? annotationSet.completed_at : null,

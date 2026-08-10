@@ -10,10 +10,13 @@ import {
   type ImageUploadContext,
 } from "@/modules/images/client";
 import { IMAGE_STORAGE_BUCKET } from "@/modules/images/persistence";
+import { maskToPngBlob } from "@/modules/annotations/studio-browser-utils";
+import { saveAcceptedRegion } from "@/modules/annotations/regions";
 import type { Database } from "@/types/supabase";
-import { aggregateFourViewMetrics, dataUrlToBlob } from "./metrics";
+import { dataUrlToBlob } from "./metrics";
+import { fieldTapeDiameter, summarizeCalibration } from "./science";
 import { hasProvisionalGeometry, storedFrameClassification } from "./assistance";
-import type { CornerPoint, Direction, VisionViewResult } from "./types";
+import type { CombinedTrunkEstimate, CornerPoint, Direction, TrunkViewEstimate, VisionViewResult } from "./types";
 import type { ManualMeasurementMode } from "./manual-flow";
 
 export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.2";
@@ -141,90 +144,6 @@ async function uploadDerived(path: string, blob: Blob): Promise<void> {
   if (error) throw error;
 }
 
-async function persistAutomaticAnnotations(
-  view: CaptureViewRow,
-  result: VisionViewResult,
-  maskPath: string,
-): Promise<string> {
-  const metrics = result.metrics;
-  if (!metrics) throw new Error("La vista no contiene métricas.");
-  const { data: annotationSet, error: setError } = await supabase
-    .from("annotation_sets")
-    .insert({
-      image_id: view.image_id,
-      method: "ai_assisted_segmentation",
-      status: "provisional_ai",
-      version: 1,
-      grid_rows: 5,
-      grid_columns: 2,
-      notes: "Propuesta automática provisional; MobileSAM no identifica especies.",
-    })
-    .select("id")
-    .single();
-  if (setError || !annotationSet) throw setError ?? new Error("No se pudo crear la anotación provisional.");
-  try {
-    const morphotypeCodes = Object.keys(metrics.morphotype_coverage);
-    if (morphotypeCodes.length) {
-      const { error } = await supabase.from("morphotypes").insert(morphotypeCodes.map((label) => ({
-        annotation_set_id: annotationSet.id,
-        label,
-        growth_form: "unknown",
-        notes: "Morfotipo visual provisional; no equivale a una especie.",
-      })));
-      if (error) throw error;
-    }
-    const unionPixels = Math.round(metrics.lichen_union_area_cm2 / 500 * 800_000);
-    if (unionPixels > 0) {
-      const confidenceValues = metrics.candidates
-        .filter((candidate) => candidate.classification === "possible_lichen")
-        .map((candidate) => candidate.confidence);
-      const confidence = confidenceValues.length
-        ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
-        : null;
-      const { error } = await supabase.from("annotation_regions").insert({
-        annotation_set_id: annotationSet.id,
-        classification: "lichen",
-        source: "automatic_four_view",
-        model_name: result.model_name,
-        model_version: null,
-        confidence,
-        algorithm_version: result.algorithm_version,
-        template_version: result.template_version,
-        quality_flags: result.quality_flags,
-        mask_bucket: IMAGE_STORAGE_BUCKET,
-        mask_path: maskPath,
-        mask_width_px: 400,
-        mask_height_px: 2000,
-        area_pixels: unionPixels,
-        score: confidence,
-        status: "accepted",
-        notes: "Unión automática provisional de posibles líquenes.",
-      });
-      if (error) throw error;
-    }
-    const { error: metricError } = await supabase.from("annotation_metrics").insert({
-      annotation_set_id: annotationSet.id,
-      trunk_area_pixels: 800_000,
-      lichen_union_area_pixels: unionPixels,
-      lichen_outside_trunk_pixels: 0,
-      overlapping_lichen_pixels: 0,
-      coverage_percent: metrics.lichen_coverage_percent,
-      accepted_region_count: unionPixels > 0 ? 1 : 0,
-      lichen_region_count: unionPixels > 0 ? 1 : 0,
-      morphotype_count: unionPixels > 0 ? morphotypeCodes.length : 0,
-      calculation_method: "rectified_mask_union",
-      calculation_version: result.algorithm_version,
-      quality_flags: result.quality_flags,
-      calculated_at: new Date().toISOString(),
-    });
-    if (metricError) throw metricError;
-    return annotationSet.id;
-  } catch (error) {
-    await supabase.from("annotation_sets").delete().eq("id", annotationSet.id);
-    throw error;
-  }
-}
-
 export async function saveProcessedView(input: {
   file: File;
   direction: Direction;
@@ -267,9 +186,9 @@ export async function saveProcessedView(input: {
     await removeOriginal(image.id, image.storage_path);
     throw error;
   }
-  if (view.processing_status === "provisional_ai" || view.processing_status === "confirmed") return view;
+  if (["calibrated", "annotation_pending", "annotation_in_progress", "annotation_completed"].includes(view.processing_status)) return view;
 
-  if (!input.result.metrics) {
+  if (!input.result.rectified_image_data_url || input.result.critical_errors.length > 0) {
     const { data, error } = await supabase
       .from("capture_views")
       .update({
@@ -290,48 +209,106 @@ export async function saveProcessedView(input: {
 
   const root = `${uploadContext.userId}/four-view/${input.series.id}/${view.id}`;
   const rectifiedPath = `${root}/rectified.jpg`;
-  const unionPath = `${root}/lichen-union.png`;
   const uploaded: string[] = [];
   let annotationSetId: string | null = null;
   try {
-    if (!input.result.rectified_image_data_url) {
-      throw new Error("La vista confirmada no contiene una rectificación.");
-    }
     await uploadDerived(rectifiedPath, dataUrlToBlob(input.result.rectified_image_data_url));
     uploaded.push(rectifiedPath);
-    await uploadDerived(unionPath, dataUrlToBlob(input.result.metrics.lichen_union_mask_data_url));
-    uploaded.push(unionPath);
-    annotationSetId = await persistAutomaticAnnotations(view, input.result, unionPath);
-    const confidenceValues = input.result.metrics.candidates.map((candidate) => candidate.confidence);
-    const confidence = confidenceValues.length
-      ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
-      : null;
+    const calibrationMethod = input.result.frame_detection.classification === "manual_assisted_provisional"
+      ? "manual_provisional"
+      : input.result.frame_detection.user_confirmed ? "manual_confirmed" : "automatic";
+    const trunk = input.result.trunk_estimate;
     const { data, error } = await supabase
       .from("capture_views")
       .update({
-        annotation_set_id: annotationSetId,
-        processing_status: "provisional_ai",
+        processing_status: "calibrated",
         source: traceableSource(input.result),
         rectified_storage_path: rectifiedPath,
-        union_mask_storage_path: unionPath,
-        valid_area_cm2: input.result.metrics.valid_area_cm2,
-        lichen_union_area_cm2: input.result.metrics.lichen_union_area_cm2,
-        lichen_coverage_percent: input.result.metrics.lichen_coverage_percent,
-        component_count: input.result.metrics.component_count,
-        occupied_cells: input.result.metrics.occupied_cells,
-        provisional_morphotype_richness: input.result.metrics.provisional_morphotype_richness,
-        morphotype_coverage: input.result.metrics.morphotype_coverage,
+        union_mask_storage_path: null,
+        rectified_width_px: input.result.canonical_width,
+        rectified_height_px: input.result.canonical_height,
+        valid_pixel_count: input.result.canonical_width * input.result.canonical_height,
+        cm2_per_pixel: 500 / (input.result.canonical_width * input.result.canonical_height),
+        pixels_per_cm: input.result.pixels_per_cm,
+        calibration_method: calibrationMethod,
+        confirmed_corners: input.result.corner_proposal,
+        valid_area_cm2: 500,
+        lichen_union_area_cm2: null,
+        lichen_coverage_percent: null,
+        component_count: null,
+        occupied_cells: null,
+        provisional_morphotype_richness: null,
+        morphotype_coverage: {},
         reprojection_error_px: input.result.reprojection_error_px,
         quality_score: input.result.quality_score,
         quality_flags: input.result.quality_flags,
-        confidence: input.result.frame_detection.confidence ?? confidence,
+        confidence: input.result.frame_detection.confidence,
+        trunk_width_cm: trunk?.width_cm ?? null,
+        trunk_width_min_cm: trunk?.min_cm ?? null,
+        trunk_width_max_cm: trunk?.max_cm ?? null,
+        trunk_left_x_normalized: trunk?.left_x_normalized ?? null,
+        trunk_right_x_normalized: trunk?.right_x_normalized ?? null,
+        trunk_scale_cm_per_pixel: trunk?.scale_cm_per_pixel ?? null,
+        trunk_estimation_method: trunk?.method ?? null,
+        trunk_confidence: trunk?.confidence ?? null,
+        trunk_quality_flags: trunk?.quality_flags ?? [],
         processed_at: new Date().toISOString(),
       })
       .eq("id", view.id)
       .select("*")
       .single();
-    if (error || !data) throw error ?? new Error("No se pudieron guardar las métricas.");
-    return data;
+    if (error || !data) throw error ?? new Error("No se pudo guardar la calibración.");
+    const { data: annotationSet, error: annotationError } = await supabase
+      .from("annotation_sets")
+      .insert({
+        image_id: view.image_id,
+        capture_view_id: view.id,
+        target_storage_path: rectifiedPath,
+        target_width_px: input.result.canonical_width,
+        target_height_px: input.result.canonical_height,
+        method: "ai_assisted_segmentation",
+        status: "draft",
+        version: 1,
+        grid_rows: 5,
+        grid_columns: 2,
+        roi_x: 0,
+        roi_y: 0,
+        roi_width: 1,
+        roi_height: 1,
+        notes: "Anotación de la abertura rectificada; los morfotipos visuales no equivalen a especies.",
+      })
+      .select("id")
+      .single();
+    if (annotationError || !annotationSet) throw annotationError ?? new Error("No se pudo crear el target de anotación.");
+    annotationSetId = annotationSet.id;
+    const validMask = new Uint8Array(input.result.canonical_width * input.result.canonical_height);
+    validMask.fill(1);
+    await saveAcceptedRegion({
+      id: crypto.randomUUID(),
+      annotationSetId,
+      classification: "bark",
+      morphotypeId: null,
+      mask: await maskToPngBlob(validMask, input.result.canonical_width, input.result.canonical_height),
+      width: input.result.canonical_width,
+      height: input.result.canonical_height,
+      areaPixels: validMask.length,
+      score: 1,
+      positivePoints: [],
+      negativePoints: [],
+      modelName: "LICHENDR physical frame opening",
+      modelVersion: input.result.template_version,
+      notes: "Área válida completa de la abertura rectificada de 10 × 50 cm.",
+      source: "manual",
+      regionRole: "trunk",
+    });
+    const { data: linked, error: linkError } = await supabase
+      .from("capture_views")
+      .update({ annotation_set_id: annotationSetId, processing_status: "annotation_pending" })
+      .eq("id", view.id)
+      .select("*")
+      .single();
+    if (linkError || !linked) throw linkError ?? new Error("No se pudo vincular la anotación.");
+    return linked;
   } catch (error) {
     if (annotationSetId) await supabase.from("annotation_sets").delete().eq("id", annotationSetId);
     if (uploaded.length) await supabase.storage.from(IMAGE_STORAGE_BUCKET).remove(uploaded);
@@ -344,26 +321,135 @@ export async function finalizeSeries(
   seriesId: string,
   results: readonly (VisionViewResult | null)[],
 ): Promise<CaptureSeriesRow> {
-  const summary = aggregateFourViewMetrics(results);
+  const summary = summarizeCalibration(results);
   const { data, error } = await supabase
     .from("capture_series")
     .update({
-      status: summary.validViews === 4 ? "provisional_ai" : "needs_retake",
+      status: summary.calibrated ? "capture_calibrated" : "capture_draft",
       review_status: "pending",
-      total_valid_area_cm2: summary.totalValidAreaCm2,
-      total_lichen_area_cm2: summary.totalLichenAreaCm2,
-      tree_lichen_coverage_percent: summary.coveragePercent,
-      occupied_cells: summary.occupiedCells,
-      provisional_morphotype_richness: summary.morphotypeRichness,
+      total_valid_area_cm2: summary.totalCalibratedAreaCm2,
+      total_lichen_area_cm2: null,
+      tree_lichen_coverage_percent: null,
+      occupied_cells: null,
+      provisional_morphotype_richness: null,
       valid_view_count: summary.validViews,
       pending_view_count: summary.pendingViews,
-      calculated_at: new Date().toISOString(),
+      calculated_at: null,
     })
     .eq("id", seriesId)
     .select("*")
     .single();
   if (error || !data) throw error ?? new Error("No se pudo guardar el resumen del árbol.");
   return data;
+}
+
+export async function saveTrunkMeasurement(
+  seriesId: string,
+  fieldCircumferenceCm: number | null,
+  estimate: CombinedTrunkEstimate | null,
+  viewEstimates: Partial<Record<Direction, TrunkViewEstimate | null>>,
+): Promise<CaptureSeriesRow> {
+  await Promise.all(Object.entries(viewEstimates).map(async ([direction, viewEstimate]) => {
+    if (!viewEstimate) return;
+    const { error } = await supabase
+      .from("capture_views")
+      .update({
+        trunk_width_cm: viewEstimate.width_cm,
+        trunk_width_min_cm: viewEstimate.min_cm,
+        trunk_width_max_cm: viewEstimate.max_cm,
+        trunk_left_x_normalized: viewEstimate.left_x_normalized,
+        trunk_right_x_normalized: viewEstimate.right_x_normalized,
+        trunk_scale_cm_per_pixel: viewEstimate.scale_cm_per_pixel,
+        trunk_estimation_method: viewEstimate.method,
+        trunk_confidence: viewEstimate.confidence,
+        trunk_quality_flags: viewEstimate.quality_flags,
+      })
+      .eq("capture_series_id", seriesId)
+      .eq("direction", direction as Direction)
+      .eq("active", true);
+    if (error) throw error;
+  }));
+  const fieldDiameterCm = fieldTapeDiameter(fieldCircumferenceCm);
+  const { data, error } = await supabase
+    .from("capture_series")
+    .update({
+      field_circumference_cm: fieldCircumferenceCm,
+      field_diameter_cm: fieldDiameterCm,
+      field_measurement_height_m: fieldCircumferenceCm ? 1.3 : null,
+      trunk_estimated_width_cm: estimate?.widthCm ?? null,
+      trunk_estimated_circumference_cm: estimate?.circumferenceCm ?? null,
+      trunk_estimate_min_cm: estimate?.minCm ?? null,
+      trunk_estimate_max_cm: estimate?.maxCm ?? null,
+      trunk_confidence: estimate?.confidence ?? null,
+      trunk_views_used: estimate?.viewsUsed ?? [],
+      trunk_geometric_assumption: estimate?.geometricAssumption ?? null,
+      trunk_measurement_method: fieldCircumferenceCm
+        ? "field_tape"
+        : estimate ? "frame_assisted_ai_estimate" : null,
+      trunk_algorithm_version: estimate ? "trunk-frame-1.0.0" : null,
+      trunk_quality_flags: estimate?.qualityFlags ?? [],
+      status: "annotation_pending",
+    })
+    .eq("id", seriesId)
+    .select("*")
+    .single();
+  if (error || !data) throw error ?? new Error("No se pudo guardar el tamaño del tronco.");
+  return data;
+}
+
+export interface CaptureAnnotationTarget {
+  viewId: string;
+  imageId: string;
+  annotationSetId: string;
+  direction: Direction;
+  status: CaptureViewRow["processing_status"];
+}
+
+export async function loadCaptureAnnotationSequence(seriesId: string): Promise<CaptureAnnotationTarget[]> {
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("capture_views")
+    .select("id, image_id, annotation_set_id, direction, processing_status")
+    .eq("capture_series_id", seriesId)
+    .eq("active", true);
+  if (error) throw error;
+  const byDirection = new Map((data ?? []).map((view) => [view.direction, view]));
+  return (["N", "E", "S", "W"] as Direction[]).flatMap((direction) => {
+    const view = byDirection.get(direction);
+    return view?.annotation_set_id ? [{
+      viewId: view.id,
+      imageId: view.image_id,
+      annotationSetId: view.annotation_set_id,
+      direction,
+      status: view.processing_status,
+    }] : [];
+  });
+}
+
+export async function refreshSeriesMetrics(seriesId: string): Promise<CaptureSeriesRow> {
+  const { data, error } = await supabase.rpc("refresh_capture_series_metrics", { p_series_id: seriesId });
+  if (error || !data) throw error ?? new Error("No se pudieron actualizar los resultados del árbol.");
+  return data;
+}
+
+export async function loadTreeResults(seriesId: string): Promise<{
+  series: CaptureSeriesRow;
+  views: CaptureViewRow[];
+}> {
+  const series = await refreshSeriesMetrics(seriesId);
+  const { data, error } = await supabase
+    .from("capture_views")
+    .select("*")
+    .eq("capture_series_id", seriesId)
+    .eq("active", true);
+  if (error) throw error;
+  const order = new Map<Direction, number>([["N", 0], ["E", 1], ["S", 2], ["W", 3]]);
+  return {
+    series,
+    views: (data ?? []).sort((left, right) => (
+      (order.get(left.direction) ?? 9) - (order.get(right.direction) ?? 9)
+    )),
+  };
 }
 
 export async function confirmSeries(seriesId: string): Promise<void> {
@@ -373,11 +459,10 @@ export async function confirmSeries(seriesId: string): Promise<void> {
     .eq("capture_series_id", seriesId)
     .eq("active", true);
   if (viewsError) throw viewsError;
-  if (hasProvisionalGeometry((views ?? []).map((view) => view.source))) {
-    throw new Error("La serie contiene geometría manual estimada y no puede confirmarse como medición científica validada.");
-  }
+  const provisional = hasProvisionalGeometry((views ?? []).map((view) => view.source));
   const { error } = await supabase.rpc("confirm_capture_series", { p_series_id: seriesId });
   if (error) throw error;
+  if (provisional) return;
 }
 
 export async function signedDerivedUrl(path: string | null): Promise<string | null> {
@@ -410,7 +495,7 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
       critical_errors: view.processing_status === "repeat_photo"
         ? view.quality_flags.filter((flag): flag is string => typeof flag === "string")
         : [],
-      status: hasMetrics ? "provisional_ai" : "repeat_photo",
+      status: rectifiedUrl ? "rectification_review" : "repeat_photo",
       rectified_image_data_url: rectifiedUrl,
       model_name: view.model_name,
       source: view.source,
@@ -438,6 +523,26 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
       corner_proposal: storedCorners(view.source),
       source_width: sourceSize.width,
       source_height: sourceSize.height,
+      trunk_estimate: view.trunk_width_cm !== null
+        && view.trunk_width_min_cm !== null
+        && view.trunk_width_max_cm !== null
+        && view.trunk_left_x_normalized !== null
+        && view.trunk_right_x_normalized !== null
+        && view.trunk_scale_cm_per_pixel !== null
+        && view.trunk_confidence !== null
+        && view.trunk_estimation_method !== null
+        ? {
+            width_cm: view.trunk_width_cm,
+            min_cm: view.trunk_width_min_cm,
+            max_cm: view.trunk_width_max_cm,
+            left_x_normalized: view.trunk_left_x_normalized,
+            right_x_normalized: view.trunk_right_x_normalized,
+            scale_cm_per_pixel: view.trunk_scale_cm_per_pixel,
+            confidence: view.trunk_confidence,
+            method: view.trunk_estimation_method,
+            quality_flags: view.trunk_quality_flags.filter((flag): flag is string => typeof flag === "string"),
+          }
+        : null,
       metrics: hasMetrics ? {
         valid_area_cm2: view.valid_area_cm2 ?? 0,
         lichen_union_area_cm2: view.lichen_union_area_cm2 ?? 0,

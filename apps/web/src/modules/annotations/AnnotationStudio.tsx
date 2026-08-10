@@ -213,6 +213,8 @@ const CLASS_LABELS: Record<AnnotationRegionClassification, string> = {
   bark: "Corteza",
   moss: "Musgo",
   algae: "Alga",
+  paint: "Pintura o marcación",
+  damage: "Daño",
   shadow: "Sombra",
   glare: "Reflejo",
   unknown: "Desconocido",
@@ -223,6 +225,8 @@ const CLASS_COLORS: Record<AnnotationRegionClassification, [number, number, numb
   bark: [139, 90, 43],
   moss: [22, 163, 74],
   algae: [15, 118, 110],
+  paint: [190, 24, 93],
+  damage: [220, 38, 38],
   shadow: [31, 41, 55],
   glare: [250, 204, 21],
   unknown: [107, 114, 128],
@@ -479,6 +483,7 @@ export default function AnnotationStudio({
   const [colorComponents, setColorComponents] = useState<SimilarColorComponent[]>([]);
   const [excludedComponents, setExcludedComponents] = useState<Set<number>>(new Set());
   const [layers, setLayers] = useState<StudioLayer[]>([]);
+  const [incompatibleRegions, setIncompatibleRegions] = useState<AnnotationRegionRow[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [morphotypes, setMorphotypes] = useState(initialMorphotypes);
   const [storedMetrics, setStoredMetrics] = useState(initialMetrics);
@@ -671,6 +676,7 @@ export default function AnnotationStudio({
     setCandidates([]);
     setPolygonPoints([]);
     setNotes("");
+    setIncompatibleRegions([]);
     clearCandidateHistory();
   }, [clearCandidateHistory, setCandidate, setCandidates, setNotes, setPoints, setPolygonPoints]);
 
@@ -1025,22 +1031,35 @@ export default function AnnotationStudio({
         workingImageRef.current = prepared;
         setWorkingImage(prepared);
         const state = await loadAiAnnotationState(annotationSetId);
-        const loadedLayers = await Promise.all(state.regions.map(async (region): Promise<StudioLayer> => {
-          const maskUrl = await createTemporaryUrl(region.mask_path);
-          const mask = await loadMaskFromUrl(maskUrl, prepared.width, prepared.height);
-          layerMasksRef.current.set(region.id, mask);
-          return {
-            region,
-            visible: true,
-            opacity: region.classification === "bark" ? 0.28 : 0.45,
-            title: defaultLayerTitle(region, state.morphotypes),
-          };
-        }));
+        const incompatible: AnnotationRegionRow[] = [];
+        const loadedLayers = (await Promise.all(state.regions.map(async (region): Promise<StudioLayer | null> => {
+          try {
+            if (region.mask_width_px !== prepared.width || region.mask_height_px !== prepared.height) {
+              throw new Error("mask_dimension_mismatch");
+            }
+            const maskUrl = await createTemporaryUrl(region.mask_path);
+            const mask = await loadMaskFromUrl(maskUrl, prepared.width, prepared.height);
+            layerMasksRef.current.set(region.id, mask);
+            return {
+              region,
+              visible: true,
+              opacity: region.classification === "bark" ? 0.28 : 0.45,
+              title: defaultLayerTitle(region, state.morphotypes),
+            };
+          } catch {
+            incompatible.push(region);
+            return null;
+          }
+        }))).filter((layer): layer is StudioLayer => layer !== null);
         if (cancelled) return;
         const sorted = sortLayers(loadedLayers);
         setMorphotypes(state.morphotypes);
         onMorphotypesChange(state.morphotypes);
         setLayers(sorted);
+        setIncompatibleRegions(incompatible);
+        if (incompatible.length > 0) {
+          setError(`Se omitieron ${incompatible.length} capa(s) incompatibles. Puedes eliminar solo la capa dañada y regenerarla.`);
+        }
         setSelectedLayerId(loadReadOnly || initialTool === "layers" ? sorted[0]?.region.id ?? null : null);
         setCandidateTarget(sorted.some(isTrunkLayer) ? "region" : "trunk");
         const loadedTrunk = sorted.find(isTrunkLayer);
@@ -2483,6 +2502,19 @@ export default function AnnotationStudio({
             <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700" role="alert">
               <p>{error}</p>
               {!isReadOnly ? <button type="button" onClick={() => setError(null)} className="mt-2 rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold">Descartar aviso</button> : null}
+              {!isReadOnly ? incompatibleRegions.map((region) => (
+                <button
+                  key={region.id}
+                  type="button"
+                  className="ml-2 mt-2 rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold"
+                  onClick={() => void deleteRegionWithStorage(region).then(() => {
+                    setIncompatibleRegions((current) => current.filter((item) => item.id !== region.id));
+                    setLastSavedMessage("Capa dañada eliminada. Puedes regenerarla sin perder las demás.");
+                  }).catch((reason) => setError(reason instanceof Error ? reason.message : "No se pudo eliminar la capa dañada."))}
+                >
+                  Eliminar capa dañada {region.id.slice(0, 8)}
+                </button>
+              )) : null}
             </div>
           ) : null}
         </main>

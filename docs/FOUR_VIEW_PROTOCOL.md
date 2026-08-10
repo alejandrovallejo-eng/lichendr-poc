@@ -4,7 +4,7 @@ El flujo predeterminado de **Captura 4 vistas** reutiliza un árbol permanente y
 
 ## Procesamiento
 
-Las vistas se procesan secuencialmente porque MobileSAM comparte un predictor CPU protegido por un lock. Para cada fotografía, el servicio:
+La captura y la anotación son etapas separadas. Para cada fotografía, el servicio:
 
 1. valida MIME, firma, tamaño y dimensiones (incluido HEIC/HEIF ISO-BMFF);
 2. aplica la orientación EXIF antes de detectar y limita la imagen decodificada a 60 megapíxeles;
@@ -15,11 +15,11 @@ Las vistas se procesan secuencialmente porque MobileSAM comparte un predictor CP
 7. calcula la homografía desde las posiciones físicas de `LICHENDR-FRAME-0.2`;
 8. produce exclusivamente la ventana de 400 × 2000 px (40 px/cm);
 9. aplica controles de marcadores, homografía, resolución, desenfoque, exposición y reflejos;
-10. obtiene candidatos MobileSAM y elimina máscaras pequeñas, contenidas o duplicadas;
-11. une solapamientos y agrupa provisionalmente con color CIELAB y textura;
-12. guarda originales, rectificados y unión de máscaras bajo una ruta privada cuyo primer segmento es `auth.uid()`.
+10. guarda el original, los cuatro puntos, la rectificación, sus dimensiones, escala, área válida, método y flags bajo una ruta privada cuyo primer segmento es `auth.uid()`;
+11. estima opcionalmente los dos bordes del tronco usando la abertura de 10 cm como referencia, sin bloquear por confianza baja;
+12. crea un target de anotación inequívoco para la rectificación, pero no calcula cobertura.
 
-Una condición crítica produce `repeat_photo` y ninguna cobertura. Las cuatro vistas deben ser válidas para que la serie pase a `provisional_ai`. La confirmación cambia los conjuntos de anotación a `completed`; por eso Análisis excluye propuestas provisionales de sus indicadores principales.
+Una condición crítica produce `repeat_photo`. Las cuatro vistas válidas llevan la serie a `capture_calibrated`; al continuar pasa a `annotation_pending`. MobileSAM y CIELAB se ejecutan en Annotation Studio sobre cada rectificación. Solo cuatro anotaciones `completed` producen `analysis_ready`; la revisión final cambia la serie a `completed`.
 
 ## Detección, confianza y confirmación
 
@@ -32,7 +32,7 @@ Una detección parcial solo puede ofrecer una propuesta automática de esquinas 
 - el contorno independiente de la abertura coincide con la proyección del Board, con IoU mínimo de 0.42 o distancia media de esquinas máxima del 5.5% de la diagonal;
 - la propuesta queda sujeta a confirmación manual y nunca se acepta como medición automática validada.
 
-Los cuatro controles manuales siempre corresponden, en orden, a las esquinas superior izquierda, superior derecha, inferior derecha e inferior izquierda de la abertura interior de 10 × 50 cm, nunca a los ArUco. Moverlos no envía solicitudes. **Confirmar 4 puntos y analizar esta vista** bloquea los controles, valida y ejecuta en una sola acción la rectificación y el análisis. Un error conserva la fotografía y los puntos para corregir y reintentar.
+Los cuatro controles manuales siempre corresponden, en orden, a las esquinas superior izquierda, superior derecha, inferior derecha e inferior izquierda de la abertura interior de 10 × 50 cm, nunca a los ArUco. Moverlos no envía solicitudes. **Confirmar 4 puntos y rectificar esta vista** bloquea los controles y calibra sin calcular líquenes. Un error conserva la fotografía y los puntos para corregir y reintentar.
 
 Si las cuatro esquinas interiores son visibles, la selección se registra como `manual_confirmed` y es elegible para validación. Si alguna esquina o borde se estima, una confirmación adicional la registra como `manual_assisted_provisional` con `manual_estimated_geometry`; sus métricas son estimaciones, el total del árbol se identifica como provisional y la serie no puede confirmarse científicamente.
 
@@ -42,7 +42,7 @@ Antes de cargar imágenes se confirman explícitamente el árbol y la jornada. S
 
 ## Fórmulas
 
-Cada píxel canónico representa `500 cm² / (400 × 2000)`.
+Cada píxel canónico representa `500 cm² / (400 × 2000)`. Estas fórmulas se ejecutan únicamente después de finalizar las cuatro anotaciones:
 
 ```text
 valid_area_view = píxeles válidos × 500 / 800000
@@ -56,7 +56,7 @@ tree_lichen_coverage_percent =
 ```
 
 Los solapamientos se cuentan una sola vez mediante OR binario. Una serie completa tiene 2,000 cm² y 20 celdas posibles. La frecuencia de un morfotipo es la cantidad de celdas, de 0 a 20, en las que aparece.
-La cobertura agregada del árbol queda nula mientras no existan cuatro vistas válidas; los totales parciales se conservan únicamente para orientar el reintento.
+La cobertura por vista y del árbol queda nula durante captura y mientras no existan cuatro anotaciones completas. Pintura, daño, musgo, alga, sombra, brillo, corteza y desconocido quedan excluidos de la unión de líquenes.
 
 ## Limitación científica
 
@@ -64,7 +64,7 @@ MobileSAM segmenta formas, pero no clasifica taxones. Los códigos `LQ-001`, `LQ
 
 ## Codespaces
 
-1. Aplicar la migración nueva **solo al Supabase local**: `supabase/migrations/202608060002_create_four_view_capture_series.sql`.
+1. Aplicar las migraciones nuevas **solo al Supabase local**, incluida `supabase/migrations/202608100001_link_four_view_annotations.sql`.
 2. Configurar `apps/web/.env.local` con las variables Supabase existentes y `VISION_SERVICE_URL=http://127.0.0.1:8000`.
 3. Ejecutar `bash scripts/setup-vision-service.sh`.
 4. Ejecutar `bash scripts/dev-with-vision.sh`.

@@ -17,13 +17,13 @@ import { fetchTreesBySite } from "@/modules/trees/client";
 import type { Project, SamplingEvent, Site, Tree } from "@/types/domain";
 import {
   analyzeFourViewFile,
-  confirmSeries,
   ensureTreeSampleForTree,
   finalizeSeries,
   getOrCreateCaptureSeries,
   loadSeriesResults,
   listEvaluatedTrees,
   saveProcessedView,
+  saveTrunkMeasurement,
   type CaptureSeriesRow,
   type EvaluatedTreeRow,
 } from "./client";
@@ -35,7 +35,7 @@ import {
   defaultManualCorners,
   runManualOperation,
 } from "./manual-flow";
-import { aggregateFourViewMetrics } from "./metrics";
+import { combineTrunkEstimates, summarizeCalibration } from "./science";
 import {
   DIRECTIONS,
   DIRECTION_LABELS,
@@ -104,7 +104,7 @@ function statusLabel(slot: SlotState): string {
   if (slot.status === "needs_confirmation") return "Necesita confirmación manual";
   if (slot.status === "four_points_ready") return "Cuatro puntos listos";
   if (slot.status === "analyzing") return "Procesando análisis";
-  if (slot.status === "saved") return "Analizada";
+  if (slot.status === "saved") return "Rectificada y calibrada";
   return "Error recuperable";
 }
 
@@ -260,9 +260,10 @@ export default function FourViewWorkflow() {
   const [contextConfirmed, setContextConfirmed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
-  const [layer, setLayer] = useState("lichen");
   const [heading, setHeading] = useState<number | null>(null);
   const [evaluated, setEvaluated] = useState<EvaluatedTreeRow[]>([]);
+  const [fieldCircumferenceCm, setFieldCircumferenceCm] = useState("");
+  const [reviewingTrunkEdges, setReviewingTrunkEdges] = useState(false);
   const manualOperations = useRef(new ManualOperationGate());
   const operationTokens = useRef<Partial<Record<Direction, string>>>({});
 
@@ -321,16 +322,19 @@ export default function FourViewWorkflow() {
   const selectedTree = trees.find((tree) => tree.id === treeId);
   const selectedEvent = events.find((event) => event.id === eventId);
   const capturedCount = DIRECTIONS.filter((direction) => slots[direction].file || slots[direction].result).length;
-  const summary = useMemo(() => aggregateFourViewMetrics(DIRECTIONS.map((direction) => slots[direction].result)), [slots]);
+  const summary = useMemo(() => summarizeCalibration(DIRECTIONS.map((direction) => slots[direction].result)), [slots]);
+  const trunkEstimate = useMemo(() => combineTrunkEstimates(Object.fromEntries(
+    DIRECTIONS.map((direction) => [direction, slots[direction].result?.trunk_estimate ?? null]),
+  )), [slots]);
   const suggestion = suggestedDirection(heading);
   const assistedBusy = DIRECTIONS.some((direction) => (
     ["processing", "analyzing"].includes(slots[direction].status)
   ));
   const operationLocked = processing || assistedBusy;
-  const captureLocked = operationLocked || series?.status === "confirmed";
+  const captureLocked = operationLocked || series?.status === "completed";
   const canProcess = contextConfirmed
-    && series?.status !== "confirmed"
-    && DIRECTIONS.every((direction) => slots[direction].file || slots[direction].result?.status === "provisional_ai")
+    && series?.status !== "completed"
+    && DIRECTIONS.every((direction) => slots[direction].file || slots[direction].result?.rectified_image_data_url)
     && DIRECTIONS.some((direction) => slots[direction].file && ["ready", "error"].includes(slots[direction].status));
 
   const chooseFile = (direction: Direction, event: ChangeEvent<HTMLInputElement>) => {
@@ -367,7 +371,7 @@ export default function FourViewWorkflow() {
       setSeries(activeSeries);
       const completed = Object.fromEntries(DIRECTIONS.map((direction) => {
         const result = slots[direction].result;
-        return [direction, result?.status === "provisional_ai" ? result : null];
+        return [direction, result?.rectified_image_data_url ? result : null];
       })) as Record<Direction, VisionViewResult | null>;
       for (const direction of DIRECTIONS) {
         const slot = slots[direction];
@@ -406,7 +410,7 @@ export default function FourViewWorkflow() {
             requestKey: slot.requestKey,
             context: { projectId, siteId, eventId, treeSampleId },
           });
-          completed[direction] = result;
+          if (result.rectified_image_data_url) completed[direction] = result;
           setSlots((current) => ({
             ...current,
             [direction]: {
@@ -531,8 +535,8 @@ export default function FourViewWorkflow() {
       },
       request: () => analyzeFourViewFile(slot.file!, "analyze_confirmed", slot.corners!, mode),
       onSuccess: async (result, operationToken) => {
-        if (result.status !== "provisional_ai" || !result.metrics) {
-          throw new Error(result.critical_errors.join(", ") || "El análisis no produjo métricas utilizables.");
+        if (!result.rectified_image_data_url || result.critical_errors.length > 0) {
+          throw new Error(result.critical_errors.join(", ") || "La calibración no produjo una rectificación utilizable.");
         }
         await saveSingleResult(direction, result, slot.file!, slot.requestKey, operationToken);
       },
@@ -597,20 +601,65 @@ export default function FourViewWorkflow() {
     }
   };
 
-  const confirm = async () => {
-    if (!series || summary.validViews !== 4 || summary.isProvisional) return;
-    try {
-      await confirmSeries(series.id);
-      setSeries({ ...series, status: "confirmed", review_status: "confirmed", confirmed_at: new Date().toISOString() });
-      setEvaluated(await listEvaluatedTrees());
-    } catch (reason) {
-      setGlobalError(reason instanceof Error ? reason.message : "No se pudo confirmar la evaluación.");
-    }
-  };
-
   const repeat = (direction: Direction) => {
     manualOperations.current.invalidate(direction);
     setSlots((current) => ({ ...current, [direction]: EMPTY_SLOT() }));
+  };
+
+  const adjustTrunkEdge = (direction: Direction, edge: "left" | "right", value: number) => {
+    setSlots((current) => {
+      const result = current[direction].result;
+      const estimate = result?.trunk_estimate;
+      if (!result || !estimate) return current;
+      const left = edge === "left" ? value : estimate.left_x_normalized;
+      const right = edge === "right" ? value : estimate.right_x_normalized;
+      if (left >= right) return current;
+      const widthCm = (right - left) * result.source_width * estimate.scale_cm_per_pixel;
+      return {
+        ...current,
+        [direction]: {
+          ...current[direction],
+          result: {
+            ...result,
+            trunk_estimate: {
+              ...estimate,
+              width_cm: widthCm,
+              min_cm: widthCm * 0.78,
+              max_cm: widthCm * 1.22,
+              left_x_normalized: left,
+              right_x_normalized: right,
+              method: "manual_corrected",
+              confidence: estimate.confidence === "low" ? "medium" : estimate.confidence,
+              quality_flags: [...new Set([...estimate.quality_flags, "trunk_edges_user_confirmed"])],
+            },
+          },
+        },
+      };
+    });
+  };
+
+  const acceptTrunkAndContinue = async () => {
+    if (!series || !summary.calibrated) return;
+    const parsed = fieldCircumferenceCm.trim() ? Number(fieldCircumferenceCm) : null;
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed <= 0)) {
+      setGlobalError("La circunferencia medida debe ser un número positivo.");
+      return;
+    }
+    try {
+      const saved = await saveTrunkMeasurement(
+        series.id,
+        parsed,
+        trunkEstimate,
+        Object.fromEntries(DIRECTIONS.map((direction) => [
+          direction,
+          slots[direction].result?.trunk_estimate ?? null,
+        ])),
+      );
+      setSeries(saved);
+      window.location.assign(`/annotations?captureSeriesId=${encodeURIComponent(series.id)}&view=0&tool=ai`);
+    } catch (reason) {
+      setGlobalError(reason instanceof Error ? reason.message : "No se pudo guardar el tamaño del tronco.");
+    }
   };
 
   const openEvaluation = async (row: EvaluatedTreeRow) => {
@@ -626,7 +675,7 @@ export default function FourViewWorkflow() {
           file: null,
           requestKey: crypto.randomUUID(),
           result,
-          status: result?.status === "provisional_ai" ? "saved" : result ? "repeat" : "empty",
+          status: result?.rectified_image_data_url ? "saved" : result ? "repeat" : "empty",
           error: result?.critical_errors.join(", ") || null,
           corners: null,
           initialCorners: null,
@@ -740,7 +789,7 @@ export default function FourViewWorkflow() {
                 htmlFor={fileInputId}
                 className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || captureLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
               >
-                {series?.status === "confirmed" ? "Evaluación confirmada" : slot.file || slot.result ? "Reemplazar imagen" : "Tomar foto o elegir archivo"}
+                {series?.status === "completed" ? "Evaluación completada" : slot.file || slot.result ? "Reemplazar imagen" : "Tomar foto o elegir archivo"}
                 <input
                   id={fileInputId}
                   className="sr-only"
@@ -840,7 +889,7 @@ export default function FourViewWorkflow() {
                         </>
                       ) : slot.status === "error"
                         ? "Corregir puntos y reintentar"
-                        : "Confirmar 4 puntos y analizar esta vista"}
+                        : "Confirmar 4 puntos y rectificar esta vista"}
                     </button>
                     <button
                       type="button"
@@ -881,56 +930,96 @@ export default function FourViewWorkflow() {
         onClick={() => void processAll()}
         className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
       >
-        {processing ? "Procesando secuencialmente…" : "Procesar las cuatro vistas"}
+        {processing ? "Rectificando secuencialmente…" : "Rectificar y calibrar las cuatro vistas"}
       </button>
 
       {series ? (
         <section className="space-y-4 rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
-          <div className="grid gap-3 md:grid-cols-5">
-            <div><strong className="text-2xl">{summary.coveragePercent?.toFixed(1) ?? "—"}%</strong><p className="text-xs">Cobertura liquénica {summary.isProvisional ? "provisional" : "total"}</p></div>
-            <div><strong className="text-2xl">{summary.totalValidAreaCm2.toFixed(0)}</strong><p className="text-xs">Área analizada cm²</p></div>
-            <div><strong className="text-2xl">{summary.totalLichenAreaCm2.toFixed(1)}</strong><p className="text-xs">Área estimada de liquen cm²</p></div>
-            <div><strong className="text-2xl">{summary.morphotypeRichness}</strong><p className="text-xs">Morfotipos visuales provisionales</p></div>
-            <div><strong className="text-2xl">{summary.occupiedCells}/20</strong><p className="text-xs">Celdas ocupadas</p></div>
+          <h2 className="text-xl font-semibold">
+            {summary.calibrated ? "Captura y calibración completadas" : "Captura y calibración en progreso"}
+          </h2>
+          <div className="grid gap-3 md:grid-cols-4">
+            <div><strong className="text-2xl">{summary.validViews}/4</strong><p className="text-xs">Vistas válidas</p></div>
+            <div><strong className="text-2xl">500</strong><p className="text-xs">cm² máximos por vista</p></div>
+            <div><strong className="text-2xl">{summary.totalCalibratedAreaCm2.toFixed(0)}</strong><p className="text-xs">Área total calibrada cm²</p></div>
+            <div><strong className="text-2xl">{summary.provisionalViews}</strong><p className="text-xs">Mediciones provisionales</p></div>
           </div>
           <p className="rounded bg-amber-50 p-3 text-sm text-amber-900">
-            Cobertura liquénica estimada por IA · {summary.isProvisional
-              ? `Total provisional: ${summary.provisionalViews} vista(s) usan geometría estimada y no son medición científica validada.`
-              : series.review_status === "confirmed" ? "Confirmada" : "Pendiente de revisión"}.
-            Los grupos LQ son morfotipos provisionales, no especies.
+            Esta etapa conserva originales, cuatro puntos, rectificaciones, escala física, área válida y calidad.
+            La cobertura liquénica se calculará únicamente después de completar las cuatro anotaciones.
           </p>
-          <label className="block text-sm">Visualización
-            <select className="ml-2 rounded border p-2" value={layer} onChange={(event) => setLayer(event.target.value)}>
-              <option value="original">Original</option>
-              <option value="lichen">Posibles líquenes</option>
-              <option value="morphotypes">Morfotipos</option>
-              <option value="grid">Cuadrícula</option>
-            </select>
-          </label>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             {DIRECTIONS.map((direction) => {
               const slot = slots[direction];
-              const metrics = slot.result?.metrics;
               return (
                 <article key={direction} className="rounded border p-3" style={{ borderColor: "var(--ld-border)" }}>
                   <h3 className="font-semibold">{DIRECTION_LABELS[direction]}</h3>
-                  <ResultVisual slot={slot} layer={layer} />
-                  <p className="mt-2 text-sm">{metrics ? `${metrics.lichen_coverage_percent.toFixed(1)}% · ${metrics.lichen_union_area_cm2.toFixed(1)} cm²` : "Sin métricas válidas"}</p>
-                  <p className="text-xs">Calidad {slot.result ? `${Math.round(slot.result.quality_score * 100)}%` : "—"} · {metrics?.provisional_morphotype_richness ?? 0} morfotipos</p>
-                  <div className="mt-2 flex gap-2">
-                    <button type="button" className="text-xs underline" onClick={() => setLayer("lichen")}>Solo esta capa</button>
-                    <button type="button" className="text-xs underline" onClick={() => setLayer("original")}>Ver original</button>
-                  </div>
+                  <ResultVisual slot={slot} layer="grid" />
+                  <p className="mt-2 text-sm">{slot.result?.rectified_image_data_url ? "500 cm² calibrados · 400 × 2000 px" : "Pendiente"}</p>
+                  <p className="text-xs">Calidad {slot.result ? `${Math.round(slot.result.quality_score * 100)}%` : "—"}</p>
+                  {slot.result?.quality_flags.length ? <p className="mt-1 text-xs">Flags: {slot.result.quality_flags.join(", ")}</p> : null}
                 </article>
               );
             })}
           </div>
-          <div className="flex flex-wrap gap-3">
-            <button type="button" disabled={operationLocked || summary.validViews !== 4 || summary.isProvisional || series.status === "confirmed"} onClick={() => void confirm()} className="rounded bg-emerald-800 px-4 py-2 text-white disabled:opacity-50">
-              {summary.isProvisional ? "Evaluación provisional · no validable" : "Confirmar evaluación"}
+          <section className="rounded border p-4" style={{ borderColor: "var(--ld-border)" }}>
+            <h2 className="text-lg font-semibold">Tamaño del tronco</h2>
+            <label className="mt-3 block max-w-md text-sm">
+              Circunferencia medida con cinta a 1.3 m (cm, opcional)
+              <input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={fieldCircumferenceCm}
+                onChange={(event) => setFieldCircumferenceCm(event.target.value)}
+                className="mt-1 w-full rounded border px-3 py-2"
+              />
+            </label>
+            <dl className="mt-4 grid gap-2 text-sm md:grid-cols-2">
+              <div><dt className="font-semibold">Medición con cinta</dt><dd>{fieldCircumferenceCm ? `${fieldCircumferenceCm} cm de circunferencia` : "No registrada"}</dd></div>
+              <div><dt className="font-semibold">Estimación IA</dt><dd>{trunkEstimate ? `${trunkEstimate.widthCm.toFixed(1)} cm de ancho a la altura de muestreo` : "No disponible"}</dd></div>
+              <div><dt className="font-semibold">Circunferencia estimada a la altura de muestreo</dt><dd>{trunkEstimate ? `${trunkEstimate.circumferenceCm.toFixed(1)} cm` : "—"}</dd></div>
+              <div><dt className="font-semibold">Rango probable</dt><dd>{trunkEstimate ? `${trunkEstimate.minCm.toFixed(1)}–${trunkEstimate.maxCm.toFixed(1)} cm` : "—"}</dd></div>
+              <div><dt className="font-semibold">Confianza</dt><dd>{trunkEstimate?.confidence ?? "—"}</dd></div>
+              <div><dt className="font-semibold">Vistas utilizadas</dt><dd>{trunkEstimate?.viewsUsed.join("/") || "Ninguna"}</dd></div>
+            </dl>
+            <p className="mt-3 text-xs">Calculado mediante fotografías y marco físico de referencia. La cinta, cuando existe, tiene prioridad y se guarda como field_tape.</p>
+            {!trunkEstimate ? (
+              <p className="mt-3 rounded bg-amber-50 p-3 text-sm">No fue posible estimar automáticamente el tamaño del tronco. Marca sus dos bordes en una fotografía.</p>
+            ) : null}
+            <button type="button" className="mt-3 rounded border px-4 py-2" onClick={() => setReviewingTrunkEdges((value) => !value)}>
+              Revisar bordes
             </button>
-            <Link href="/annotations" className="rounded border px-4 py-2">Corregir propuesta</Link>
-          </div>
+            {reviewingTrunkEdges ? (
+              <div className="mt-3 grid gap-4 md:grid-cols-2">
+                {DIRECTIONS.map((direction) => {
+                  const estimate = slots[direction].result?.trunk_estimate;
+                  if (!estimate) return null;
+                  return (
+                    <div key={direction} className="rounded border p-3 text-sm">
+                      <strong>{DIRECTION_LABELS[direction]} · {estimate.width_cm.toFixed(1)} cm</strong>
+                      <label className="mt-2 block">Borde izquierdo
+                        <input type="range" min="0" max={estimate.right_x_normalized - 0.01} step="0.005" value={estimate.left_x_normalized} onChange={(event) => adjustTrunkEdge(direction, "left", Number(event.target.value))} className="w-full" />
+                      </label>
+                      <label className="mt-2 block">Borde derecho
+                        <input type="range" min={estimate.left_x_normalized + 0.01} max="1" step="0.005" value={estimate.right_x_normalized} onChange={(event) => adjustTrunkEdge(direction, "right", Number(event.target.value))} className="w-full" />
+                      </label>
+                      <p className="mt-2 text-xs">Las líneas corregidas se combinan automáticamente.</p>
+                    </div>
+                  );
+                })}
+                <button type="button" className="rounded border px-4 py-2" onClick={() => setReviewingTrunkEdges(false)}>Confirmar bordes del tronco</button>
+              </div>
+            ) : null}
+          </section>
+          <button
+            type="button"
+            disabled={!summary.calibrated || operationLocked}
+            onClick={() => void acceptTrunkAndContinue()}
+            className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
+          >
+            {trunkEstimate ? "Aceptar estimación y continuar" : "Continuar al análisis de líquenes"}
+          </button>
         </section>
       ) : null}
 

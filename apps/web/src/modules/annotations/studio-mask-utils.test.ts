@@ -66,6 +66,16 @@ test("calcula cobertura cero", () => {
   assert.equal(result.coveragePercent, 0);
 });
 
+test("pintura y otras clases excluidas no entran en la unión de líquenes", () => {
+  const result = calculateAnnotationMetricSummary(
+    new Uint8Array([1, 1, 1, 1]),
+    [],
+  );
+  assert.equal(result.lichenUnionInsideTrunkPixels, 0);
+  assert.equal(result.coveragePercent, 0);
+  assert.ok(result.qualityFlags.includes("no_lichen_regions"));
+});
+
 test("calcula cobertura completa", () => {
   const result = calculateAnnotationMetricSummary(
     new Uint8Array([1, 1, 0]),

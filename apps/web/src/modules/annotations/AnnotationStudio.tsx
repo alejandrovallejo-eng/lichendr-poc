@@ -59,8 +59,9 @@ import type {
   ColorWorkerResponse,
   SimilarColorComponent,
 } from "@/modules/annotations/color-worker-types";
+import { isMaskCompatibleWithTarget } from "./annotation-target";
 
-const MAX_WORKING_DIMENSION = 1024;
+const MAX_WORKING_DIMENSION = 2048;
 const SEGMENT_DEBOUNCE_MS = 250;
 const COLOR_DEBOUNCE_MS = 250;
 const COLOR_ANALYSIS_TIMEOUT_MS = 15_000;
@@ -193,6 +194,8 @@ interface AnnotationStudioProps {
   imageUrl: string;
   imageName: string;
   annotationSetId: string;
+  annotationTargetWidth: number | null;
+  annotationTargetHeight: number | null;
   annotationStatus: "draft" | "completed";
   completedAt: string | null;
   imageContext: AnnotationImageContext;
@@ -409,6 +412,8 @@ export default function AnnotationStudio({
   imageUrl,
   imageName,
   annotationSetId,
+  annotationTargetWidth,
+  annotationTargetHeight,
   annotationStatus,
   completedAt,
   imageContext,
@@ -1034,7 +1039,11 @@ export default function AnnotationStudio({
         const incompatible: AnnotationRegionRow[] = [];
         const loadedLayers = (await Promise.all(state.regions.map(async (region): Promise<StudioLayer | null> => {
           try {
-            if (region.mask_width_px !== prepared.width || region.mask_height_px !== prepared.height) {
+            if (!isMaskCompatibleWithTarget(region, {
+              target_storage_path: null,
+              target_width_px: annotationTargetWidth,
+              target_height_px: annotationTargetHeight,
+            }, prepared.width, prepared.height)) {
               throw new Error("mask_dimension_mismatch");
             }
             const maskUrl = await createTemporaryUrl(region.mask_path);
@@ -1106,7 +1115,7 @@ export default function AnnotationStudio({
         loadedObjectUrl = null;
       }
     };
-  }, [analyzeTrunkColors, annotationSetId, bumpHistory, cancelColorAnalysis, cancelVisionRequest, clearVisionSession, focusMask, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
+  }, [analyzeTrunkColors, annotationSetId, annotationTargetHeight, annotationTargetWidth, bumpHistory, cancelColorAnalysis, cancelVisionRequest, clearVisionSession, focusMask, imageUrl, initialTool, onMorphotypesChange, renderLayers, updateCoverage]);
 
   const pointFromEvent = useCallback((event: KonvaEventObject<PointerEvent | MouseEvent | TouchEvent>): MaskPoint | null => {
     const image = workingImageRef.current;

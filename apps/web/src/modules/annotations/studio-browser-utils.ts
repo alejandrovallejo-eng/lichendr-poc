@@ -51,7 +51,7 @@ export async function loadBlobBackedImage(source: string, signal?: AbortSignal):
   }
 }
 
-export function validateRasterDimensions(width: number, height: number, maximumDimension = 1024): number {
+export function validateRasterDimensions(width: number, height: number, maximumDimension = 2048): number {
   if (
     !Number.isSafeInteger(width)
     || !Number.isSafeInteger(height)

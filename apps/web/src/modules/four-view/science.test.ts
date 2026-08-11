@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { combineTrunkEstimates, fieldTapeDiameter, summarizeCalibration } from "./science.ts";
+import { combineTrunkEstimates, correctTrunkEdges, fieldTapeDiameter, summarizeCalibration } from "./science.ts";
 import type { TrunkViewEstimate, VisionViewResult } from "./types";
 
 function calibrated(): VisionViewResult {
@@ -88,6 +88,26 @@ test("una vista produce una estimación circular preliminar de baja confianza", 
   assert.equal(result?.confidence, "low");
   assert.equal(result?.geometricAssumption, "circular");
   assert.ok(result?.qualityFlags.includes("limited_view_count"));
+});
+
+test("combina dos o tres vistas con incertidumbre ampliada", () => {
+  const twoViews = combineTrunkEstimates({ N: estimate(30), S: estimate(32) });
+  const threeViews = combineTrunkEstimates({ N: estimate(30), E: estimate(38), S: estimate(32) });
+  assert.equal(twoViews?.viewsUsed.length, 2);
+  assert.equal(twoViews?.confidence, "medium");
+  assert.ok(twoViews?.qualityFlags.includes("limited_view_count"));
+  assert.equal(threeViews?.viewsUsed.length, 3);
+  assert.equal(threeViews?.geometricAssumption, "elliptical");
+  assert.ok((threeViews?.minCm ?? 0) < (threeViews?.circumferenceCm ?? 0));
+  assert.ok((threeViews?.maxCm ?? 0) > (threeViews?.circumferenceCm ?? 0));
+});
+
+test("dos bordes confirmados recalculan el ancho sin pedir las esquinas", () => {
+  const corrected = correctTrunkEdges(estimate(30, "low"), 1000, 0.1, 0.9);
+  assert.equal(corrected.width_cm, 40);
+  assert.equal(corrected.method, "manual_corrected");
+  assert.equal(corrected.confidence, "medium");
+  assert.ok(corrected.quality_flags.includes("trunk_edges_user_confirmed"));
 });
 
 test("sin bordes utilizables el tamaño permanece null", () => {

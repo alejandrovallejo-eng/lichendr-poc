@@ -34,9 +34,15 @@ class TrunkEstimationTests(unittest.TestCase):
         self.assertGreater(estimate["max_cm"], estimate["width_cm"])
         self.assertEqual(estimate["method"], "automatic")
 
-    def test_returns_none_when_no_edges_are_distinguishable(self) -> None:
+    def test_imperfect_photo_returns_a_wider_low_confidence_interval(self) -> None:
         rgb = np.full((2000, 1000, 3), 120, dtype=np.uint8)
-        self.assertIsNone(estimate_trunk_width(rgb, self.rectification()))
+        estimate = estimate_trunk_width(rgb, self.rectification())
+        self.assertIsNotNone(estimate)
+        assert estimate is not None
+        self.assertEqual(estimate["confidence"], "low")
+        self.assertIn("trunk_edges_uncertain", estimate["quality_flags"])
+        self.assertLess(estimate["min_cm"], estimate["width_cm"])
+        self.assertGreater(estimate["max_cm"], estimate["width_cm"])
 
 
 if __name__ == "__main__":

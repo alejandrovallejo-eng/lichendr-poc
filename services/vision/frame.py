@@ -840,17 +840,17 @@ def estimate_trunk_width(rgb: np.ndarray, rectification: Rectification) -> dict[
 
     edge_strength = float(min(profile[left_x], profile[right_x]))
     baseline = float(np.median(profile) + np.std(profile))
-    if edge_strength < max(4.0, baseline * 0.55):
-        return None
-
     cm_per_pixel = 10.0 / opening_width
     width_cm = trunk_pixels * cm_per_pixel
     flags = list(rectification.quality_flags)
+    weak_edges = edge_strength < max(4.0, baseline * 0.55)
+    if weak_edges:
+        flags.append("trunk_edges_uncertain")
     if left_x <= left_start + 2 or right_x >= right_end - 3:
         flags.append("trunk_edge_near_search_limit")
     ratio = edge_strength / max(baseline, 1.0)
-    confidence = "high" if ratio >= 1.8 and not flags else "medium" if ratio >= 1.05 else "low"
-    uncertainty = 0.12 if confidence == "high" else 0.22 if confidence == "medium" else 0.35
+    confidence = "high" if ratio >= 1.8 and not flags else "medium" if ratio >= 1.05 and not weak_edges else "low"
+    uncertainty = 0.12 if confidence == "high" else 0.22 if confidence == "medium" else 0.45
     return {
         "width_cm": round(width_cm, 2),
         "min_cm": round(max(10.0, width_cm * (1 - uncertainty)), 2),

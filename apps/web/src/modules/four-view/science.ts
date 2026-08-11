@@ -99,3 +99,34 @@ export function fieldTapeDiameter(circumferenceCm: number | null): number | null
     ? circumferenceCm / Math.PI
     : null;
 }
+
+export function correctTrunkEdges(
+  estimate: TrunkViewEstimate,
+  sourceWidth: number,
+  leftXNormalized: number,
+  rightXNormalized: number,
+): TrunkViewEstimate {
+  if (
+    !Number.isFinite(sourceWidth)
+    || sourceWidth <= 1
+    || !Number.isFinite(leftXNormalized)
+    || !Number.isFinite(rightXNormalized)
+    || leftXNormalized < 0
+    || rightXNormalized > 1
+    || leftXNormalized >= rightXNormalized
+  ) {
+    throw new Error("Los bordes del tronco no son válidos.");
+  }
+  const widthCm = (rightXNormalized - leftXNormalized) * sourceWidth * estimate.scale_cm_per_pixel;
+  return {
+    ...estimate,
+    width_cm: widthCm,
+    min_cm: widthCm * 0.78,
+    max_cm: widthCm * 1.22,
+    left_x_normalized: leftXNormalized,
+    right_x_normalized: rightXNormalized,
+    method: "manual_corrected",
+    confidence: estimate.confidence === "low" ? "medium" : estimate.confidence,
+    quality_flags: [...new Set([...estimate.quality_flags, "trunk_edges_user_confirmed"])],
+  };
+}

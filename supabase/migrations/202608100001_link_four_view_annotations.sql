@@ -20,6 +20,7 @@ alter table public.capture_views
   add column if not exists trunk_quality_flags jsonb not null default '[]'::jsonb;
 
 alter table public.capture_series
+  add column if not exists circumference_cm numeric,
   add column if not exists field_circumference_cm numeric,
   add column if not exists field_diameter_cm numeric,
   add column if not exists field_measurement_height_m numeric,
@@ -33,6 +34,10 @@ alter table public.capture_series
   add column if not exists trunk_measurement_method text,
   add column if not exists trunk_algorithm_version text,
   add column if not exists trunk_quality_flags jsonb not null default '[]'::jsonb;
+
+update public.capture_series
+set circumference_cm = coalesce(field_circumference_cm, circumference_cm),
+    field_circumference_cm = coalesce(field_circumference_cm, circumference_cm);
 
 alter table public.annotation_sets
   add column if not exists capture_view_id uuid references public.capture_views(id) on delete cascade,
@@ -123,10 +128,12 @@ alter table public.capture_views add constraint capture_views_processing_status_
     'failed'
   )
 );
+alter table public.capture_views drop constraint if exists capture_views_rectified_dimensions_positive;
 alter table public.capture_views add constraint capture_views_rectified_dimensions_positive check (
   (rectified_width_px is null and rectified_height_px is null)
   or (rectified_width_px > 0 and rectified_height_px > 0)
 );
+alter table public.capture_views drop constraint if exists capture_views_valid_pixels_range;
 alter table public.capture_views add constraint capture_views_valid_pixels_range check (
   valid_pixel_count is null
   or (
@@ -136,22 +143,27 @@ alter table public.capture_views add constraint capture_views_valid_pixels_range
     and valid_pixel_count <= rectified_width_px::bigint * rectified_height_px::bigint
   )
 );
+alter table public.capture_views drop constraint if exists capture_views_scale_positive;
 alter table public.capture_views add constraint capture_views_scale_positive check (
   (cm2_per_pixel is null or cm2_per_pixel > 0)
   and (pixels_per_cm is null or pixels_per_cm > 0)
   and (trunk_scale_cm_per_pixel is null or trunk_scale_cm_per_pixel > 0)
 );
+alter table public.capture_views drop constraint if exists capture_views_calibration_method_allowed;
 alter table public.capture_views add constraint capture_views_calibration_method_allowed check (
   calibration_method is null
   or calibration_method in ('automatic', 'manual_confirmed', 'manual_provisional', 'legacy_four_view')
 );
+alter table public.capture_views drop constraint if exists capture_views_confirmed_corners_array;
 alter table public.capture_views add constraint capture_views_confirmed_corners_array check (
   confirmed_corners is null
   or (jsonb_typeof(confirmed_corners) = 'array' and jsonb_array_length(confirmed_corners) = 4)
 );
+alter table public.capture_views drop constraint if exists capture_views_excluded_area_range;
 alter table public.capture_views add constraint capture_views_excluded_area_range check (
   excluded_area_cm2 is null or excluded_area_cm2 between 0 and 500
 );
+alter table public.capture_views drop constraint if exists capture_views_trunk_widths_valid;
 alter table public.capture_views add constraint capture_views_trunk_widths_valid check (
   (trunk_width_cm is null or trunk_width_cm > 0)
   and (trunk_width_min_cm is null or trunk_width_min_cm > 0)
@@ -159,6 +171,7 @@ alter table public.capture_views add constraint capture_views_trunk_widths_valid
   and (trunk_width_min_cm is null or trunk_width_cm is null or trunk_width_min_cm <= trunk_width_cm)
   and (trunk_width_max_cm is null or trunk_width_cm is null or trunk_width_max_cm >= trunk_width_cm)
 );
+alter table public.capture_views drop constraint if exists capture_views_trunk_edges_valid;
 alter table public.capture_views add constraint capture_views_trunk_edges_valid check (
   (trunk_left_x_normalized is null and trunk_right_x_normalized is null)
   or (
@@ -167,22 +180,29 @@ alter table public.capture_views add constraint capture_views_trunk_edges_valid 
     and trunk_left_x_normalized < trunk_right_x_normalized
   )
 );
+alter table public.capture_views drop constraint if exists capture_views_trunk_method_allowed;
 alter table public.capture_views add constraint capture_views_trunk_method_allowed check (
   trunk_estimation_method is null
   or trunk_estimation_method in ('automatic', 'manual_corrected')
 );
+alter table public.capture_views drop constraint if exists capture_views_trunk_confidence_allowed;
 alter table public.capture_views add constraint capture_views_trunk_confidence_allowed check (
   trunk_confidence is null or trunk_confidence in ('low', 'medium', 'high')
 );
+alter table public.capture_views drop constraint if exists capture_views_trunk_quality_flags_array;
 alter table public.capture_views add constraint capture_views_trunk_quality_flags_array check (
   jsonb_typeof(trunk_quality_flags) = 'array'
 );
 
+alter table public.capture_series drop constraint if exists capture_series_field_measurement_positive;
 alter table public.capture_series add constraint capture_series_field_measurement_positive check (
-  (field_circumference_cm is null or field_circumference_cm > 0)
+  (circumference_cm is null or circumference_cm > 0)
+  and (field_circumference_cm is null or field_circumference_cm > 0)
   and (field_diameter_cm is null or field_diameter_cm > 0)
   and (field_measurement_height_m is null or field_measurement_height_m > 0)
+  and (circumference_cm is null or field_circumference_cm is null or circumference_cm = field_circumference_cm)
 );
+alter table public.capture_series drop constraint if exists capture_series_trunk_estimate_valid;
 alter table public.capture_series add constraint capture_series_trunk_estimate_valid check (
   (trunk_estimated_width_cm is null or trunk_estimated_width_cm > 0)
   and (trunk_estimated_circumference_cm is null or trunk_estimated_circumference_cm > 0)
@@ -199,20 +219,25 @@ alter table public.capture_series add constraint capture_series_trunk_estimate_v
     or trunk_estimate_max_cm >= trunk_estimated_circumference_cm
   )
 );
+alter table public.capture_series drop constraint if exists capture_series_trunk_confidence_allowed;
 alter table public.capture_series add constraint capture_series_trunk_confidence_allowed check (
   trunk_confidence is null or trunk_confidence in ('low', 'medium', 'high')
 );
+alter table public.capture_series drop constraint if exists capture_series_trunk_method_allowed;
 alter table public.capture_series add constraint capture_series_trunk_method_allowed check (
   trunk_measurement_method is null
   or trunk_measurement_method in ('field_tape', 'frame_assisted_ai_estimate')
 );
+alter table public.capture_series drop constraint if exists capture_series_trunk_views_allowed;
 alter table public.capture_series add constraint capture_series_trunk_views_allowed check (
   trunk_views_used <@ array['N', 'E', 'S', 'W']::text[]
 );
+alter table public.capture_series drop constraint if exists capture_series_trunk_quality_flags_array;
 alter table public.capture_series add constraint capture_series_trunk_quality_flags_array check (
   jsonb_typeof(trunk_quality_flags) = 'array'
 );
 
+alter table public.annotation_sets drop constraint if exists annotation_sets_target_complete;
 alter table public.annotation_sets add constraint annotation_sets_target_complete check (
   (capture_view_id is null and target_storage_path is null and target_width_px is null and target_height_px is null)
   or (

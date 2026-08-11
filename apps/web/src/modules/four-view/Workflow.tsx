@@ -35,7 +35,8 @@ import {
   defaultManualCorners,
   runManualOperation,
 } from "./manual-flow";
-import { combineTrunkEstimates, summarizeCalibration } from "./science";
+import { captureToAnnotationsDestination } from "./navigation";
+import { combineTrunkEstimates, correctTrunkEdges, summarizeCalibration } from "./science";
 import {
   DIRECTIONS,
   DIRECTION_LABELS,
@@ -272,6 +273,8 @@ export default function FourViewWorkflow() {
     DIRECTIONS.forEach((direction) => manualOperations.current.invalidate(direction));
     setSlots(EMPTY_SLOTS());
     setSeries(null);
+    setFieldCircumferenceCm("");
+    setReviewingTrunkEdges(false);
     setContextConfirmed(false);
   };
 
@@ -336,6 +339,14 @@ export default function FourViewWorkflow() {
     && series?.status !== "completed"
     && DIRECTIONS.every((direction) => slots[direction].file || slots[direction].result?.rectified_image_data_url)
     && DIRECTIONS.some((direction) => slots[direction].file && ["ready", "error"].includes(slots[direction].status));
+
+  useEffect(() => {
+    if (summary.calibrated && DIRECTIONS.some((direction) => (
+      slots[direction].result?.trunk_estimate?.confidence === "low"
+    ))) {
+      setReviewingTrunkEdges(true);
+    }
+  }, [slots, summary.calibrated]);
 
   const chooseFile = (direction: Direction, event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -614,24 +625,13 @@ export default function FourViewWorkflow() {
       const left = edge === "left" ? value : estimate.left_x_normalized;
       const right = edge === "right" ? value : estimate.right_x_normalized;
       if (left >= right) return current;
-      const widthCm = (right - left) * result.source_width * estimate.scale_cm_per_pixel;
       return {
         ...current,
         [direction]: {
           ...current[direction],
           result: {
             ...result,
-            trunk_estimate: {
-              ...estimate,
-              width_cm: widthCm,
-              min_cm: widthCm * 0.78,
-              max_cm: widthCm * 1.22,
-              left_x_normalized: left,
-              right_x_normalized: right,
-              method: "manual_corrected",
-              confidence: estimate.confidence === "low" ? "medium" : estimate.confidence,
-              quality_flags: [...new Set([...estimate.quality_flags, "trunk_edges_user_confirmed"])],
-            },
+            trunk_estimate: correctTrunkEdges(estimate, result.source_width, left, right),
           },
         },
       };
@@ -656,7 +656,7 @@ export default function FourViewWorkflow() {
         ])),
       );
       setSeries(saved);
-      window.location.assign(`/annotations?captureSeriesId=${encodeURIComponent(series.id)}&view=0&tool=ai`);
+      window.location.assign(captureToAnnotationsDestination(series.id));
     } catch (reason) {
       setGlobalError(reason instanceof Error ? reason.message : "No se pudo guardar el tamaño del tronco.");
     }
@@ -684,6 +684,9 @@ export default function FourViewWorkflow() {
         }];
       })) as Record<Direction, SlotState>);
       setSeries(row.series);
+      setFieldCircumferenceCm(row.series.circumference_cm?.toString()
+        ?? row.series.field_circumference_cm?.toString()
+        ?? "");
       setContextConfirmed(true);
     } catch {
       setGlobalError("No se pudo abrir la evaluación guardada.");
@@ -1018,7 +1021,7 @@ export default function FourViewWorkflow() {
             onClick={() => void acceptTrunkAndContinue()}
             className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
           >
-            {trunkEstimate ? "Aceptar estimación y continuar" : "Continuar al análisis de líquenes"}
+            Continuar al análisis de líquenes
           </button>
         </section>
       ) : null}

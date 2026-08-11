@@ -391,7 +391,7 @@ export type Database = {
           total_valid_area_cm2: number | null; total_lichen_area_cm2: number | null; tree_lichen_coverage_percent: number | null;
           occupied_cells: number | null; provisional_morphotype_richness: number | null;
           valid_view_count: number; pending_view_count: number; calculated_at: string | null; confirmed_at: string | null;
-          field_circumference_cm: number | null; field_diameter_cm: number | null; field_measurement_height_m: number | null;
+          circumference_cm: number | null; field_circumference_cm: number | null; field_diameter_cm: number | null; field_measurement_height_m: number | null;
           trunk_estimated_width_cm: number | null; trunk_estimated_circumference_cm: number | null;
           trunk_estimate_min_cm: number | null; trunk_estimate_max_cm: number | null; trunk_confidence: "low" | "medium" | "high" | null;
           trunk_views_used: string[]; trunk_geometric_assumption: string | null; trunk_measurement_method: "field_tape" | "frame_assisted_ai_estimate" | null;
@@ -405,7 +405,7 @@ export type Database = {
           total_valid_area_cm2?: number | null; total_lichen_area_cm2?: number | null; tree_lichen_coverage_percent?: number | null;
           occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
           valid_view_count?: number; pending_view_count?: number; calculated_at?: string | null; confirmed_at?: string | null;
-          field_circumference_cm?: number | null; field_diameter_cm?: number | null; field_measurement_height_m?: number | null;
+          circumference_cm?: number | null; field_circumference_cm?: number | null; field_diameter_cm?: number | null; field_measurement_height_m?: number | null;
           trunk_estimated_width_cm?: number | null; trunk_estimated_circumference_cm?: number | null;
           trunk_estimate_min_cm?: number | null; trunk_estimate_max_cm?: number | null; trunk_confidence?: "low" | "medium" | "high" | null;
           trunk_views_used?: string[]; trunk_geometric_assumption?: string | null; trunk_measurement_method?: "field_tape" | "frame_assisted_ai_estimate" | null;
@@ -419,7 +419,7 @@ export type Database = {
           total_valid_area_cm2?: number | null; total_lichen_area_cm2?: number | null; tree_lichen_coverage_percent?: number | null;
           occupied_cells?: number | null; provisional_morphotype_richness?: number | null;
           valid_view_count?: number; pending_view_count?: number; calculated_at?: string | null; confirmed_at?: string | null;
-          field_circumference_cm?: number | null; field_diameter_cm?: number | null; field_measurement_height_m?: number | null;
+          circumference_cm?: number | null; field_circumference_cm?: number | null; field_diameter_cm?: number | null; field_measurement_height_m?: number | null;
           trunk_estimated_width_cm?: number | null; trunk_estimated_circumference_cm?: number | null;
           trunk_estimate_min_cm?: number | null; trunk_estimate_max_cm?: number | null; trunk_confidence?: "low" | "medium" | "high" | null;
           trunk_views_used?: string[]; trunk_geometric_assumption?: string | null; trunk_measurement_method?: "field_tape" | "frame_assisted_ai_estimate" | null;

@@ -14,6 +14,7 @@ import {
   type AnnotationSetRow,
   type MorphotypeRow,
 } from "@/modules/annotations/client";
+import { annotationRasterPath } from "./annotation-target";
 
 interface AnnotationStudioWorkflowProps {
   initialImageId: string | null;
@@ -62,7 +63,7 @@ export default function AnnotationStudioWorkflow({
         roiWidth: 1,
         roiHeight: 1,
       });
-      const signedUrl = await getSignedImageUrl(storedImage.storage_path);
+      const signedUrl = await getSignedImageUrl(annotationRasterPath(activeSet, storedImage.storage_path));
       if (requestId !== requestIdRef.current) return;
       setImage(storedImage);
       setImages(available.map((item) => item.id === imageId ? {
@@ -129,6 +130,8 @@ export default function AnnotationStudioWorkflow({
       imageUrl={imageUrl}
       imageName={image.original_filename}
       annotationSetId={annotationSet.id}
+      annotationTargetWidth={annotationSet.target_width_px}
+      annotationTargetHeight={annotationSet.target_height_px}
       annotationStatus={annotationSet.status === "completed" && annotationSet.completed_at ? "completed" : "draft"}
       completedAt={annotationSet.completed_at}
       imageContext={image.context}

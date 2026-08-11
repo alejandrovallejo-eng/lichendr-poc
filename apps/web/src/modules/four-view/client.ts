@@ -15,6 +15,7 @@ import { saveAcceptedRegion } from "@/modules/annotations/regions";
 import type { Database } from "@/types/supabase";
 import { dataUrlToBlob } from "./metrics";
 import { fieldTapeDiameter, summarizeCalibration } from "./science";
+import { orderFourViewTargets } from "./navigation";
 import { hasProvisionalGeometry, storedFrameClassification } from "./assistance";
 import type { CombinedTrunkEstimate, CornerPoint, Direction, TrunkViewEstimate, VisionViewResult } from "./types";
 import type { ManualMeasurementMode } from "./manual-flow";
@@ -374,6 +375,7 @@ export async function saveTrunkMeasurement(
     .from("capture_series")
     .update({
       field_circumference_cm: fieldCircumferenceCm,
+      circumference_cm: fieldCircumferenceCm,
       field_diameter_cm: fieldDiameterCm,
       field_measurement_height_m: fieldCircumferenceCm ? 1.3 : null,
       trunk_estimated_width_cm: estimate?.widthCm ?? null,
@@ -413,17 +415,13 @@ export async function loadCaptureAnnotationSequence(seriesId: string): Promise<C
     .eq("capture_series_id", seriesId)
     .eq("active", true);
   if (error) throw error;
-  const byDirection = new Map((data ?? []).map((view) => [view.direction, view]));
-  return (["N", "E", "S", "W"] as Direction[]).flatMap((direction) => {
-    const view = byDirection.get(direction);
-    return view?.annotation_set_id ? [{
+  return orderFourViewTargets(data ?? []).map((view) => ({
       viewId: view.id,
       imageId: view.image_id,
-      annotationSetId: view.annotation_set_id,
-      direction,
+      annotationSetId: view.annotation_set_id!,
+      direction: view.direction,
       status: view.processing_status,
-    }] : [];
-  });
+  }));
 }
 
 export async function refreshSeriesMetrics(seriesId: string): Promise<CaptureSeriesRow> {
@@ -486,9 +484,9 @@ export async function loadSeriesResults(seriesId: string): Promise<Partial<Recor
     const result: VisionViewResult = {
       template_version: view.template_version,
       algorithm_version: view.algorithm_version,
-      canonical_width: 400,
-      canonical_height: 2000,
-      pixels_per_cm: 40,
+      canonical_width: view.rectified_width_px ?? 400,
+      canonical_height: view.rectified_height_px ?? 2000,
+      pixels_per_cm: view.pixels_per_cm ?? 40,
       reprojection_error_px: view.reprojection_error_px,
       quality_flags: view.quality_flags.filter((flag): flag is string => typeof flag === "string"),
       quality_score: view.quality_score ?? 0,

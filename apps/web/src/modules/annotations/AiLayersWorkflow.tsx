@@ -26,6 +26,8 @@ const CLASS_LABELS: Record<AnnotationRegionClassification, string> = {
   bark: "Corteza",
   moss: "Musgo",
   algae: "Alga",
+  paint: "Pintura o marcación",
+  damage: "Daño",
   shadow: "Sombra",
   glare: "Reflejo",
   unknown: "Desconocido",
@@ -55,7 +57,7 @@ export default function AiLayersWorkflow({ imageId, annotationSetId }: AiLayersW
   const totals = useMemo(() => regions.reduce<Record<AnnotationRegionClassification, number>>((accumulator, region) => {
     accumulator[region.classification] += 1;
     return accumulator;
-  }, { lichen: 0, bark: 0, moss: 0, algae: 0, shadow: 0, glare: 0, unknown: 0 }), [regions]);
+  }, { lichen: 0, bark: 0, moss: 0, algae: 0, paint: 0, damage: 0, shadow: 0, glare: 0, unknown: 0 }), [regions]);
 
   const selectRegion = useCallback((region: AnnotationRegionRow) => {
     setSelectedRegionId(region.id);

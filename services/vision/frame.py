@@ -803,6 +803,83 @@ def _encode_mask(mask: np.ndarray) -> str:
     return _encode_image(np.where(mask, 255, 0).astype(np.uint8), "PNG")
 
 
+def estimate_trunk_width(rgb: np.ndarray, rectification: Rectification) -> dict[str, Any] | None:
+    """Estimate trunk edges at sampling height using the known 10 cm frame opening."""
+    height, width = rgb.shape[:2]
+    inverse = np.linalg.inv(rectification.homography)
+    canonical_corners = np.array(
+        [[[0, 0], [CANONICAL_WIDTH - 1, 0], [CANONICAL_WIDTH - 1, CANONICAL_HEIGHT - 1], [0, CANONICAL_HEIGHT - 1]]],
+        dtype=np.float32,
+    )
+    source = cv2.perspectiveTransform(canonical_corners, inverse)[0]
+    left_opening = float((source[0, 0] + source[3, 0]) / 2)
+    right_opening = float((source[1, 0] + source[2, 0]) / 2)
+    centre_y = int(np.clip(np.mean(source[:, 1]), 0, height - 1))
+    opening_width = abs(right_opening - left_opening)
+    if opening_width < 12:
+        return None
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    gradient = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+    half_band = max(3, int(height * 0.025))
+    profile = gradient[max(0, centre_y - half_band):min(height, centre_y + half_band + 1)].mean(axis=0)
+    margin = max(3, int(opening_width * 0.2))
+    search_span = max(int(opening_width * 4), margin + 1)
+    left_end = max(1, int(min(left_opening, right_opening)) - margin)
+    left_start = max(0, left_end - search_span)
+    right_start = min(width - 1, int(max(left_opening, right_opening)) + margin)
+    right_end = min(width, right_start + search_span)
+    if left_end <= left_start or right_end <= right_start:
+        return None
+
+    left_x = left_start + int(np.argmax(profile[left_start:left_end]))
+    right_x = right_start + int(np.argmax(profile[right_start:right_end]))
+    trunk_pixels = right_x - left_x
+    if trunk_pixels <= opening_width * 1.05:
+        return None
+
+    edge_strength = float(min(profile[left_x], profile[right_x]))
+    baseline = float(np.median(profile) + np.std(profile))
+    cm_per_pixel = 10.0 / opening_width
+    width_cm = trunk_pixels * cm_per_pixel
+    flags = list(rectification.quality_flags)
+    weak_edges = edge_strength < max(4.0, baseline * 0.55)
+    if weak_edges:
+        flags.append("trunk_edges_uncertain")
+    if left_x <= left_start + 2 or right_x >= right_end - 3:
+        flags.append("trunk_edge_near_search_limit")
+    ratio = edge_strength / max(baseline, 1.0)
+    confidence = "high" if ratio >= 1.8 and not flags else "medium" if ratio >= 1.05 and not weak_edges else "low"
+    uncertainty = 0.12 if confidence == "high" else 0.22 if confidence == "medium" else 0.45
+    return {
+        "width_cm": round(width_cm, 2),
+        "min_cm": round(max(10.0, width_cm * (1 - uncertainty)), 2),
+        "max_cm": round(width_cm * (1 + uncertainty), 2),
+        "left_x_normalized": round(left_x / max(1, width - 1), 6),
+        "right_x_normalized": round(right_x / max(1, width - 1), 6),
+        "scale_cm_per_pixel": round(cm_per_pixel, 8),
+        "confidence": confidence,
+        "method": "automatic",
+        "quality_flags": sorted(set(flags)),
+    }
+
+
+def rectification_corners(rectification: Rectification) -> list[dict[str, float]]:
+    inverse = np.linalg.inv(rectification.homography)
+    canonical = np.array(
+        [[[0, 0], [CANONICAL_WIDTH - 1, 0], [CANONICAL_WIDTH - 1, CANONICAL_HEIGHT - 1], [0, CANONICAL_HEIGHT - 1]]],
+        dtype=np.float32,
+    )
+    source = cv2.perspectiveTransform(canonical, inverse)[0]
+    return [
+        {
+            "x": round(float(point[0]) / max(1, rectification.source_width - 1), 7),
+            "y": round(float(point[1]) / max(1, rectification.source_height - 1), 7),
+        }
+        for point in source
+    ]
+
+
 def _filter_masks(masks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     minimum = CANONICAL_WIDTH * CANONICAL_HEIGHT * 0.0005
     retained: list[dict[str, Any]] = []
@@ -905,7 +982,8 @@ def calculate_provisional_metrics(
 def analyze_rectification(
     rectification: Rectification,
     metadata: dict[str, Any],
-    automatic_masks: list[dict[str, Any]],
+    automatic_masks: list[dict[str, Any]] | None = None,
+    source_rgb: np.ndarray | None = None,
 ) -> dict[str, Any]:
     critical = critical_quality_flags(rectification.quality_flags)
     classification = str(rectification.frame_detection.get("classification") or "validated")
@@ -922,30 +1000,24 @@ def analyze_rectification(
         "quality_flags": sorted(set(rectification.quality_flags)),
         "quality_score": round(rectification.quality_score, 3),
         "critical_errors": critical,
-        "status": "repeat_photo" if critical else "provisional_ai",
+        "status": "repeat_photo" if critical else "rectification_review",
         "rectified_image_data_url": _encode_image(rectification.canonical_rgb, "JPEG"),
         "preserved_metadata": metadata,
         "model_name": "MobileSAM vit_t",
         "source": f"mobile_sam_cielab:{classification}",
         "frame_detection": rectification.frame_detection,
-        "corner_proposal": None,
+        "corner_proposal": rectification_corners(rectification),
         "source_width": rectification.source_width,
         "source_height": rectification.source_height,
+        "trunk_estimate": estimate_trunk_width(source_rgb, rectification) if source_rgb is not None else None,
     }
-    if critical:
-        result["metrics"] = None
-        return result
-    result["metrics"] = calculate_provisional_metrics(
-        rectification.canonical_rgb,
-        automatic_masks,
-        rectification.quality_flags,
-    )
+    result["metrics"] = None
     return result
 
 
 def analyze_view(raw: bytes, mime: str, automatic_masks: list[dict[str, Any]]) -> dict[str, Any]:
     rgb, metadata = decode_image(raw, mime)
-    return analyze_rectification(rectify_frame(rgb), metadata, automatic_masks)
+    return analyze_rectification(rectify_frame(rgb), metadata, source_rgb=rgb)
 
 
 def aggregate_tree_metrics(views: list[dict[str, Any]]) -> dict[str, Any]:

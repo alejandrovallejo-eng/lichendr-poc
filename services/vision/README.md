@@ -53,10 +53,10 @@ Frees the session immediately.
 
 - `POST /template/validate`: validates JPEG/PNG/HEIC/HEIF signatures and the four expected `DICT_5X5_50` IDs.
 - `POST /rectify`: applies the physical frame homography and returns the exact 400 × 2000 inner window.
-- `POST /analyze-view`: uses multipart `action=detect|confirm_corners|analyze_confirmed`. Every decodable image can enter manual selection, even with zero ArUco or no safe proposal. `analyze_confirmed` validates the ordered inner-opening corners, rectifies to 400 × 2000 px, and runs MobileSAM only after the explicit button action. `manual_mode=manual_confirmed|manual_assisted_provisional` records whether all corners were visible or any geometry was estimated.
+- `POST /analyze-view`: uses multipart `action=detect|confirm_corners|analyze_confirmed`. Every decodable image can enter manual selection, even with zero ArUco or no safe proposal. `analyze_confirmed` validates the ordered inner-opening corners and rectifies to 400 × 2000 px without calculating lichen coverage. It also proposes trunk edges and an uncertainty range from the 10 cm physical reference. `manual_mode=manual_confirmed|manual_assisted_provisional` records whether all corners were visible or any geometry was estimated.
 - `GET /processing/status`: reports readiness and confirms that inference is sequential.
 
-Every frame response reports detected/missing IDs, rejected candidates, successful pyramid level and variant, method, confidence, reprojection error and a specific rejection reason. The automatic labels `LQ-001`, `LQ-002`, … are provisional visual morphotypes. They are not taxonomic identifications. A view with critical blur, exposure, resolution or homography errors returns `repeat_photo` without a silent coverage percentage.
+Every frame response reports detected/missing IDs, rejected candidates, successful pyramid level and variant, method, confidence, reprojection error and a specific rejection reason. MobileSAM and CIELAB run later in Annotation Studio on the saved rectification. Its visual morphotypes are not taxonomic identifications. A view with critical blur, exposure, resolution or homography errors returns `repeat_photo` without a silent coverage percentage.
 
 `scripts/dev-with-vision.sh` waits at least 180 seconds for MobileSAM by default. Increase `VISION_STARTUP_TIMEOUT` when needed; values below 180 are rejected. A short configurable `VISION_STARTUP_GRACE` prevents a backend that finishes immediately after the main timeout from being terminated.
 

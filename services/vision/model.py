@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 MAX_SESSIONS = 3
 SESSION_TTL_SECONDS = 15 * 60  # 15 minutes
-MAX_IMAGE_DIMENSION = 1024
+MAX_IMAGE_DIMENSION = 2048
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 MODEL_NAME = "MobileSAM vit_t"

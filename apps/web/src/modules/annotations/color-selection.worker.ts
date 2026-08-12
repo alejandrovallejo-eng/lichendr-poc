@@ -15,7 +15,7 @@ let componentLabels: Int32Array | null = null;
 let retainedComponents: SimilarColorComponent[] = [];
 let latestRequestId = 0;
 
-const MAX_DIMENSION = 1024;
+const MAX_DIMENSION = 2048;
 const MAX_PIXELS = MAX_DIMENSION * MAX_DIMENSION;
 const MAX_PALETTE_SAMPLES = 60_000;
 const MAX_PALETTE_BUCKETS = 512;

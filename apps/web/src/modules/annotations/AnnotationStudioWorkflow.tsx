@@ -14,13 +14,21 @@ import {
   type AnnotationSetRow,
   type MorphotypeRow,
 } from "@/modules/annotations/client";
+import { annotationRasterPath } from "./annotation-target";
 
 interface AnnotationStudioWorkflowProps {
   initialImageId: string | null;
   initialTool: "manual" | "ai" | "layers";
+  captureSeriesId?: string;
+  captureViewIndex?: number;
 }
 
-export default function AnnotationStudioWorkflow({ initialImageId, initialTool }: AnnotationStudioWorkflowProps) {
+export default function AnnotationStudioWorkflow({
+  initialImageId,
+  initialTool,
+  captureSeriesId,
+  captureViewIndex = 0,
+}: AnnotationStudioWorkflowProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const requestIdRef = useRef(0);
@@ -55,7 +63,7 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
         roiWidth: 1,
         roiHeight: 1,
       });
-      const signedUrl = await getSignedImageUrl(storedImage.storage_path);
+      const signedUrl = await getSignedImageUrl(annotationRasterPath(activeSet, storedImage.storage_path));
       if (requestId !== requestIdRef.current) return;
       setImage(storedImage);
       setImages(available.map((item) => item.id === imageId ? {
@@ -122,6 +130,8 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
       imageUrl={imageUrl}
       imageName={image.original_filename}
       annotationSetId={annotationSet.id}
+      annotationTargetWidth={annotationSet.target_width_px}
+      annotationTargetHeight={annotationSet.target_height_px}
       annotationStatus={annotationSet.status === "completed" && annotationSet.completed_at ? "completed" : "draft"}
       completedAt={annotationSet.completed_at}
       imageContext={image.context}
@@ -134,7 +144,9 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
         height: annotationSet.roi_height,
       }}
       initialTool={initialTool}
-      onChooseAnotherImage={() => router.push(`/annotations?tool=${initialTool}`)}
+      onChooseAnotherImage={() => router.push(captureSeriesId
+        ? `/annotations?captureSeriesId=${encodeURIComponent(captureSeriesId)}&view=${captureViewIndex}&tool=${initialTool}`
+        : `/annotations?tool=${initialTool}`)}
       onMorphotypesChange={setMorphotypes}
       onAnnotationSetChange={(nextSet) => {
         setAnnotationSet(nextSet);
@@ -156,6 +168,14 @@ export default function AnnotationStudioWorkflow({ initialImageId, initialTool }
         router.push(`/analysis?${params.toString()}`);
       }}
       onEvaluateNext={async () => {
+        if (captureSeriesId) {
+          if (captureViewIndex < 3) {
+            router.push(`/annotations?captureSeriesId=${encodeURIComponent(captureSeriesId)}&view=${captureViewIndex + 1}&tool=ai`);
+          } else {
+            router.push(`/analysis?captureSeriesId=${encodeURIComponent(captureSeriesId)}`);
+          }
+          return true;
+        }
         const available = await listAnnotationImages();
         const pending = available
           .filter((item) => item.id !== image.id && item.annotationStatus !== "completed")

@@ -20,6 +20,18 @@ export type VisionViewStatus =
   | "repeat_photo"
   | "provisional_ai";
 
+export interface TrunkViewEstimate {
+  width_cm: number;
+  min_cm: number;
+  max_cm: number;
+  left_x_normalized: number;
+  right_x_normalized: number;
+  scale_cm_per_pixel: number;
+  confidence: "low" | "medium" | "high";
+  method: "automatic" | "manual_corrected";
+  quality_flags: string[];
+}
+
 export interface CornerPoint {
   x: number;
   y: number;
@@ -62,6 +74,25 @@ export interface VisionMetrics {
   lichen_union_mask_data_url: string;
 }
 
+export interface CalibrationSummary {
+  validViews: number;
+  pendingViews: number;
+  totalCalibratedAreaCm2: number;
+  provisionalViews: number;
+  calibrated: boolean;
+}
+
+export interface CombinedTrunkEstimate {
+  widthCm: number;
+  circumferenceCm: number;
+  minCm: number;
+  maxCm: number;
+  confidence: "low" | "medium" | "high";
+  viewsUsed: Direction[];
+  geometricAssumption: "circular" | "elliptical";
+  qualityFlags: string[];
+}
+
 export interface VisionViewResult {
   template_version: string;
   algorithm_version: string;
@@ -81,6 +112,7 @@ export interface VisionViewResult {
   corner_proposal: CornerPoint[] | null;
   source_width: number;
   source_height: number;
+  trunk_estimate: TrunkViewEstimate | null;
 }
 
 export interface TreeMetricSummary {

@@ -9,8 +9,8 @@ CHECKPOINT_FILE="${CHECKPOINT_DIR}/mobile_sam.pt"
 # Version: MobileSAM v1.0, vit_t architecture
 # SHA-256: verify manually on first pull (see docs/DEPLOYMENT.md)
 CHECKPOINT_URL="${MOBILESAM_CHECKPOINT_URL:-https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt}"
-# Minimum expected size: ~9 MB (9_000_000 bytes)
-MIN_BYTES=9000000
+# Minimum expected size: ~38 MB (38_000_000 bytes)
+MIN_BYTES=38000000
 
 mkdir -p "${CHECKPOINT_DIR}"
 

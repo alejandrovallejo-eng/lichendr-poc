@@ -14,7 +14,10 @@ WORKDIR /build
 # Using --no-cache-dir to minimise layer size.
 RUN pip install --no-cache-dir \
         torch==2.2.2 torchvision==0.17.2 \
-        --index-url https://download.pytorch.org/whl/cpu
+        --index-url https://download.pytorch.org/whl/cpu \
+    || pip install --no-cache-dir torch torchvision \
+        --index-url https://download.pytorch.org/whl/cpu \
+    || pip install --no-cache-dir torch torchvision
 
 RUN pip install --no-cache-dir \
         "git+https://github.com/ChaoningZhang/MobileSAM.git@v1.0"

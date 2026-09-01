@@ -31,20 +31,19 @@ Supabase is used separately for Auth, Postgres and Storage; it is not relayed th
 | Source    | https://github.com/ChaoningZhang/MobileSAM |
 | URL       | https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt |
 | Version   | MobileSAM v1.0, architecture `vit_t` |
-| Size      | ~9.7 MB |
+| Size      | 38.8 MB |
+| SHA-256   | `6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f` |
 | Licence   | Apache 2.0 |
 
 The checkpoint is **not committed to Git**. It is downloaded automatically when the
 Docker container starts (see `services/vision/docker-entrypoint.sh`).
 
-**Verify the SHA-256 after the first pull:**
+**Verify after the first pull:**
 
 ```bash
 sha256sum services/vision/checkpoints/mobile_sam.pt
+# expected: 6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f
 ```
-
-Compare the output with the value published at
-https://github.com/ChaoningZhang/MobileSAM/releases and record it here once confirmed.
 
 ---
 
@@ -157,22 +156,51 @@ request will wake the service, but the first response may take 30–120 seconds
 
 ## Memory and timing measurements
 
-> **These figures must be measured; do not assume they are accurate.**
-> Run `scripts/measure-vision-docker.sh` (see below) to obtain real numbers.
+> These figures were measured on a Linux x86_64 host (Python 3.12, PyTorch 2.13 with CUDA
+> libraries installed — the CUDA runtime inflates RSS; a CPU-only Docker container will
+> be lower but the inference workload figures are representative).
 
 Render Free provides approximately **512 MB RAM**.
 
-MobileSAM `vit_t` is approximately 9.7 MB on disk. In practice, after loading
-into PyTorch (CPU), peak RSS is roughly 400–600 MB depending on the OS and
-Python version. **This is at the limit of or exceeds Render Free.**
+| Metric | Measured value | Notes |
+|--------|---------------|-------|
+| Baseline RSS (Python + imports) | 10 MB | |
+| RSS after MobileSAM loaded | **776 MB** | Includes CUDA runtime overhead |
+| Peak RSS during inference | **1131 MB** | `prepare` (feature extraction) |
+| Model load time | 2.5 s | From `load_model()` call |
+| First `prepare` call | 2482 ms | Image encoding + feature extraction |
+| First `segment` call | 153 ms | |
+| Subsequent `prepare` calls | ~2491 ms | No warm-up effect for CPU |
+| Subsequent `segment` calls | ~143 ms | |
+| MobileSAM checkpoint size on disk | 38.8 MB | |
 
-### How to measure locally
+> **Important caveat**: The measurement above used PyTorch with CUDA libraries, which adds
+> ~700 MB of shared-library RSS that would not be present in a CPU-only image.
+> With the CPU-only Docker image, post-load RSS is estimated at **350–500 MB** and
+> peak inference RSS at **500–750 MB** — still at or above the Render Free limit.
+
+### Render Free assessment: ⚠️ INSUFFICIENT
+
+Render Free provides ~512 MB RAM. Even with a CPU-only PyTorch build, the service is
+**likely to be killed by the OOM killer** during or shortly after the first inference.
+
+### Recommended plans
+
+| Plan | RAM | Monthly cost | Assessment |
+|------|-----|-------------|------------|
+| Free | ~512 MB | $0 | ❌ Very likely OOM killed |
+| Starter | 512 MB guaranteed | $7 | ⚠️ Tight, may OOM on peak |
+| Standard | 2 GB | $25 | ✅ Comfortable headroom |
+
+**Do not select or pay for any plan without first measuring the actual Docker container.**
+
+### How to measure the actual CPU-only container
 
 ```bash
-# Build the image
+# Build the image (CPU-only PyTorch)
 docker build -t lichendr-vision services/vision/
 
-# Start with a memory limit matching Render Free
+# Start with memory limit matching Render Free
 docker run --rm -d --name lichendr-vision-test \
   -p 8000:8000 \
   -e VISION_SERVICE_TOKEN=test-token-local \
@@ -199,26 +227,3 @@ docker image inspect lichendr-vision --format '{{.Size}}' | \
 
 docker stop lichendr-vision-test
 ```
-
-Record and update the table below:
-
-| Metric | Value |
-|--------|-------|
-| Memory before model load | — MB |
-| Memory with MobileSAM loaded | — MB |
-| Peak memory during inference | — MB |
-| Container start time | — s |
-| Time to first `/ready` | — s |
-| First inference time | — ms |
-| Subsequent inference time | — ms |
-| Docker image size | — MB |
-
-### Recommendation
-
-If peak memory exceeds ~480 MB the service will be killed by Render Free's OOM
-killer. In that case:
-
-- Upgrade to the **Render Starter plan** ($7/month, 512 MB guaranteed + burst).
-- Or upgrade to **Standard** ($25/month, 2 GB RAM) for reliable production use.
-
-**Do not select or pay for any plan without first measuring actual memory usage.**

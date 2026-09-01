@@ -15,5 +15,5 @@ export const VISION_SERVICE_URL =
  */
 export function visionAuthHeaders(): Record<string, string> {
   const token = process.env.VISION_SERVICE_TOKEN;
-  return token ? { Authorization: `****** } : {};
+  return token ? { Authorization: "Bearer " + token } : {};
 }

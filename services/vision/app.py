@@ -69,12 +69,12 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 def _require_token(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer_scheme),
 ) -> None:
-    """Dependency that enforces ****** auth when VISION_SERVICE_TOKEN is configured."""
+    """Dependency that enforces ****** when VISION_SERVICE_TOKEN is configured."""
     if _VISION_SERVICE_TOKEN is None:
         # Token not configured — allow in development; warn on every request.
         return
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Missing ******")
+        raise HTTPException(status_code=401, detail="Missing authorization.")
     if not hmac.compare_digest(credentials.credentials, _VISION_SERVICE_TOKEN):
         raise HTTPException(status_code=403, detail="Invalid token.")
 

@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
-
-const VISION_SERVICE_URL = process.env.VISION_SERVICE_URL ?? "http://127.0.0.1:8000";
+import { VISION_SERVICE_URL, visionAuthHeaders } from "@/lib/vision";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +50,7 @@ export async function POST(request: NextRequest) {
   try {
     const response = await fetch(`${VISION_SERVICE_URL}/segment`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...visionAuthHeaders() },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(60_000),
     });

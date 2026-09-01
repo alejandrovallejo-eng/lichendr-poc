@@ -1,14 +1,16 @@
 """FastAPI application for MobileSAM vision service."""
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from model import (
     delete_session,
@@ -36,6 +38,7 @@ from schemas import (
     DeleteSessionResponse,
     HealthResponse,
     PrepareResponse,
+    ReadyResponse,
     SegmentRequest,
     SegmentResponse,
 )
@@ -48,6 +51,33 @@ CHECKPOINT_PATH = os.environ.get(
     os.path.join(os.path.dirname(__file__), "checkpoints", "mobile_sam.pt"),
 )
 
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+_VISION_SERVICE_TOKEN: str | None = os.environ.get("VISION_SERVICE_TOKEN") or None
+
+if _VISION_SERVICE_TOKEN is None:
+    logger.warning(
+        "VISION_SERVICE_TOKEN is not set. Inference endpoints are unprotected. "
+        "Set this variable in production."
+    )
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _require_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer_scheme),
+) -> None:
+    """Dependency that enforces ****** auth when VISION_SERVICE_TOKEN is configured."""
+    if _VISION_SERVICE_TOKEN is None:
+        # Token not configured — allow in development; warn on every request.
+        return
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Missing ******")
+    if not hmac.compare_digest(credentials.credentials, _VISION_SERVICE_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid token.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
@@ -57,12 +87,20 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
 
 app = FastAPI(title="Vision Service", lifespan=lifespan)
 
-# Only allow same-origin (Next.js server-side proxy calls from 127.0.0.1)
+# Only allow same-origin (Next.js server-side proxy calls from 127.0.0.1).
+# In production all calls originate from the Next.js server, so no broad CORS
+# is needed for inference endpoints.
+_cors_origins_raw = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    if _cors_origins_raw.strip()
+    else ["http://127.0.0.1:3000", "http://localhost:3000"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_origins=_cors_origins,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -87,9 +125,18 @@ async def health() -> HealthResponse:
     )
 
 
+@app.get("/ready", response_model=ReadyResponse)
+async def ready() -> ReadyResponse:
+    """Readiness probe: returns 200 only after MobileSAM is fully loaded."""
+    if not is_model_loaded():
+        raise HTTPException(status_code=503, detail="Model not loaded yet.")
+    return ReadyResponse(status="ready", model=MODEL_NAME)
+
+
 @app.post("/prepare", response_model=PrepareResponse)
 async def prepare(
     image: UploadFile = File(...),
+    _auth: None = Depends(_require_token),
 ) -> PrepareResponse:
     content_type = (image.content_type or "").split(";")[0].strip().lower()
     accepted = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
@@ -120,7 +167,10 @@ async def prepare(
 
 
 @app.post("/segment", response_model=SegmentResponse)
-async def segment(body: SegmentRequest) -> SegmentResponse:
+async def segment(
+    body: SegmentRequest,
+    _auth: None = Depends(_require_token),
+) -> SegmentResponse:
     try:
         candidates, recommended_index, segment_ms = segment_session(
             body.sessionId,
@@ -140,7 +190,10 @@ async def segment(body: SegmentRequest) -> SegmentResponse:
 
 
 @app.delete("/sessions/{session_id}", response_model=DeleteSessionResponse)
-async def delete_session_route(session_id: str) -> DeleteSessionResponse:
+async def delete_session_route(
+    session_id: str,
+    _auth: None = Depends(_require_token),
+) -> DeleteSessionResponse:
     if len(session_id) < 8 or len(session_id) > 128:
         raise HTTPException(status_code=400, detail="Invalid session ID.")
     delete_session(session_id)
@@ -148,7 +201,10 @@ async def delete_session_route(session_id: str) -> DeleteSessionResponse:
 
 
 @app.post("/template/validate")
-async def validate_template(image: UploadFile = File(...)) -> dict:
+async def validate_template(
+    image: UploadFile = File(...),
+    _auth: None = Depends(_require_token),
+) -> dict:
     raw = await image.read()
     try:
         rgb, _ = decode_image(raw, image.content_type or "")
@@ -165,7 +221,10 @@ async def validate_template(image: UploadFile = File(...)) -> dict:
 
 
 @app.post("/rectify")
-async def rectify(image: UploadFile = File(...)) -> dict:
+async def rectify(
+    image: UploadFile = File(...),
+    _auth: None = Depends(_require_token),
+) -> dict:
     raw = await image.read()
     try:
         rgb, _ = decode_image(raw, image.content_type or "")
@@ -190,6 +249,7 @@ async def analyze_view_route(
     action: str = Form("detect"),
     corners: str | None = Form(None),
     manual_mode: str = Form("manual_confirmed"),
+    _auth: None = Depends(_require_token),
 ) -> dict:
     raw = await image.read()
     try:

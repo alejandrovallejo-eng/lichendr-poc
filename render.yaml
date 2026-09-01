@@ -1,0 +1,33 @@
+# render.yaml — Render infrastructure definition for LichenDR
+# Docs: https://render.com/docs/infrastructure-as-code
+#
+# Deploy from the repository root. Render will detect this file automatically.
+
+services:
+  - type: web
+    name: lichendr-vision
+    runtime: docker
+    dockerfilePath: ./services/vision/Dockerfile
+    dockerContext: ./services/vision
+    # Render Free plan provides ~512 MB RAM and a shared CPU.
+    # See docs/DEPLOYMENT.md for measured memory figures.
+    plan: free
+    region: oregon
+    branch: v1-modular
+
+    # Health check — Render uses this to decide when the service is healthy
+    # and to restart it if it becomes unhealthy.
+    healthCheckPath: /health
+
+    # Environment variables — set values in the Render dashboard.
+    # NEVER commit real values here.
+    envVars:
+      - key: VISION_SERVICE_TOKEN
+        sync: false        # must be set manually in the Render dashboard
+      - key: PORT
+        value: "8000"
+      - key: UVICORN_WORKERS
+        value: "1"
+      # Optional: override checkpoint download URL
+      # - key: MOBILESAM_CHECKPOINT_URL
+      #   value: https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt

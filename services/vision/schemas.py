@@ -12,6 +12,11 @@ class HealthResponse(BaseModel):
 	model: Literal["MobileSAM vit_t"]
 
 
+class ReadyResponse(BaseModel):
+	status: Literal["ready"]
+	model: Literal["MobileSAM vit_t"]
+
+
 class PrepareResponse(BaseModel):
 	sessionId: str
 	width: int = Field(ge=1)

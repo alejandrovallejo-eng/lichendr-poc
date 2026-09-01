@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
-
-const VISION_SERVICE_URL = process.env.VISION_SERVICE_URL ?? "http://127.0.0.1:8000";
+import { VISION_SERVICE_URL, visionAuthHeaders } from "@/lib/vision";
 const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPTED_MIMES = new Set(["image/jpeg", "image/png", "image/heic", "image/heif"]);
 const ACTIONS = new Set(["detect", "confirm_corners", "analyze_confirmed"]);
@@ -50,6 +49,7 @@ export async function POST(request: NextRequest) {
   try {
     const response = await fetch(`${VISION_SERVICE_URL}/analyze-view`, {
       method: "POST",
+      headers: { ...visionAuthHeaders() },
       body: upstream,
       signal: AbortSignal.timeout(5 * 60_000),
     });

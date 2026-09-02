@@ -16,15 +16,19 @@ import { fetchSamplingEventsBySite } from "@/modules/sampling-events/client";
 import { fetchTreesBySite } from "@/modules/trees/client";
 import type { Project, SamplingEvent, Site, Tree } from "@/types/domain";
 import {
-  analyzeFourViewFile,
+  analyzeStoredFourViewImage,
   ensureTreeSampleForTree,
   finalizeSeries,
   getOrCreateCaptureSeries,
   loadSeriesResults,
+  loadSeriesViews,
+  loadStoredImageFile,
   listEvaluatedTrees,
   saveProcessedView,
+  stageCaptureView,
   saveTrunkMeasurement,
   type CaptureSeriesRow,
+  type CaptureViewRow,
   type EvaluatedTreeRow,
 } from "./client";
 import { classificationLabel, detectionMessage, reprojectionLabel } from "./assistance";
@@ -47,6 +51,7 @@ import {
 
 type SlotState = {
   file: File | null;
+  view: CaptureViewRow | null;
   requestKey: string;
   status:
     | "empty"
@@ -68,6 +73,7 @@ type SlotState = {
 
 const EMPTY_SLOT = (): SlotState => ({
   file: null,
+  view: null,
   requestKey: crypto.randomUUID(),
   status: "empty",
   error: null,
@@ -356,6 +362,7 @@ export default function FourViewWorkflow() {
       ...current,
       [direction]: file ? {
         file,
+        view: null,
         requestKey: crypto.randomUUID(),
         status: "ready",
         error: null,
@@ -367,6 +374,32 @@ export default function FourViewWorkflow() {
       } : EMPTY_SLOT(),
     }));
     event.currentTarget.value = "";
+  };
+
+  const ensureStoredView = async (
+    direction: Direction,
+    slot: SlotState,
+    activeSeries: CaptureSeriesRow,
+    treeSampleId: string,
+  ): Promise<CaptureViewRow> => {
+    if (slot.view) return slot.view;
+    if (!slot.file || !projectId || !siteId || !eventId) {
+      throw new Error("No se conserva la fotografía o su contexto para subirla.");
+    }
+    const view = await stageCaptureView({
+      file: slot.file,
+      direction,
+      series: activeSeries,
+      requestKey: slot.requestKey,
+      context: { projectId, siteId, eventId, treeSampleId },
+    });
+    setSlots((current) => ({
+      ...current,
+      [direction]: current[direction].requestKey === slot.requestKey
+        ? { ...current[direction], view }
+        : current[direction],
+    }));
+    return view;
   };
 
   const processAll = async () => {
@@ -390,8 +423,10 @@ export default function FourViewWorkflow() {
         if (!file || !["ready", "error"].includes(slot.status)) continue;
         setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "processing", error: null } }));
         try {
-          const result = await analyzeFourViewFile(file);
+          const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
+          const result = await analyzeStoredFourViewImage(view.image_id);
           if (result.status === "needs_confirmation") {
+            const file = slot.file ?? await loadStoredImageFile(view.image_id);
             const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
             const geometryError = cornerGeometryError(
               proposedCorners,
@@ -402,6 +437,7 @@ export default function FourViewWorkflow() {
               ...current,
               [direction]: {
                 ...current[direction],
+                file,
                 result,
                 status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
                 error: geometryError,
@@ -414,11 +450,9 @@ export default function FourViewWorkflow() {
             continue;
           }
           await saveProcessedView({
-            file,
-            direction,
+            view,
             result,
             series: activeSeries,
-            requestKey: slot.requestKey,
             context: { projectId, siteId, eventId, treeSampleId },
           });
           if (result.rectified_image_data_url) completed[direction] = result;
@@ -453,7 +487,7 @@ export default function FourViewWorkflow() {
   const saveSingleResult = async (
     direction: Direction,
     result: VisionViewResult,
-    file: File,
+    view: CaptureViewRow,
     requestKey: string,
     operationToken: string,
   ) => {
@@ -465,11 +499,9 @@ export default function FourViewWorkflow() {
     const activeSeries = series ?? await getOrCreateCaptureSeries(treeSampleId);
     if (!series) setSeries(activeSeries);
     await saveProcessedView({
-      file,
-      direction,
+      view,
       result,
       series: activeSeries,
-      requestKey,
       context: { projectId, siteId, eventId, treeSampleId },
     });
     if (operationTokens.current[direction] !== operationToken) return;
@@ -530,7 +562,7 @@ export default function FourViewWorkflow() {
 
   const analyzeManualArea = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || !slot.corners || !["four_points_ready", "error"].includes(slot.status)) return;
+    if (!slot.file || !slot.view || !slot.corners || !["four_points_ready", "error"].includes(slot.status)) return;
     const geometryError = cornerGeometryError(slot.corners, slot.result?.source_width ?? 0, slot.result?.source_height ?? 0);
     if (geometryError || (slot.estimatedGeometry && !slot.provisionalAcknowledged)) return;
     const mode = slot.estimatedGeometry ? "manual_assisted_provisional" : "manual_confirmed";
@@ -544,12 +576,12 @@ export default function FourViewWorkflow() {
           [direction]: { ...current[direction], status: "analyzing", error: null },
         }));
       },
-      request: () => analyzeFourViewFile(slot.file!, "analyze_confirmed", slot.corners!, mode),
+      request: () => analyzeStoredFourViewImage(slot.view!.image_id, "analyze_confirmed", slot.corners!, mode),
       onSuccess: async (result, operationToken) => {
         if (!result.rectified_image_data_url || result.critical_errors.length > 0) {
           throw new Error(result.critical_errors.join(", ") || "La calibración no produjo una rectificación utilizable.");
         }
-        await saveSingleResult(direction, result, slot.file!, slot.requestKey, operationToken);
+        await saveSingleResult(direction, result, slot.view!, slot.requestKey, operationToken);
       },
       onError: (error) => {
         setSlots((current) => ({
@@ -566,7 +598,7 @@ export default function FourViewWorkflow() {
 
   const retryDetection = async (direction: Direction) => {
     const slot = slots[direction];
-    if (!slot.file || ["processing", "analyzing"].includes(slot.status)) return;
+    if ((!slot.file && !slot.view) || ["processing", "analyzing"].includes(slot.status)) return;
     const operationToken = crypto.randomUUID();
     operationTokens.current[direction] = operationToken;
     setSlots((current) => ({
@@ -574,15 +606,24 @@ export default function FourViewWorkflow() {
       [direction]: { ...current[direction], status: "processing", error: null },
     }));
     try {
-      const result = await analyzeFourViewFile(slot.file);
+      if (!projectId || !siteId || !eventId || !treeId) {
+        throw new Error("No se conserva el contexto necesario para reintentar.");
+      }
+      const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
+      const activeSeries = series ?? await getOrCreateCaptureSeries(treeSampleId);
+      if (!series) setSeries(activeSeries);
+      const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
+      const result = await analyzeStoredFourViewImage(view.image_id);
       if (operationTokens.current[direction] !== operationToken) return;
       if (result.status === "needs_confirmation") {
+        const file = slot.file ?? await loadStoredImageFile(view.image_id);
         const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
         const geometryError = cornerGeometryError(proposedCorners, result.source_width, result.source_height);
         setSlots((current) => ({
           ...current,
           [direction]: {
             ...current[direction],
+            file,
             result,
             status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
             error: geometryError,
@@ -593,7 +634,7 @@ export default function FourViewWorkflow() {
           },
         }));
       } else {
-        await saveSingleResult(direction, result, slot.file, slot.requestKey, operationToken);
+        await saveSingleResult(direction, result, view, slot.requestKey, operationToken);
       }
     } catch (reason) {
       if (operationTokens.current[direction] !== operationToken) return;
@@ -664,19 +705,26 @@ export default function FourViewWorkflow() {
 
   const openEvaluation = async (row: EvaluatedTreeRow) => {
     try {
-      const stored = await loadSeriesResults(row.series.id);
+      const [stored, views] = await Promise.all([
+        loadSeriesResults(row.series.id),
+        loadSeriesViews(row.series.id),
+      ]);
+      const viewsByDirection = new Map(views.map((view) => [view.direction, view]));
       setProjectId(row.projectId);
       setSiteId(row.siteId);
       setEventId(row.eventId);
       setTreeId(row.treeId);
       setSlots(Object.fromEntries(DIRECTIONS.map((direction) => {
         const result = stored[direction] ?? null;
+        const view = viewsByDirection.get(direction) ?? null;
         return [direction, {
           file: null,
+          view,
           requestKey: crypto.randomUUID(),
           result,
-          status: result?.rectified_image_data_url ? "saved" : result ? "repeat" : "empty",
-          error: result?.critical_errors.join(", ") || null,
+          status: result?.rectified_image_data_url ? "saved" : result ? "repeat" : view ? "error" : "empty",
+          error: result?.critical_errors.join(", ")
+            || (view ? "La fotografía está guardada y su análisis está pendiente. Puedes reintentar la IA." : null),
           corners: null,
           initialCorners: null,
           estimatedGeometry: result?.frame_detection.classification === "manual_assisted_provisional",
@@ -920,6 +968,16 @@ export default function FourViewWorkflow() {
               ) : null}
               {slot.status === "repeat" ? (
                 <button type="button" disabled={operationLocked} className="mt-3 rounded border px-3 py-2 text-sm disabled:opacity-50" onClick={() => repeat(direction)}>Repetir esta vista</button>
+              ) : null}
+              {slot.view && !slot.result && slot.status === "error" ? (
+                <button
+                  type="button"
+                  disabled={operationLocked}
+                  className="mt-3 rounded border border-emerald-800 px-3 py-2 text-sm font-semibold text-emerald-900 disabled:opacity-50"
+                  onClick={() => void retryDetection(direction)}
+                >
+                  Reintentar IA con la fotografía guardada
+                </button>
               ) : null}
             </article>
           );

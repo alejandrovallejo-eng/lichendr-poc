@@ -5,7 +5,11 @@ import hmac
 import json
 import logging
 import os
+import asyncio
 from contextlib import asynccontextmanager
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_opener
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +50,11 @@ from schemas import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+ACCEPTED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/heic", "image/heif"}
+SIGNED_IMAGE_TIMEOUT_SECONDS = 30
+_SUPABASE_STORAGE_HOST = os.environ.get("SUPABASE_STORAGE_HOST", "").strip().lower().rstrip(".")
+
 CHECKPOINT_PATH = os.environ.get(
     "MOBILESAM_CHECKPOINT",
     os.path.join(os.path.dirname(__file__), "checkpoints", "mobile_sam.pt"),
@@ -64,6 +73,103 @@ if _VISION_SERVICE_TOKEN is None:
     )
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _validate_signed_image_url(raw_url: str) -> None:
+    if not _SUPABASE_STORAGE_HOST:
+        raise ValueError("SUPABASE_STORAGE_HOST is not configured.")
+    try:
+        parsed = urlsplit(raw_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Invalid signed image URL.") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.hostname.lower().rstrip(".") != _SUPABASE_STORAGE_HOST
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        raise ValueError("Signed image URL host is not allowed.")
+    path = unquote(parsed.path)
+    if not path.startswith("/storage/v1/object/sign/lichen-images/") or ".." in path:
+        raise ValueError("Signed image URL path is not allowed.")
+    if not parse_qs(parsed.query).get("token"):
+        raise ValueError("Signed image URL has no token.")
+
+
+def _download_signed_image(raw_url: str, declared_mime: str, declared_size: int) -> bytes:
+    _validate_signed_image_url(raw_url)
+    if declared_mime not in ACCEPTED_IMAGE_MIMES:
+        raise ValueError("Unsupported image MIME type.")
+    if declared_size <= 0 or declared_size > MAX_IMAGE_BYTES:
+        raise ValueError("Image size is invalid.")
+    request = UrlRequest(
+        raw_url,
+        headers={"Accept": declared_mime, "User-Agent": "LichenDR-Vision/1"},
+        method="GET",
+    )
+    try:
+        with build_opener(_RejectRedirects).open(
+            request,
+            timeout=SIGNED_IMAGE_TIMEOUT_SECONDS,
+        ) as response:
+            _validate_signed_image_url(response.geturl())
+            response_mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if response_mime != declared_mime:
+                raise ValueError("Stored image MIME type does not match its record.")
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    announced_size = int(content_length)
+                except ValueError as exc:
+                    raise ValueError("Stored image size header is invalid.") from exc
+                if announced_size != declared_size or announced_size > MAX_IMAGE_BYTES:
+                    raise ValueError("Stored image size does not match its record.")
+            chunks: list[bytes] = []
+            received = 0
+            while True:
+                chunk = response.read(min(1024 * 1024, MAX_IMAGE_BYTES + 1 - received))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                received += len(chunk)
+                if received > MAX_IMAGE_BYTES:
+                    raise ValueError("Stored image exceeds 20 MB.")
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise ValueError("Stored image could not be downloaded.") from exc
+    if received != declared_size:
+        raise ValueError("Stored image size does not match its record.")
+    return b"".join(chunks)
+
+
+async def _read_analysis_image(
+    image: UploadFile | None,
+    image_url: str | None,
+    image_mime: str | None,
+    image_size_bytes: int | None,
+) -> tuple[bytes, str]:
+    if image is not None and image_url is not None:
+        raise HTTPException(status_code=400, detail={"code": "invalid_image_source", "message": "Provide one image source."})
+    if image is not None:
+        mime = (image.content_type or "").split(";", 1)[0].strip().lower()
+        raw = await image.read(MAX_IMAGE_BYTES + 1)
+        if mime not in ACCEPTED_IMAGE_MIMES or not raw or len(raw) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=422, detail={"code": "invalid_image", "message": "The uploaded image is invalid."})
+        return raw, mime
+    if image_url is None or image_mime is None or image_size_bytes is None:
+        raise HTTPException(status_code=400, detail={"code": "missing_image", "message": "A stored image reference is required."})
+    try:
+        raw = await asyncio.to_thread(_download_signed_image, image_url, image_mime.lower(), image_size_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_image_reference", "message": str(exc)}) from exc
+    return raw, image_mime.lower()
 
 
 def _require_token(
@@ -245,15 +351,18 @@ async def rectify(
 
 @app.post("/analyze-view")
 async def analyze_view_route(
-    image: UploadFile = File(...),
+    image: UploadFile | None = File(None),
+    image_url: str | None = Form(None),
+    image_mime: str | None = Form(None),
+    image_size_bytes: int | None = Form(None),
     action: str = Form("detect"),
     corners: str | None = Form(None),
     manual_mode: str = Form("manual_confirmed"),
     _auth: None = Depends(_require_token),
 ) -> dict:
-    raw = await image.read()
+    raw, mime = await _read_analysis_image(image, image_url, image_mime, image_size_bytes)
     try:
-        rgb, metadata = decode_image(raw, image.content_type or "")
+        rgb, metadata = decode_image(raw, mime)
         detection = inspect_frame(rgb)
         if action == "detect":
             if not detection.missing_ids and detection.rejection_reason is None:

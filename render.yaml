@@ -24,6 +24,8 @@ services:
     envVars:
       - key: VISION_SERVICE_TOKEN
         sync: false        # must be set manually in the Render dashboard
+      - key: SUPABASE_STORAGE_HOST
+        sync: false        # exact host only, e.g. your-project.supabase.co
       - key: PORT
         value: "8000"
       - key: UVICORN_WORKERS

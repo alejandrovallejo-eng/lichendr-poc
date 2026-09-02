@@ -9,18 +9,24 @@ This document describes how to deploy LichenDR to production:
 
 ```
 Browser
-  │
-  ▼ (HTTPS)
-Vercel — Next.js (apps/web)
-  │  server-side only — token never reaches the browser
-  ▼ (HTTPS + Authorization: ******
-Render — FastAPI + MobileSAM (services/vision)
+  │  original image
+  ▼ (HTTPS + user session)
+Private Supabase Storage
+  ▲                         │ short-lived signed read
+  │ image ID only           ▼
+Vercel — Next.js (apps/web) ──→ Render — FastAPI + MobileSAM
+                                  HTTPS + Authorization: ******
   │
   ▼
 In-process model: MobileSAM vit_t (CPU)
 ```
 
-Supabase is used separately for Auth, Postgres and Storage; it is not relayed through Render.
+The browser uploads the lossless original directly to the private `lichen-images`
+bucket. It then sends Vercel only the database image ID. Vercel checks the user
+and image through RLS and creates a 60-second signed URL; Render validates the
+exact Supabase host, HTTPS, signed bucket path, MIME and size before downloading.
+The original therefore never crosses the 4.5 MB Vercel Function request limit,
+and neither the signed URL nor `VISION_SERVICE_TOKEN` reaches the browser.
 
 ---
 
@@ -136,6 +142,7 @@ Set these in **Render → Service → Environment**:
 | Variable | Value |
 |----------|-------|
 | `VISION_SERVICE_TOKEN` | The shared secret generated above |
+| `SUPABASE_STORAGE_HOST` | Exact host from the Supabase URL, e.g. `xxxx.supabase.co` (no scheme or path) |
 | `PORT` | `8000` (Render injects this automatically; the entrypoint reads it) |
 | `UVICORN_WORKERS` | `1` (do not increase on the Free plan) |
 

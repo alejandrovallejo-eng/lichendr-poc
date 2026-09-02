@@ -46,6 +46,14 @@ Returns `{ sessionId, width, height, prepareMs }`.
 x/y are normalised [0–1]. label 1 = positive, 0 = negative.
 Returns up to three in-memory PNG data URL candidates, dimensions, scores, `areaPixels`, the true constant model name (`MobileSAM vit_t`) and recommended index. Boolean mask matrices are never returned to the browser.
 
+The service runs one inference request at a time with one Uvicorn worker. Images are
+reduced proportionally to a 1024 px longest side before MobileSAM embedding, while
+normalized prompts and returned mask dimensions preserve the same geometry. RSS is
+logged before, during, and after inference, and temporary predictor state is released
+after every request; only up to three small active-session embeddings are retained for
+prompt refinement. Decoded inputs above 20 megapixels are rejected before allocation
+to keep the process inside the free-tier memory budget.
+
 ### `DELETE /sessions/{sessionId}`
 Frees the session immediately.
 

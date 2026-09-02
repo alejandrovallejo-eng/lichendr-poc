@@ -35,7 +35,10 @@ fi
 echo "Checkpoint OK — $(( ACTUAL_BYTES / 1024 / 1024 )) MB, SHA-256 verified"
 
 PORT="${PORT:-8000}"
-WORKERS="${UVICORN_WORKERS:-1}"
+if [ "${UVICORN_WORKERS:-1}" != "1" ]; then
+    echo "Ignoring UVICORN_WORKERS=${UVICORN_WORKERS}; one worker is required for the 512 MB memory budget." >&2
+fi
+WORKERS=1
 
 exec uvicorn app:app \
     --host 0.0.0.0 \

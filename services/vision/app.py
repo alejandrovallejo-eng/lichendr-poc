@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -21,7 +22,9 @@ from model import (
     is_model_loaded,
     load_model,
     MODEL_NAME,
+    log_rss,
     prepare_session,
+    release_unused_memory,
     segment_session,
 )
 from frame import (
@@ -54,6 +57,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 ACCEPTED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/heic", "image/heif"}
 SIGNED_IMAGE_TIMEOUT_SECONDS = 30
 _SUPABASE_STORAGE_HOST = os.environ.get("SUPABASE_STORAGE_HOST", "").strip().lower().rstrip(".")
+_inference_gate = asyncio.Semaphore(1)
 
 CHECKPOINT_PATH = os.environ.get(
     "MOBILESAM_CHECKPOINT",
@@ -104,7 +108,7 @@ def _validate_signed_image_url(raw_url: str) -> None:
         raise ValueError("Signed image URL has no token.")
 
 
-def _download_signed_image(raw_url: str, declared_mime: str, declared_size: int) -> bytes:
+def _download_signed_image(raw_url: str, declared_mime: str, declared_size: int) -> bytearray:
     _validate_signed_image_url(raw_url)
     if declared_mime not in ACCEPTED_IMAGE_MIMES:
         raise ValueError("Unsupported image MIME type.")
@@ -132,13 +136,13 @@ def _download_signed_image(raw_url: str, declared_mime: str, declared_size: int)
                     raise ValueError("Stored image size header is invalid.") from exc
                 if announced_size != declared_size or announced_size > MAX_IMAGE_BYTES:
                     raise ValueError("Stored image size does not match its record.")
-            chunks: list[bytes] = []
+            content = bytearray()
             received = 0
             while True:
                 chunk = response.read(min(1024 * 1024, MAX_IMAGE_BYTES + 1 - received))
                 if not chunk:
                     break
-                chunks.append(chunk)
+                content.extend(chunk)
                 received += len(chunk)
                 if received > MAX_IMAGE_BYTES:
                     raise ValueError("Stored image exceeds 20 MB.")
@@ -146,7 +150,7 @@ def _download_signed_image(raw_url: str, declared_mime: str, declared_size: int)
         raise ValueError("Stored image could not be downloaded.") from exc
     if received != declared_size:
         raise ValueError("Stored image size does not match its record.")
-    return b"".join(chunks)
+    return content
 
 
 async def _read_analysis_image(
@@ -154,7 +158,7 @@ async def _read_analysis_image(
     image_url: str | None,
     image_mime: str | None,
     image_size_bytes: int | None,
-) -> tuple[bytes, str]:
+) -> tuple[bytes | bytearray, str]:
     if image is not None and image_url is not None:
         raise HTTPException(status_code=400, detail={"code": "invalid_image_source", "message": "Provide one image source."})
     if image is not None:
@@ -183,6 +187,17 @@ def _require_token(
         raise HTTPException(status_code=401, detail="Missing authorization.")
     if not hmac.compare_digest(credentials.credentials, _VISION_SERVICE_TOKEN):
         raise HTTPException(status_code=403, detail="Invalid token.")
+
+
+async def _single_inference_request() -> AsyncIterator[None]:
+    await _inference_gate.acquire()
+    log_rss("request before inference")
+    try:
+        yield
+    finally:
+        release_unused_memory()
+        log_rss("request after cleanup")
+        _inference_gate.release()
 
 
 @asynccontextmanager
@@ -243,13 +258,14 @@ async def ready() -> ReadyResponse:
 async def prepare(
     image: UploadFile = File(...),
     _auth: None = Depends(_require_token),
+    _serial: None = Depends(_single_inference_request),
 ) -> PrepareResponse:
     content_type = (image.content_type or "").split(";")[0].strip().lower()
     accepted = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
     if content_type not in accepted:
         raise HTTPException(status_code=415, detail=f"Unsupported media type: {content_type}")
 
-    raw = await image.read()
+    raw = await image.read(MAX_IMAGE_BYTES + 1)
 
     if len(raw) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Image exceeds 20 MB limit.")
@@ -263,6 +279,7 @@ async def prepare(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    del raw
 
     return PrepareResponse(
         sessionId=session_id,
@@ -276,6 +293,7 @@ async def prepare(
 async def segment(
     body: SegmentRequest,
     _auth: None = Depends(_require_token),
+    _serial: None = Depends(_single_inference_request),
 ) -> SegmentResponse:
     try:
         candidates, recommended_index, segment_ms = segment_session(
@@ -310,8 +328,9 @@ async def delete_session_route(
 async def validate_template(
     image: UploadFile = File(...),
     _auth: None = Depends(_require_token),
+    _serial: None = Depends(_single_inference_request),
 ) -> dict:
-    raw = await image.read()
+    raw = await image.read(MAX_IMAGE_BYTES + 1)
     try:
         rgb, _ = decode_image(raw, image.content_type or "")
         rectification = rectify_frame(rgb)
@@ -330,8 +349,9 @@ async def validate_template(
 async def rectify(
     image: UploadFile = File(...),
     _auth: None = Depends(_require_token),
+    _serial: None = Depends(_single_inference_request),
 ) -> dict:
-    raw = await image.read()
+    raw = await image.read(MAX_IMAGE_BYTES + 1)
     try:
         rgb, _ = decode_image(raw, image.content_type or "")
         result = rectify_frame(rgb)
@@ -359,10 +379,13 @@ async def analyze_view_route(
     corners: str | None = Form(None),
     manual_mode: str = Form("manual_confirmed"),
     _auth: None = Depends(_require_token),
+    _serial: None = Depends(_single_inference_request),
 ) -> dict:
     raw, mime = await _read_analysis_image(image, image_url, image_mime, image_size_bytes)
     try:
         rgb, metadata = decode_image(raw, mime)
+        del raw
+        log_rss("analyze after bounded decode")
         detection = inspect_frame(rgb)
         if action == "detect":
             if not detection.missing_ids and detection.rejection_reason is None:

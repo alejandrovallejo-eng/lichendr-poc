@@ -5,6 +5,7 @@ import base64
 import io
 import math
 from dataclasses import dataclass
+from collections.abc import Iterator
 from typing import Any
 
 import cv2
@@ -19,8 +20,8 @@ PIXELS_PER_CM = 40
 WINDOW_AREA_CM2 = 500.0
 EXPECTED_MARKER_IDS = {0, 1, 2, 3}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-MAX_DECODED_PIXELS = 60_000_000
-MAX_DETECTION_DIMENSION = 4096
+MAX_DECODED_PIXELS = 20_000_000
+MAX_DETECTION_DIMENSION = 3072
 MAX_VALIDATED_REPROJECTION_ERROR_PX = 3.0
 MAX_ASSISTED_REPROJECTION_ERROR_PX = 6.0
 ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/heic", "image/heif"}
@@ -96,7 +97,7 @@ class FrameDetection:
     unknown_ids: list[int]
 
 
-def validate_image_payload(raw: bytes, mime: str) -> str:
+def validate_image_payload(raw: bytes | bytearray, mime: str) -> str:
     normalized = mime.split(";", 1)[0].strip().lower()
     if normalized not in ACCEPTED_MIMES:
         raise FrameValidationError("unsupported_mime", "Formato no admitido. Usa JPEG, PNG, HEIC o HEIF.")
@@ -119,7 +120,7 @@ def validate_image_payload(raw: bytes, mime: str) -> str:
     return normalized
 
 
-def decode_image(raw: bytes, mime: str) -> tuple[np.ndarray, dict[str, Any]]:
+def decode_image(raw: bytes | bytearray, mime: str) -> tuple[np.ndarray, dict[str, Any]]:
     normalized = validate_image_payload(raw, mime)
     if normalized in {"image/heic", "image/heif"}:
         try:
@@ -141,7 +142,8 @@ def decode_image(raw: bytes, mime: str) -> tuple[np.ndarray, dict[str, Any]]:
                 "camera_make": exif.get(271),
                 "camera_model": exif.get(272),
             }
-            image = ImageOps.exif_transpose(source).convert("RGB")
+            ImageOps.exif_transpose(source, in_place=True)
+            image = source if source.mode == "RGB" else source.convert("RGB")
             rgb = np.asarray(image).copy()
     except FrameValidationError:
         raise
@@ -200,10 +202,15 @@ def _pyramid_sizes(width: int, height: int) -> list[tuple[int, int]]:
     return result
 
 
-def _detection_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
+def _detection_variants(gray: np.ndarray) -> Iterator[tuple[str, np.ndarray]]:
+    yield "grayscale", gray
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
-    gamma_lift = np.clip(np.power(gray.astype(np.float32) / 255.0, 0.68) * 255, 0, 255).astype(np.uint8)
-    gamma_dark = np.clip(np.power(gray.astype(np.float32) / 255.0, 1.45) * 255, 0, 255).astype(np.uint8)
+    yield "clahe", clahe
+    values = np.arange(256, dtype=np.float32) / 255.0
+    gamma_lift_lut = np.clip(np.power(values, 0.68) * 255, 0, 255).astype(np.uint8)
+    yield "gamma_lift", cv2.LUT(gray, gamma_lift_lut)
+    gamma_dark_lut = np.clip(np.power(values, 1.45) * 255, 0, 255).astype(np.uint8)
+    yield "gamma_dark", cv2.LUT(gray, gamma_dark_lut)
     adaptive = cv2.adaptiveThreshold(
         clahe,
         255,
@@ -212,18 +219,12 @@ def _detection_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
         31,
         5,
     )
-    compressed = gray.astype(np.float32)
-    highlights = compressed > 205
-    compressed[highlights] = 205 + (compressed[highlights] - 205) * 0.28
-    glare_recovery = cv2.createCLAHE(clipLimit=3.2, tileGridSize=(12, 12)).apply(compressed.astype(np.uint8))
-    return [
-        ("grayscale", gray),
-        ("clahe", clahe),
-        ("gamma_lift", gamma_lift),
-        ("gamma_dark", gamma_dark),
-        ("adaptive_threshold", adaptive),
-        ("glare_recovery", glare_recovery),
-    ]
+    yield "adaptive_threshold", adaptive
+    highlight_lut = np.arange(256, dtype=np.uint8)
+    highlight_lut[206:] = (205 + (np.arange(206, 256) - 205) * 0.28).astype(np.uint8)
+    compressed = cv2.LUT(gray, highlight_lut)
+    glare_recovery = cv2.createCLAHE(clipLimit=3.2, tileGridSize=(12, 12)).apply(compressed)
+    yield "glare_recovery", glare_recovery
 
 
 def _observation_quality(corners: np.ndarray, gray: np.ndarray) -> float:
@@ -431,7 +432,18 @@ def _quad_agreement(first: np.ndarray, second: np.ndarray, width: int, height: i
 
 def inspect_frame(rgb: np.ndarray) -> FrameDetection:
     height, width = rgb.shape[:2]
-    original_gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    longest = max(width, height)
+    if longest > MAX_DETECTION_DIMENSION:
+        scale = MAX_DETECTION_DIMENSION / longest
+        detection_rgb = cv2.resize(
+            rgb,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        original_gray = cv2.cvtColor(detection_rgb, cv2.COLOR_RGB2GRAY)
+        del detection_rgb
+    else:
+        original_gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     detector = _detector()
     board = _aruco_board()
     observations: dict[int, list[_MarkerObservation]] = {index: [] for index in range(4)}
@@ -443,7 +455,11 @@ def inspect_frame(rgb: np.ndarray) -> FrameDetection:
     for level_width, level_height in _pyramid_sizes(width, height):
         scale_x = level_width / width
         scale_y = level_height / height
-        level_gray = cv2.resize(original_gray, (level_width, level_height), interpolation=cv2.INTER_AREA) if (level_width, level_height) != (width, height) else original_gray
+        level_gray = (
+            cv2.resize(original_gray, (level_width, level_height), interpolation=cv2.INTER_AREA)
+            if (level_width, level_height) != (original_gray.shape[1], original_gray.shape[0])
+            else original_gray
+        )
         complete_attempts = 0
         for variant_name, variant in _detection_variants(level_gray):
             corners, ids, rejected = detector.detectMarkers(variant)

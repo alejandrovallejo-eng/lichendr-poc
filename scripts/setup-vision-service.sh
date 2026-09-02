@@ -75,7 +75,7 @@ echo "Installing remaining dependencies …"
     "python-multipart==0.0.20" \
     "Pillow==11.1.0" \
     "pillow-heif==0.21.0" \
-    "numpy==2.2.1" \
+    "numpy==1.26.4" \
     "opencv-python-headless==4.10.0.84" \
     "pydantic==2.10.4" \
     "timm"
@@ -123,8 +123,12 @@ import torch
 import mobile_sam
 from mobile_sam import SamPredictor, sam_model_registry
 import fastapi, uvicorn, PIL, numpy, cv2, pydantic
+tensor_array = torch.tensor([1.0], device="cpu").numpy()
+if tensor_array.tolist() != [1.0]:
+    raise SystemExit("ERROR: PyTorch CPU tensor to NumPy conversion failed.")
 print("All imports OK")
 print(f"  torch={torch.__version__}")
+print(f"  numpy={numpy.__version__}; CPU tensor conversion OK")
 print(f"  mobile_sam OK")
 print(f"  fastapi={fastapi.__version__}")
 PYCHECK

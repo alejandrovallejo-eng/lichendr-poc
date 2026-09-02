@@ -8,7 +8,9 @@ SERVICE_DIR="${REPO_ROOT}/services/vision"
 VENV_DIR="${SERVICE_DIR}/.venv"
 CHECKPOINT_DIR="${SERVICE_DIR}/checkpoints"
 CHECKPOINT_FILE="${CHECKPOINT_DIR}/mobile_sam.pt"
-CHECKPOINT_URL="https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"
+MOBILESAM_COMMIT="f706ad9c4eb7f219c00d9050e46328518ffb65d2"
+CHECKPOINT_URL="https://github.com/ChaoningZhang/MobileSAM/raw/${MOBILESAM_COMMIT}/weights/mobile_sam.pt"
+EXPECTED_CHECKPOINT_SHA256="6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f"
 
 # ── Detect Python ────────────────────────────────────────────────────────────
 PYTHON=""
@@ -63,7 +65,7 @@ PYCHECK
 # ── MobileSAM ────────────────────────────────────────────────────────────────
 echo "Installing MobileSAM from official repository …"
 "${PIP}" install --quiet \
-    "git+https://github.com/ChaoningZhang/MobileSAM.git"
+    "git+https://github.com/ChaoningZhang/MobileSAM.git@${MOBILESAM_COMMIT}"
 
 # ── Other dependencies ───────────────────────────────────────────────────────
 echo "Installing remaining dependencies …"
@@ -102,7 +104,17 @@ if [ "${CHECKPOINT_SIZE}" -lt 1000000 ]; then
     rm -f "${CHECKPOINT_FILE}"
     exit 1
 fi
-echo "Checkpoint OK — $(( CHECKPOINT_SIZE / 1024 / 1024 )) MB"
+if command -v sha256sum &>/dev/null; then
+    CHECKPOINT_SHA256=$(sha256sum "${CHECKPOINT_FILE}" | awk '{print $1}')
+else
+    CHECKPOINT_SHA256=$(shasum -a 256 "${CHECKPOINT_FILE}" | awk '{print $1}')
+fi
+if [ "${CHECKPOINT_SHA256}" != "${EXPECTED_CHECKPOINT_SHA256}" ]; then
+    echo "ERROR: checkpoint SHA-256 mismatch (expected ${EXPECTED_CHECKPOINT_SHA256}, got ${CHECKPOINT_SHA256})." >&2
+    rm -f "${CHECKPOINT_FILE}"
+    exit 1
+fi
+echo "Checkpoint OK — $(( CHECKPOINT_SIZE / 1024 / 1024 )) MB, SHA-256 verified"
 
 # ── Sanity import check ───────────────────────────────────────────────────────
 echo "Verifying Python imports …"

@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir \
     || pip install --no-cache-dir torch torchvision
 
 RUN pip install --no-cache-dir \
-        "git+https://github.com/ChaoningZhang/MobileSAM.git@v1.0"
+        "git+https://github.com/ChaoningZhang/MobileSAM.git@f706ad9c4eb7f219c00d9050e46328518ffb65d2"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

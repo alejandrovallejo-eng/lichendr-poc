@@ -32,4 +32,4 @@ services:
         value: "1"
       # Optional: override checkpoint download URL
       # - key: MOBILESAM_CHECKPOINT_URL
-      #   value: https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt
+      #   value: https://github.com/ChaoningZhang/MobileSAM/raw/f706ad9c4eb7f219c00d9050e46328518ffb65d2/weights/mobile_sam.pt

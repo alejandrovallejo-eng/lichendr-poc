@@ -35,8 +35,10 @@ and neither the signed URL nor `VISION_SERVICE_TOKEN` reaches the browser.
 | Attribute | Value |
 |-----------|-------|
 | Source    | https://github.com/ChaoningZhang/MobileSAM |
-| URL       | https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt |
-| Version   | MobileSAM v1.0, architecture `vit_t` |
+| Commit    | `f706ad9c4eb7f219c00d9050e46328518ffb65d2` |
+| Package   | `git+https://github.com/ChaoningZhang/MobileSAM.git@f706ad9c4eb7f219c00d9050e46328518ffb65d2` |
+| URL       | https://github.com/ChaoningZhang/MobileSAM/raw/f706ad9c4eb7f219c00d9050e46328518ffb65d2/weights/mobile_sam.pt |
+| Architecture | `vit_t` |
 | Size      | 38.8 MB |
 | SHA-256   | `6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f` |
 | Licence   | Apache 2.0 |

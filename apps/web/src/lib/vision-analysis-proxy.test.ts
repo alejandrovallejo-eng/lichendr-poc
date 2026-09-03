@@ -14,14 +14,15 @@ const imageId = "223e4567-e89b-42d3-a456-426614174000";
 const sourcePath = `${userId}/project/event/original.jpg`;
 
 class FakeStorage {
-  readonly objects = new Map<string, Blob>();
+  readonly objects = new Map<string, { body: Blob; metadata?: Record<string, unknown> }>();
+  readonly contentTypes: string[] = [];
 
   from(bucket: string) {
     assert.equal(bucket, ANALYSIS_PROXY_BUCKET);
     return {
       download: async (path: string) => {
         const data = this.objects.get(path);
-        return data ? { data, error: null } : { data: null, error: new Error("missing") };
+        return data ? { data: data.body, error: null } : { data: null, error: new Error("missing") };
       },
       createSignedUrl: async (path: string) => ({
         data: {
@@ -29,20 +30,25 @@ class FakeStorage {
         },
         error: null,
       }),
-      upload: async (path: string, value: string | Buffer, options: { contentType: string }) => {
+      info: async (path: string) => {
+        const data = this.objects.get(path);
+        return data
+          ? { data: { size: data.body.size, metadata: data.metadata }, error: null }
+          : { data: null, error: new Error("missing") };
+      },
+      upload: async (
+        path: string,
+        value: string | Buffer,
+        options: { contentType: string; metadata?: Record<string, unknown> },
+      ) => {
         const content = typeof value === "string" ? value : new Uint8Array(value);
-        this.objects.set(path, new Blob([content], { type: options.contentType }));
+        this.contentTypes.push(options.contentType);
+        this.objects.set(path, {
+          body: new Blob([content], { type: options.contentType }),
+          metadata: options.metadata,
+        });
         return { error: null };
       },
-      list: async (directory: string) => ({
-        data: [...this.objects.entries()]
-          .filter(([path]) => path.startsWith(`${directory}/`))
-          .map(([path, value]) => ({
-            name: path.slice(directory.length + 1),
-            metadata: { size: value.size },
-          })),
-        error: null,
-      }),
     };
   }
 }
@@ -91,7 +97,8 @@ test("stores a deterministic authenticated proxy once and reuses it", async () =
     assert.equal(first.manifest.proxyHeight, 1365);
     assert.match(first.manifest.signature, /^[a-f0-9]{64}$/);
     assert.ok(storage.objects.has(paths.image));
-    assert.ok(storage.objects.has(paths.manifest));
+    assert.equal(storage.objects.size, 1);
+    assert.deepEqual(storage.contentTypes, ["image/jpeg"]);
   } finally {
     globalThis.fetch = originalFetch;
     if (previousUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL;

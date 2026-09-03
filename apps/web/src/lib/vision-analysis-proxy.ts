@@ -45,7 +45,6 @@ export function analysisProxyPaths(userId: string, imageId: string) {
   return {
     directory,
     image: `${directory}/v${ANALYSIS_PROXY_VERSION}.jpg`,
-    manifest: `${directory}/v${ANALYSIS_PROXY_VERSION}.json`,
   };
 }
 
@@ -112,17 +111,10 @@ export async function ensureAnalysisProxy(
       .upload(paths.image, generated.data, {
         cacheControl: "31536000",
         contentType: manifest.proxyMime,
+        metadata: { analysisManifest: JSON.stringify(manifest) },
         upsert: true,
       });
     if (proxyError) throw new Error("proxy_upload_failed");
-    const { error: manifestError } = await supabase.storage
-      .from(ANALYSIS_PROXY_BUCKET)
-      .upload(paths.manifest, JSON.stringify(manifest), {
-        cacheControl: "31536000",
-        contentType: "application/json",
-        upsert: true,
-      });
-    if (manifestError) throw new Error("manifest_upload_failed");
     return { manifest, reused: false };
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -135,10 +127,14 @@ async function loadExistingManifest(
   imageId: string,
   source: AnalysisSourceImage,
 ): Promise<AnalysisProxyManifest | null> {
-  const { data, error } = await supabase.storage.from(ANALYSIS_PROXY_BUCKET).download(paths.manifest);
-  if (error || !data || data.size > 16 * 1024) return null;
   try {
-    const value = JSON.parse(await data.text()) as Partial<AnalysisProxyManifest>;
+    const { data: proxy, error } = await supabase.storage
+      .from(ANALYSIS_PROXY_BUCKET)
+      .info(paths.image);
+    if (error || !proxy) return null;
+    const rawManifest = proxy.metadata?.analysisManifest;
+    if (typeof rawManifest !== "string" || rawManifest.length > 16 * 1024) return null;
+    const value = JSON.parse(rawManifest) as Partial<AnalysisProxyManifest>;
     if (
       value.version !== ANALYSIS_PROXY_VERSION
       || value.imageId !== imageId
@@ -157,13 +153,8 @@ async function loadExistingManifest(
     ) {
       return null;
     }
-
-    const { data: objects, error: listError } = await supabase.storage
-      .from(ANALYSIS_PROXY_BUCKET)
-      .list(paths.directory, { limit: 10, search: `v${ANALYSIS_PROXY_VERSION}.jpg` });
-    const proxy = objects?.find((item) => item.name === `v${ANALYSIS_PROXY_VERSION}.jpg`);
-    const size = Number(proxy?.metadata?.size ?? 0);
-    return !listError && proxy && size === value.proxySizeBytes
+    const size = Number(proxy.size ?? 0);
+    return size === value.proxySizeBytes
       ? value as AnalysisProxyManifest
       : null;
   } catch {

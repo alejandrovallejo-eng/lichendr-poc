@@ -35,8 +35,10 @@ whose longest side is at most 2048 px. If the bundled libvips cannot decode a
 compatible HEIC, the server uses the bounded `heic-decode` fallback automatically.
 The original is never overwritten.
 
-The proxy and an authenticated manifest are stored at deterministic versioned
-paths below `<user-id>/analysis-proxies/<image-id>/`, so retries reuse them.
+The proxy is stored at a deterministic versioned path below
+`<user-id>/analysis-proxies/<image-id>/`. Its HMAC-authenticated manifest is
+stored as custom metadata on the JPEG object, so the image-only bucket never
+receives an unsupported JSON object and retries can reuse the existing proxy.
 Vercel sends Render only a short-lived signed URL for the proxy together with
 the original and proxy dimensions. Render validates those dimensions, runs the
 request serially, and maps reported geometry back to the oriented original

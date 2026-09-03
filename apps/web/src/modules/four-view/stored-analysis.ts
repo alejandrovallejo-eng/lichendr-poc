@@ -3,6 +3,13 @@ import type { ManualMeasurementMode } from "./manual-flow";
 
 export type AnalyzeViewAction = "detect" | "confirm_corners" | "analyze_confirmed";
 
+export function storedProxyRequest(imageId: string): { headers: { "Content-Type": string }; body: string } {
+  return {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ imageId }),
+  };
+}
+
 export function storedAnalysisRequest(
   imageId: string,
   action: AnalyzeViewAction = "detect",

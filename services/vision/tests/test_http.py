@@ -12,6 +12,32 @@ from tests.fixtures import encode, synthetic_frame
 
 
 class HttpTests(unittest.TestCase):
+    def test_proxy_geometry_scales_pixel_measurements_but_preserves_normalized_coordinates(self) -> None:
+        result = {
+            "reprojection_error_px": 2.0,
+            "corner_proposal": [{"x": 0.25, "y": 0.75}],
+            "frame_detection": {
+                "source_width": 1000,
+                "source_height": 500,
+                "successful_resolution": {"width": 500, "height": 250},
+                "reprojection_error_px": 1.5,
+            },
+            "trunk_estimate": {
+                "left_x_normalized": 0.1,
+                "right_x_normalized": 0.9,
+                "scale_cm_per_pixel": 0.02,
+            },
+        }
+
+        mapped = vision_app._map_proxy_geometry(result, (6000, 3000, 1000, 500))
+
+        self.assertEqual(mapped["reprojection_error_px"], 2.0)
+        self.assertEqual(mapped["frame_detection"]["reprojection_error_px"], 1.5)
+        self.assertEqual(mapped["frame_detection"]["successful_resolution"], {"width": 500, "height": 250})
+        self.assertEqual(mapped["corner_proposal"], [{"x": 0.25, "y": 0.75}])
+        self.assertEqual(mapped["trunk_estimate"]["left_x_normalized"], 0.1)
+        self.assertEqual(mapped["trunk_estimate"]["scale_cm_per_pixel"], 0.00333333)
+
     def test_template_validation_endpoint(self) -> None:
         with patch.object(vision_app, "load_model"):
             with TestClient(vision_app.app) as client:
@@ -36,6 +62,65 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(body["frame_detection"]["missing_marker_ids"], [1])
         self.assertEqual(len(body["corner_proposal"]), 4)
         self.assertNotIn("/home/", str(body))
+
+    def test_proxy_analysis_maps_dimensions_back_to_the_scientific_original(self) -> None:
+        image = encode(synthetic_frame())
+        proxy = synthetic_frame()
+        proxy_height, proxy_width = proxy.shape[:2]
+        original_width = proxy_width * 5
+        original_height = proxy_height * 5
+        with patch.object(vision_app, "load_model"):
+            with TestClient(vision_app.app) as client:
+                response = client.post(
+                    "/analyze-view",
+                    files={"image": ("proxy.png", image, "image/png")},
+                    data={
+                        "original_width": str(original_width),
+                        "original_height": str(original_height),
+                        "proxy_width": str(proxy_width),
+                        "proxy_height": str(proxy_height),
+                    },
+                )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual((body["source_width"], body["source_height"]), (original_width, original_height))
+        self.assertEqual((body["proxy_width"], body["proxy_height"]), (proxy_width, proxy_height))
+        self.assertEqual(
+            (
+                body["frame_detection"]["source_width"],
+                body["frame_detection"]["source_height"],
+            ),
+            (original_width, original_height),
+        )
+
+    def test_proxy_analysis_rejects_dimension_or_aspect_ratio_mismatches(self) -> None:
+        image = encode(synthetic_frame())
+        height, width = synthetic_frame().shape[:2]
+        invalid = (
+            {
+                "original_width": str(width * 5),
+                "original_height": str(height * 5),
+                "proxy_width": str(width + 1),
+                "proxy_height": str(height),
+            },
+            {
+                "original_width": "6000",
+                "original_height": "4000",
+                "proxy_width": str(width),
+                "proxy_height": str(height),
+            },
+        )
+        with patch.object(vision_app, "load_model"):
+            with TestClient(vision_app.app) as client:
+                for fields in invalid:
+                    with self.subTest(fields=fields):
+                        response = client.post(
+                            "/analyze-view",
+                            files={"image": ("proxy.png", image, "image/png")},
+                            data=fields,
+                        )
+                        self.assertEqual(response.status_code, 422)
+                        self.assertEqual(response.json()["detail"]["code"], "invalid_proxy_geometry")
 
     def test_validated_detection_returns_calibration_without_lichen_metrics(self) -> None:
         with patch.object(vision_app, "load_model"):

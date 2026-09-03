@@ -375,6 +375,10 @@ async def analyze_view_route(
     image_url: str | None = Form(None),
     image_mime: str | None = Form(None),
     image_size_bytes: int | None = Form(None),
+    original_width: int | None = Form(None),
+    original_height: int | None = Form(None),
+    proxy_width: int | None = Form(None),
+    proxy_height: int | None = Form(None),
     action: str = Form("detect"),
     corners: str | None = Form(None),
     manual_mode: str = Form("manual_confirmed"),
@@ -385,17 +389,28 @@ async def analyze_view_route(
     try:
         rgb, metadata = decode_image(raw, mime)
         del raw
+        geometry = _validate_proxy_geometry(
+            rgb.shape[1],
+            rgb.shape[0],
+            original_width,
+            original_height,
+            proxy_width,
+            proxy_height,
+        )
         log_rss("analyze after bounded decode")
         detection = inspect_frame(rgb)
         if action == "detect":
             if not detection.missing_ids and detection.rejection_reason is None:
                 rectification = rectify_detected_frame(rgb, detection)
-                return analyze_rectification(rectification, metadata, source_rgb=rgb)
+                return _map_proxy_geometry(
+                    analyze_rectification(rectification, metadata, source_rgb=rgb),
+                    geometry,
+                )
             if detection.proposal is None:
                 normalized = None
             else:
                 normalized = detection.proposal.corners / [rgb.shape[1] - 1, rgb.shape[0] - 1]
-            return {
+            return _map_proxy_geometry({
                 "template_version": TEMPLATE_VERSION,
                 "algorithm_version": ALGORITHM_VERSION,
                 "canonical_width": CANONICAL_WIDTH,
@@ -428,7 +443,7 @@ async def analyze_view_route(
                 "source_width": rgb.shape[1],
                 "source_height": rgb.shape[0],
                 "trunk_estimate": None,
-            }
+            }, geometry)
         if action not in {"confirm_corners", "analyze_confirmed"}:
             raise FrameValidationError("invalid_action", "La acción solicitada no es válida.")
         submitted_corners = _parse_corners(corners)
@@ -442,7 +457,7 @@ async def analyze_view_route(
                 "insufficient_resolution",
                 "high_reprojection_error",
             })
-            return {
+            return _map_proxy_geometry({
                 "template_version": TEMPLATE_VERSION,
                 "algorithm_version": ALGORITHM_VERSION,
                 "canonical_width": CANONICAL_WIDTH,
@@ -466,7 +481,7 @@ async def analyze_view_route(
                 "source_width": rgb.shape[1],
                 "source_height": rgb.shape[0],
                 "trunk_estimate": None,
-            }
+            }, geometry)
         if any(flag in {
             "blur",
             "overexposure",
@@ -476,10 +491,10 @@ async def analyze_view_route(
         } for flag in rectification.quality_flags):
             result = analyze_rectification(rectification, metadata, source_rgb=rgb)
             result["corner_proposal"] = submitted_corners
-            return result
+            return _map_proxy_geometry(result, geometry)
         result = analyze_rectification(rectification, metadata, source_rgb=rgb)
         result["corner_proposal"] = submitted_corners
-        return result
+        return _map_proxy_geometry(result, geometry)
     except FrameValidationError as exc:
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
     except RuntimeError as exc:
@@ -532,4 +547,56 @@ def _parse_corners(raw: str | None) -> list[dict[str, float]]:
         if not isinstance(item, dict) or not isinstance(item.get("x"), (int, float)) or not isinstance(item.get("y"), (int, float)):
             raise FrameValidationError("invalid_corners", "Las coordenadas de las esquinas no son válidas.")
         result.append({"x": float(item["x"]), "y": float(item["y"])})
+    return result
+
+
+def _validate_proxy_geometry(
+    decoded_width: int,
+    decoded_height: int,
+    original_width: int | None,
+    original_height: int | None,
+    proxy_width: int | None,
+    proxy_height: int | None,
+) -> tuple[int, int, int, int]:
+    values = (original_width, original_height, proxy_width, proxy_height)
+    if all(value is None for value in values):
+        return decoded_width, decoded_height, decoded_width, decoded_height
+    if (
+        any(value is None or value <= 0 for value in values)
+        or proxy_width != decoded_width
+        or proxy_height != decoded_height
+    ):
+        raise FrameValidationError(
+            "invalid_proxy_geometry",
+            "Las dimensiones del proxy de análisis no son válidas.",
+        )
+    assert original_width is not None and original_height is not None
+    assert proxy_width is not None and proxy_height is not None
+    original_ratio = original_width / original_height
+    proxy_ratio = proxy_width / proxy_height
+    if abs(original_ratio - proxy_ratio) / original_ratio > 0.002:
+        raise FrameValidationError(
+            "invalid_proxy_geometry",
+            "El proxy de análisis no conserva la proporción de la fotografía original.",
+        )
+    return original_width, original_height, proxy_width, proxy_height
+
+
+def _map_proxy_geometry(result: dict, geometry: tuple[int, int, int, int]) -> dict:
+    original_width, original_height, proxy_width, proxy_height = geometry
+    scale_x = original_width / proxy_width
+    result["original_width"] = original_width
+    result["original_height"] = original_height
+    result["proxy_width"] = proxy_width
+    result["proxy_height"] = proxy_height
+    result["source_width"] = original_width
+    result["source_height"] = original_height
+    detection = result.get("frame_detection")
+    if isinstance(detection, dict):
+        detection["source_width"] = original_width
+        detection["source_height"] = original_height
+    trunk = result.get("trunk_estimate")
+    if isinstance(trunk, dict) and isinstance(trunk.get("scale_cm_per_pixel"), (int, float)):
+        trunk["proxy_scale_cm_per_pixel"] = trunk["scale_cm_per_pixel"]
+        trunk["scale_cm_per_pixel"] = round(float(trunk["scale_cm_per_pixel"]) / scale_x, 8)
     return result

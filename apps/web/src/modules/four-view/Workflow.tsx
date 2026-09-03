@@ -24,6 +24,7 @@ import {
   loadSeriesViews,
   loadStoredImageFile,
   listEvaluatedTrees,
+  prepareStoredFourViewImage,
   saveProcessedView,
   stageCaptureView,
   saveTrunkMeasurement,
@@ -56,6 +57,8 @@ type SlotState = {
   status:
     | "empty"
     | "ready"
+    | "saving_original"
+    | "preparing_ai"
     | "processing"
     | "needs_confirmation"
     | "four_points_ready"
@@ -107,7 +110,9 @@ function suggestedDirection(heading: number | null): Direction | null {
 function statusLabel(slot: SlotState): string {
   if (slot.status === "empty") return "Sin fotografía";
   if (slot.status === "ready") return "Lista para procesar";
-  if (slot.status === "processing") return "Detectando marco";
+  if (slot.status === "saving_original") return "Guardando original";
+  if (slot.status === "preparing_ai") return "Preparando imagen para IA";
+  if (slot.status === "processing") return "Analizando";
   if (slot.status === "needs_confirmation") return "Necesita confirmación manual";
   if (slot.status === "four_points_ready") return "Cuatro puntos listos";
   if (slot.status === "analyzing") return "Procesando análisis";
@@ -337,7 +342,7 @@ export default function FourViewWorkflow() {
   )), [slots]);
   const suggestion = suggestedDirection(heading);
   const assistedBusy = DIRECTIONS.some((direction) => (
-    ["processing", "analyzing"].includes(slots[direction].status)
+    ["saving_original", "preparing_ai", "processing", "analyzing"].includes(slots[direction].status)
   ));
   const operationLocked = processing || assistedBusy;
   const captureLocked = operationLocked || series?.status === "completed";
@@ -421,9 +426,12 @@ export default function FourViewWorkflow() {
         const slot = slots[direction];
         const file = slot.file;
         if (!file || !["ready", "error"].includes(slot.status)) continue;
-        setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "processing", error: null } }));
+        setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "saving_original", error: null } }));
         try {
           const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
+          setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "preparing_ai" } }));
+          await prepareStoredFourViewImage(view.image_id);
+          setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "processing" } }));
           const result = await analyzeStoredFourViewImage(view.image_id);
           if (result.status === "needs_confirmation") {
             const file = slot.file ?? await loadStoredImageFile(view.image_id);
@@ -598,12 +606,12 @@ export default function FourViewWorkflow() {
 
   const retryDetection = async (direction: Direction) => {
     const slot = slots[direction];
-    if ((!slot.file && !slot.view) || ["processing", "analyzing"].includes(slot.status)) return;
+    if ((!slot.file && !slot.view) || ["saving_original", "preparing_ai", "processing", "analyzing"].includes(slot.status)) return;
     const operationToken = crypto.randomUUID();
     operationTokens.current[direction] = operationToken;
     setSlots((current) => ({
       ...current,
-      [direction]: { ...current[direction], status: "processing", error: null },
+      [direction]: { ...current[direction], status: "saving_original", error: null },
     }));
     try {
       if (!projectId || !siteId || !eventId || !treeId) {
@@ -611,8 +619,20 @@ export default function FourViewWorkflow() {
       }
       const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
       const activeSeries = series ?? await getOrCreateCaptureSeries(treeSampleId);
+      if (operationTokens.current[direction] !== operationToken) return;
       if (!series) setSeries(activeSeries);
       const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
+      if (operationTokens.current[direction] !== operationToken) return;
+      setSlots((current) => ({
+        ...current,
+        [direction]: { ...current[direction], status: "preparing_ai" },
+      }));
+      await prepareStoredFourViewImage(view.image_id);
+      if (operationTokens.current[direction] !== operationToken) return;
+      setSlots((current) => ({
+        ...current,
+        [direction]: { ...current[direction], status: "processing" },
+      }));
       const result = await analyzeStoredFourViewImage(view.image_id);
       if (operationTokens.current[direction] !== operationToken) return;
       if (result.status === "needs_confirmation") {

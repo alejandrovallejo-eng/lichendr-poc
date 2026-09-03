@@ -9,24 +9,40 @@ This document describes how to deploy LichenDR to production:
 
 ```
 Browser
-  │  original image
+  │  original image (direct upload)
   ▼ (HTTPS + user session)
 Private Supabase Storage
-  ▲                         │ short-lived signed read
+  ▲                         │ short-lived signed original read
   │ image ID only           ▼
-Vercel — Next.js (apps/web) ──→ Render — FastAPI + MobileSAM
-                                  HTTPS + Authorization: ******
+Vercel — Next.js + Sharp/libvips
+  │  private 2048 px analysis proxy + signed manifest
+  ▼
+Private Supabase Storage
+  │ short-lived signed proxy read
+  ▼
+Render — FastAPI + MobileSAM
+  HTTPS + Authorization: ******
   │
   ▼
 In-process model: MobileSAM vit_t (CPU)
 ```
 
-The browser uploads the lossless original directly to the private `lichen-images`
-bucket. It then sends Vercel only the database image ID. Vercel checks the user
-and image through RLS and creates a 60-second signed URL; Render validates the
-exact Supabase host, HTTPS, signed bucket path, MIME and size before downloading.
-The original therefore never crosses the 4.5 MB Vercel Function request limit,
-and neither the signed URL nor `VISION_SERVICE_TOKEN` reaches the browser.
+The browser uploads the original directly to the private `lichen-images` bucket
+and sends Vercel only the database image ID. Vercel checks the user and image
+through the existing RLS session, streams the original to temporary storage, and
+uses Sharp/libvips to correct EXIF orientation and generate a JPEG analysis proxy
+whose longest side is at most 2048 px. If the bundled libvips cannot decode a
+compatible HEIC, the server uses the bounded `heic-decode` fallback automatically.
+The original is never overwritten.
+
+The proxy and an authenticated manifest are stored at deterministic versioned
+paths below `<user-id>/analysis-proxies/<image-id>/`, so retries reuse them.
+Vercel sends Render only a short-lived signed URL for the proxy together with
+the original and proxy dimensions. Render validates those dimensions, runs the
+request serially, and maps reported geometry back to the oriented original
+coordinate system. The original therefore never crosses the 4.5 MB Vercel
+Function request limit, and neither signed URLs nor `VISION_SERVICE_TOKEN`
+reach the browser.
 
 ---
 
@@ -158,8 +174,8 @@ service page (format: `https://lichendr-vision.onrender.com`). Set this as
 
 The Render Free plan **spins down** after ~15 minutes of inactivity. The next
 request will wake the service, but the first response may take 30–120 seconds
-(download checkpoint + load model). During this time the Next.js routes return
-`503` and the application shows the manual fallback flow.
+(download checkpoint + load model). The Next.js analysis route checks readiness
+and performs one automatic retry before returning a recoverable error.
 
 ---
 

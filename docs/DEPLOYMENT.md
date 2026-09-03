@@ -117,6 +117,15 @@ Apply to Production, Preview and Development (or as appropriate).
    If the vision service is still warming up you may get `model_loaded: false`
    until Render finishes loading MobileSAM.
 
+### Sharp runtime packaging
+
+The analysis-proxy routes require the linux-x64 Sharp native addon and its
+matching libvips shared library. Both packages are pinned explicitly in
+`apps/web/package.json`, and `next.config.ts` includes them in the serverless
+output trace. The `postbuild` check imports Sharp, transforms an image, and
+fails the deployment if either native runtime package is absent from the
+analysis-proxy function trace.
+
 ---
 
 ## Render setup

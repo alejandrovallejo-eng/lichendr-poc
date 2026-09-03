@@ -8,6 +8,7 @@
     "dev": "next dev",
     "prebuild": "npm run prepare:onnx",
     "build": "next build",
+    "postbuild": "node scripts/verify-sharp-runtime.mjs",
     "start": "next start",
     "lint": "eslint",
     "test": "npm run test:unit && npm run test:proxy",
@@ -36,5 +37,9 @@
     "eslint-config-next": "16.2.11",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "@img/sharp-libvips-linux-x64": "1.3.3",
+    "@img/sharp-linux-x64": "0.35.4"
   }
 }

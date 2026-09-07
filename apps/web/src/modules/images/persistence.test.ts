@@ -42,6 +42,12 @@ test("accepts HEIC with matching MIME and extension", () => {
   assert.deepEqual(result, { valid: true, mimeType: "image/heic", message: null });
 });
 
+test("accepts scientific JPEG and HEIC files above Vercel's 4.5 MB function limit", () => {
+  const size = 5 * 1024 * 1024;
+  assert.equal(validateImageFile({ name: "large.jpg", size, type: "image/jpeg" }).valid, true);
+  assert.equal(validateImageFile({ name: "large.heic", size, type: "image/heic" }).valid, true);
+});
+
 test("validates HEIC signature and brand", async () => {
   const header = new Uint8Array([
     0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,

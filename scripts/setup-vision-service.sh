@@ -8,7 +8,9 @@ SERVICE_DIR="${REPO_ROOT}/services/vision"
 VENV_DIR="${SERVICE_DIR}/.venv"
 CHECKPOINT_DIR="${SERVICE_DIR}/checkpoints"
 CHECKPOINT_FILE="${CHECKPOINT_DIR}/mobile_sam.pt"
-CHECKPOINT_URL="https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"
+MOBILESAM_COMMIT="f706ad9c4eb7f219c00d9050e46328518ffb65d2"
+CHECKPOINT_URL="https://github.com/ChaoningZhang/MobileSAM/raw/${MOBILESAM_COMMIT}/weights/mobile_sam.pt"
+EXPECTED_CHECKPOINT_SHA256="6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f"
 
 # ── Detect Python ────────────────────────────────────────────────────────────
 PYTHON=""
@@ -63,7 +65,7 @@ PYCHECK
 # ── MobileSAM ────────────────────────────────────────────────────────────────
 echo "Installing MobileSAM from official repository …"
 "${PIP}" install --quiet \
-    "git+https://github.com/ChaoningZhang/MobileSAM.git"
+    "git+https://github.com/ChaoningZhang/MobileSAM.git@${MOBILESAM_COMMIT}"
 
 # ── Other dependencies ───────────────────────────────────────────────────────
 echo "Installing remaining dependencies …"
@@ -73,7 +75,7 @@ echo "Installing remaining dependencies …"
     "python-multipart==0.0.20" \
     "Pillow==11.1.0" \
     "pillow-heif==0.21.0" \
-    "numpy==2.2.1" \
+    "numpy==1.26.4" \
     "opencv-python-headless==4.10.0.84" \
     "pydantic==2.10.4" \
     "timm"
@@ -102,7 +104,17 @@ if [ "${CHECKPOINT_SIZE}" -lt 1000000 ]; then
     rm -f "${CHECKPOINT_FILE}"
     exit 1
 fi
-echo "Checkpoint OK — $(( CHECKPOINT_SIZE / 1024 / 1024 )) MB"
+if command -v sha256sum &>/dev/null; then
+    CHECKPOINT_SHA256=$(sha256sum "${CHECKPOINT_FILE}" | awk '{print $1}')
+else
+    CHECKPOINT_SHA256=$(shasum -a 256 "${CHECKPOINT_FILE}" | awk '{print $1}')
+fi
+if [ "${CHECKPOINT_SHA256}" != "${EXPECTED_CHECKPOINT_SHA256}" ]; then
+    echo "ERROR: checkpoint SHA-256 mismatch (expected ${EXPECTED_CHECKPOINT_SHA256}, got ${CHECKPOINT_SHA256})." >&2
+    rm -f "${CHECKPOINT_FILE}"
+    exit 1
+fi
+echo "Checkpoint OK — $(( CHECKPOINT_SIZE / 1024 / 1024 )) MB, SHA-256 verified"
 
 # ── Sanity import check ───────────────────────────────────────────────────────
 echo "Verifying Python imports …"
@@ -111,8 +123,12 @@ import torch
 import mobile_sam
 from mobile_sam import SamPredictor, sam_model_registry
 import fastapi, uvicorn, PIL, numpy, cv2, pydantic
+tensor_array = torch.tensor([1.0], device="cpu").numpy()
+if tensor_array.tolist() != [1.0]:
+    raise SystemExit("ERROR: PyTorch CPU tensor to NumPy conversion failed.")
 print("All imports OK")
 print(f"  torch={torch.__version__}")
+print(f"  numpy={numpy.__version__}; CPU tensor conversion OK")
 print(f"  mobile_sam OK")
 print(f"  fastapi={fastapi.__version__}")
 PYCHECK

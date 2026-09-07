@@ -19,6 +19,7 @@ import { orderFourViewTargets } from "./navigation";
 import { hasProvisionalGeometry, storedFrameClassification } from "./assistance";
 import type { CombinedTrunkEstimate, CornerPoint, Direction, TrunkViewEstimate, VisionViewResult } from "./types";
 import type { ManualMeasurementMode } from "./manual-flow";
+import { readStoredAnalysisResponse, storedAnalysisRequest, storedProxyRequest } from "./stored-analysis";
 
 export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.2";
 export const FOUR_VIEW_TEMPLATE_VERSION = "LICHENDR-FRAME-0.2";
@@ -77,27 +78,34 @@ export async function getOrCreateCaptureSeries(treeSampleId: string): Promise<Ca
   return data;
 }
 
-export async function analyzeFourViewFile(
-  file: File,
+export async function analyzeStoredFourViewImage(
+  imageId: string,
   action: "detect" | "confirm_corners" | "analyze_confirmed" = "detect",
   corners?: readonly CornerPoint[],
   manualMode: ManualMeasurementMode = "manual_confirmed",
 ): Promise<VisionViewResult> {
-  const formData = new FormData();
-  formData.append("image", file);
-  formData.append("action", action);
-  if (corners) formData.append("corners", JSON.stringify(corners));
-  if (action !== "detect") formData.append("manual_mode", manualMode);
-  const response = await fetch("/api/vision/analyze-view", { method: "POST", body: formData });
-  const body: unknown = await response.json();
-  if (!response.ok) {
-    const error = body && typeof body === "object" ? (body as { error?: unknown }).error : null;
-    const message = error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
-      ? (error as { message: string }).message
-      : typeof error === "string" ? error : "No se pudo procesar la vista.";
-    throw new Error(message);
+  const request = storedAnalysisRequest(imageId, action, corners, manualMode);
+  let response: Response;
+  try {
+    response = await fetch("/api/vision/analyze-view", { method: "POST", ...request });
+  } catch {
+    throw new Error(
+      "La fotografía quedó guardada, pero no fue posible iniciar la IA. Comprueba la conexión y vuelve a intentarlo.",
+    );
   }
-  return body as VisionViewResult;
+  return readStoredAnalysisResponse(response);
+}
+
+export async function prepareStoredFourViewImage(imageId: string): Promise<void> {
+  const response = await fetch("/api/vision/analysis-proxy", {
+    method: "POST",
+    ...storedProxyRequest(imageId),
+  });
+  if (!response.ok) {
+    throw new Error(
+      "La fotografía original quedó guardada, pero no se pudo preparar automáticamente para la IA.",
+    );
+  }
 }
 
 function traceableSource(result: VisionViewResult): string {
@@ -145,10 +153,9 @@ async function uploadDerived(path: string, blob: Blob): Promise<void> {
   if (error) throw error;
 }
 
-export async function saveProcessedView(input: {
+export async function stageCaptureView(input: {
   file: File;
   direction: Direction;
-  result: VisionViewResult;
   series: CaptureSeriesRow;
   requestKey: string;
   context: Omit<ImageUploadContext, "userId" | "treeId">;
@@ -187,6 +194,17 @@ export async function saveProcessedView(input: {
     await removeOriginal(image.id, image.storage_path);
     throw error;
   }
+  return view;
+}
+
+export async function saveProcessedView(input: {
+  view: CaptureViewRow;
+  result: VisionViewResult;
+  series: CaptureSeriesRow;
+  context: Omit<ImageUploadContext, "userId" | "treeId">;
+}): Promise<CaptureViewRow> {
+  const uploadContext = await resolveImageUploadContext(input.context);
+  const view = input.view;
   if (["calibrated", "annotation_pending", "annotation_in_progress", "annotation_completed"].includes(view.processing_status)) return view;
 
   if (!input.result.rectified_image_data_url || input.result.critical_errors.length > 0) {
@@ -467,14 +485,39 @@ export async function signedDerivedUrl(path: string | null): Promise<string | nu
   return path ? createSignedImageUrl(path) : null;
 }
 
-export async function loadSeriesResults(seriesId: string): Promise<Partial<Record<Direction, VisionViewResult>>> {
+export async function loadSeriesViews(seriesId: string): Promise<CaptureViewRow[]> {
   const { data: views, error } = await supabase
     .from("capture_views")
     .select("*")
     .eq("capture_series_id", seriesId)
     .eq("active", true);
   if (error) throw error;
-  const entries = await Promise.all((views ?? []).map(async (view) => {
+  return views ?? [];
+}
+
+export async function loadStoredImageFile(imageId: string): Promise<File> {
+  const { data: image, error } = await supabase
+    .from("images")
+    .select("storage_bucket, storage_path, original_filename, mime_type")
+    .eq("id", imageId)
+    .single();
+  if (error || !image) throw error ?? new Error("No se pudo recuperar la fotografía guardada.");
+  const { data: blob, error: downloadError } = await supabase.storage
+    .from(image.storage_bucket)
+    .download(image.storage_path);
+  if (downloadError || !blob) throw downloadError ?? new Error("No se pudo recuperar la fotografía guardada.");
+  return new File([blob], image.original_filename, { type: image.mime_type });
+}
+
+export async function loadSeriesResults(seriesId: string): Promise<Partial<Record<Direction, VisionViewResult>>> {
+  const views = await loadSeriesViews(seriesId);
+  const processedViews = views.filter((view) => (
+    view.processed_at !== null
+    || view.processing_status === "calibrated"
+    || view.processing_status.startsWith("annotation_")
+    || view.processing_status === "repeat_photo"
+  ));
+  const entries = await Promise.all(processedViews.map(async (view) => {
     const [rectifiedUrl, maskUrl] = await Promise.all([
       signedDerivedUrl(view.rectified_storage_path),
       signedDerivedUrl(view.union_mask_storage_path),

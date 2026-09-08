@@ -27,6 +27,9 @@ class OnnxPredictor:
         # Do not retain the encoder's peak allocations in an arena between requests.
         options.enable_cpu_mem_arena = False
         options.enable_mem_pattern = False
+        # Avoid x86 NCHWc layout transforms and per-band packed-weight copies.
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+        options.add_session_config_entry("session.disable_prepacking", "1")
         self.encoder = ort.InferenceSession(str(root / "encoder.onnx"), options, providers=["CPUExecutionProvider"])
         self.decoder = ort.InferenceSession(str(root / "decoder.onnx"), options, providers=["CPUExecutionProvider"])
         self.reset_image()

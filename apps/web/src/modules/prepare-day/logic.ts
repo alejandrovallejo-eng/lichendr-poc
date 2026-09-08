@@ -1,6 +1,52 @@
 // Pure helpers for the "Preparar jornada" and "Árboles de esta jornada" flows.
 // Kept side-effect free so they can be unit-tested with node --test.
 
+// ---------------------------------------------------------------------------
+// Datetime-local helpers.
+//
+// Native <input type="datetime-local"> exchanges "YYYY-MM-DDTHH:mm" strings
+// interpreted in the user's local timezone. We must convert both directions
+// carefully:
+//   1. Present a Date as a datetime-local value using LOCAL wall-clock time.
+//   2. Convert a datetime-local string BACK to an ISO string that represents
+//      the same instant in UTC (which is what the database stores).
+// Historically we tried to subtract the timezone offset manually in step (2),
+// but the JavaScript Date constructor already interprets "YYYY-MM-DDTHH:mm"
+// as local time, so subtracting the offset was applied twice — the resulting
+// ISO string was off by the offset (Santo Domingo saw the previous day at
+// 20:30 for a 00:30 entry). The simplest correct implementation is to just
+// call toISOString() on the parsed date.
+// ---------------------------------------------------------------------------
+
+export function formatLocalDatetimeInputValue(date: Date): string {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    throw new Error("Fecha inválida para formatear.");
+  }
+  // Build the "YYYY-MM-DDTHH:mm" value from local components. Using the
+  // component-based approach avoids any UTC vs local ambiguity.
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+// Convert a "YYYY-MM-DDTHH:mm" datetime-local input value to an ISO string
+// (UTC). The value is interpreted as LOCAL time — matching how the input
+// itself behaves in the browser — and Date's ISO output represents the same
+// instant in UTC. Any trailing seconds/milliseconds in the input are honored.
+export function datetimeLocalToIsoString(localValue: string): string {
+  if (typeof localValue !== "string" || localValue.trim() === "") {
+    throw new Error("Fecha vacía o inválida.");
+  }
+  const date = new Date(localValue);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error("La fecha no se pudo interpretar.");
+  }
+  return date.toISOString();
+}
+
 export interface NamedRow {
   name: string;
 }
@@ -196,16 +242,63 @@ export interface DraftState {
 // This is what lets the flow recover from a partial failure: if the project
 // or site was already created but the jornada write failed, we keep those
 // identifiers so the user can retry without producing duplicates.
+//
+// Parent-child consistency is enforced: if the caller's current selection
+// contradicts the draft at some level, the draft's descendants from that
+// level are dropped so we never stitch together an incoherent hierarchy
+// (for example project B combined with a site that belongs to project A).
 export function mergeDraftWithSelection(
   draft: DraftState | null | undefined,
   current: PreparationSelection,
 ): PreparationSelection {
   if (!draft) return current;
-  return {
-    projectId: current.projectId ?? draft.projectId,
-    siteId: current.siteId ?? draft.siteId,
-    eventId: current.eventId ?? draft.eventId,
-  };
+
+  const projectId = current.projectId ?? draft.projectId;
+
+  // Any user-supplied projectId that differs from the draft invalidates the
+  // draft's descendants because a site (and therefore an event) belongs to a
+  // single project.
+  const projectMismatch =
+    current.projectId !== undefined
+    && draft.projectId !== undefined
+    && current.projectId !== draft.projectId;
+
+  const siteId = current.siteId ?? (projectMismatch ? undefined : draft.siteId);
+
+  // Same idea for site → event.
+  const siteMismatch =
+    current.siteId !== undefined
+    && draft.siteId !== undefined
+    && current.siteId !== draft.siteId;
+
+  const eventId = current.eventId ?? (projectMismatch || siteMismatch ? undefined : draft.eventId);
+
+  return { projectId, siteId, eventId };
+}
+
+// Narrow the draft to the given scope. Callers use this when the user
+// changes their intent (mode change new/existing, or picking a different
+// existing parent), so a stale descendant id from a previous partial-failure
+// attempt is not silently reused for an incompatible parent.
+export type DraftScope = "keep_all" | "drop_below_project" | "drop_below_site" | "drop_all";
+
+export function narrowDraftScope(
+  draft: DraftState | null | undefined,
+  scope: DraftScope,
+): DraftState | null {
+  if (!draft) return null;
+  switch (scope) {
+    case "keep_all":
+      return { ...draft };
+    case "drop_below_project":
+      return draft.projectId ? { projectId: draft.projectId } : null;
+    case "drop_below_site":
+      return draft.projectId
+        ? { projectId: draft.projectId, siteId: draft.siteId }
+        : null;
+    case "drop_all":
+      return null;
+  }
 }
 
 // Given a draft plus the newly-created records for this attempt, decide which
@@ -224,5 +317,133 @@ export function planCreationsForRetry(input: {
     createProject: !projectId,
     createSite: !siteId,
     createEvent: !eventId,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchy resolution for the four-view capture screen.
+//
+// The four-view screen must open exactly on the tree that the user picked in
+// the "Árboles de esta jornada" list. The URL carries
+// `?projectId=…&siteId=…&eventId=…&treeSampleId=…`. The tree_sample id is the
+// truth source; the rest are validated against the persisted hierarchy so the
+// screen never silently selects a different tree.
+// ---------------------------------------------------------------------------
+
+export interface HierarchyProject { id: string }
+export interface HierarchySite { id: string; projectId: string }
+export interface HierarchyEvent { id: string; siteId: string }
+export interface HierarchyTree { id: string; siteId: string }
+export interface HierarchyTreeSample {
+  id: string;
+  treeId: string;
+  samplingEventId: string;
+  siteId: string;
+}
+
+export interface ResolvedHierarchy {
+  projectId: string;
+  siteId: string;
+  eventId: string;
+  treeId: string;
+  treeSampleId: string;
+}
+
+export interface HierarchyResolutionInput {
+  treeSampleId: string;
+  treeSamples: readonly HierarchyTreeSample[];
+  samplingEvents: readonly HierarchyEvent[];
+  sites: readonly HierarchySite[];
+  projects: readonly HierarchyProject[];
+  trees: readonly HierarchyTree[];
+}
+
+export type HierarchyResolutionResult =
+  | { ok: true; resolved: ResolvedHierarchy }
+  | { ok: false; message: string };
+
+// Pure lookup: given the fixtures, walk the sample → event → site → project
+// chain and confirm the tree also belongs to the same site. Any missing link
+// or cross-parent inconsistency yields an error string that the caller can
+// surface to the user. This never falls back to "the first record" — an
+// invalid identifier is an error, not a signal to substitute a different tree.
+export function resolveHierarchyFromTreeSample(
+  input: HierarchyResolutionInput,
+): HierarchyResolutionResult {
+  const sample = input.treeSamples.find((row) => row.id === input.treeSampleId);
+  if (!sample) {
+    return { ok: false, message: "No se encontró la muestra del árbol solicitada." };
+  }
+  const event = input.samplingEvents.find((row) => row.id === sample.samplingEventId);
+  if (!event) {
+    return { ok: false, message: "La muestra apunta a una jornada que no existe." };
+  }
+  const site = input.sites.find((row) => row.id === event.siteId);
+  if (!site) {
+    return { ok: false, message: "La jornada apunta a un sitio que no existe." };
+  }
+  const project = input.projects.find((row) => row.id === site.projectId);
+  if (!project) {
+    return { ok: false, message: "El sitio apunta a un proyecto que no existe." };
+  }
+  const tree = input.trees.find((row) => row.id === sample.treeId);
+  if (!tree) {
+    return { ok: false, message: "La muestra apunta a un árbol que no existe." };
+  }
+  if (tree.siteId !== site.id) {
+    return {
+      ok: false,
+      message: "El árbol no pertenece al sitio de la jornada.",
+    };
+  }
+  if (sample.siteId !== site.id) {
+    return {
+      ok: false,
+      message: "La muestra registra un sitio distinto al de la jornada.",
+    };
+  }
+  return {
+    ok: true,
+    resolved: {
+      projectId: project.id,
+      siteId: site.id,
+      eventId: event.id,
+      treeId: tree.id,
+      treeSampleId: sample.id,
+    },
+  };
+}
+
+export interface ExpectedContextIds {
+  projectId?: string;
+  siteId?: string;
+  eventId?: string;
+}
+
+// Ensure the caller-provided (URL) context matches the resolved hierarchy.
+// If any expected id differs from the resolved one, we return a descriptive
+// error so the UI can refuse to enable capture. This is the exact guardrail
+// the QA feedback requested: never silently substitute another tree.
+export function validateExpectedContext(
+  expected: ExpectedContextIds,
+  resolved: ResolvedHierarchy,
+): { ok: true } | { ok: false; message: string } {
+  const mismatched: string[] = [];
+  if (expected.projectId && expected.projectId !== resolved.projectId) {
+    mismatched.push("proyecto");
+  }
+  if (expected.siteId && expected.siteId !== resolved.siteId) {
+    mismatched.push("sitio");
+  }
+  if (expected.eventId && expected.eventId !== resolved.eventId) {
+    mismatched.push("jornada");
+  }
+  if (mismatched.length === 0) return { ok: true };
+  return {
+    ok: false,
+    message:
+      "El enlace contiene identificadores que no corresponden a la muestra ("
+      + mismatched.join(", ")
+      + "). Vuelve a \"Árboles de esta jornada\" y abre el árbol de nuevo.",
   };
 }

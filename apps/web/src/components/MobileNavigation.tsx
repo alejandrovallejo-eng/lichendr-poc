@@ -5,7 +5,7 @@ import navigation from "@/config/navigation";
 
 export default function MobileNavigation() {
   return (
-    <nav className="flex gap-2 lg:hidden overflow-x-auto py-2" style={{ background: "transparent" }}>
+    <nav className="flex gap-2 md:hidden overflow-x-auto py-2" style={{ background: "transparent" }}>
       {navigation.map((n) => (
         <Link
           key={n.path}

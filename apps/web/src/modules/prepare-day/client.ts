@@ -13,8 +13,16 @@ import type { Database } from "@/types/supabase";
 import { supabase } from "@/lib/supabase/client";
 import { ensureAnonymousSession } from "@/modules/auth/client";
 import type { SamplingEvent, Site, Tree, TreeSample } from "@/types/domain";
-import type { TreeEvaluationStatus } from "./logic";
-import { deriveTreeEvaluationStatus } from "./logic";
+import type {
+  ExpectedContextIds,
+  ResolvedHierarchy,
+  TreeEvaluationStatus,
+} from "./logic";
+import {
+  deriveTreeEvaluationStatus,
+  resolveHierarchyFromTreeSample,
+  validateExpectedContext,
+} from "./logic";
 
 export interface PrepareDayInput {
   project:
@@ -82,8 +90,34 @@ export type PrepareDayResult =
 // fails we return the identifiers that were already created so the caller can
 // retry without duplicates. This function is intentionally strictly ordered:
 // the site depends on the project, the jornada depends on the site.
+//
+// Precedence when the user changes their mind between attempts: an explicit
+// `mode: "existing"` selection always wins over a `draft` identifier that came
+// from a previous partial failure. This prevents a stale draft (e.g. from a
+// crashed create-new attempt) from silently overriding a fresh pick.
 export async function preparaJornada(input: PrepareDayInput): Promise<PrepareDayResult> {
   const persisted: PrepareDayPartialFailure["persisted"] = { ...input.draft };
+
+  // If the user explicitly picked an existing entity, that pick always wins
+  // over the draft. This also invalidates any descendants that belonged to a
+  // different parent — the draft site/event would be nonsense against a
+  // different project.
+  if (input.project.mode === "existing") {
+    if (persisted.projectId && persisted.projectId !== input.project.id) {
+      persisted.siteId = undefined;
+      persisted.eventId = undefined;
+    }
+    persisted.projectId = input.project.id;
+  }
+  if (input.site.mode === "existing") {
+    if (persisted.siteId && persisted.siteId !== input.site.id) {
+      persisted.eventId = undefined;
+    }
+    persisted.siteId = input.site.id;
+  }
+  if (input.event.mode === "existing") {
+    persisted.eventId = input.event.id;
+  }
 
   // ---- Project ----
   let projectId = persisted.projectId;
@@ -313,3 +347,141 @@ export async function fetchJornadaTreesWithStatus(
 }
 
 export type { Site };
+
+// -----------------------------------------------------------------------------
+// Context resolution for the "Captura 4 vistas" / "Carga avanzada" / "Anotaciones"
+// entry points.
+// -----------------------------------------------------------------------------
+
+export interface FourViewContextResolution {
+  ok: boolean;
+  // Populated when the tree sample and its ancestry all exist AND, if the URL
+  // provided expected identifiers, the ancestry matches those. The caller can
+  // use this to preselect all four dropdowns instead of falling back to the
+  // first record on the site.
+  resolved?: ResolvedHierarchy;
+  // Human-readable message describing why we could not resolve. Presented to
+  // the user so they never see a silent tree swap.
+  message?: string;
+}
+
+// Resolve a treeSampleId to its full project → site → sampling event → tree
+// hierarchy. This is what the four-view / advanced-load / annotations screens
+// call on mount so they preselect the tree the user actually clicked on
+// instead of the first row in the loaded list.
+//
+// The function is defensive: it validates that the ancestry is internally
+// consistent (tree.site_id must match the sample's site) and, if the caller
+// passed expected identifiers from the URL, it also validates that each level
+// matches. If either check fails we return `ok: false` with a message; the
+// caller must NOT silently swap in a different tree.
+export async function resolveFourViewContext(
+  treeSampleId: string,
+  expected: ExpectedContextIds = {},
+): Promise<FourViewContextResolution> {
+  if (!treeSampleId) {
+    return { ok: false, message: "No se proporcionó un identificador de muestra." };
+  }
+
+  const { error: authError } = await ensureAnonymousSession();
+  if (authError) {
+    return { ok: false, message: authError };
+  }
+
+  const { data: sampleRow, error: sampleError } = await supabase
+    .from("tree_samples")
+    .select("id, tree_id, sampling_event_id, site_id")
+    .eq("id", treeSampleId)
+    .maybeSingle();
+  if (sampleError) {
+    return { ok: false, message: sampleError.message };
+  }
+  if (!sampleRow) {
+    return {
+      ok: false,
+      message:
+        "La muestra referenciada no existe o no es accesible. Vuelve a la jornada y abre el árbol de nuevo.",
+    };
+  }
+
+  const [
+    { data: eventRow, error: eventError },
+    { data: siteRow, error: siteError },
+    { data: treeRow, error: treeError },
+  ] = await Promise.all([
+    supabase
+      .from("sampling_events")
+      .select("id, site_id, name, sampled_at")
+      .eq("id", sampleRow.sampling_event_id)
+      .maybeSingle(),
+    supabase
+      .from("sites")
+      .select("id, project_id, name")
+      .eq("id", sampleRow.site_id)
+      .maybeSingle(),
+    supabase
+      .from("trees")
+      .select("id, site_id, code")
+      .eq("id", sampleRow.tree_id)
+      .maybeSingle(),
+  ]);
+
+  if (eventError) return { ok: false, message: eventError.message };
+  if (siteError) return { ok: false, message: siteError.message };
+  if (treeError) return { ok: false, message: treeError.message };
+  if (!eventRow || !siteRow || !treeRow) {
+    return {
+      ok: false,
+      message:
+        "No se pudo reconstruir la jerarquía completa de la muestra. Falta el sitio, la jornada o el árbol.",
+    };
+  }
+
+  const { data: projectRow, error: projectError } = await supabase
+    .from("projects")
+    .select("id, name")
+    .eq("id", siteRow.project_id)
+    .maybeSingle();
+  if (projectError) return { ok: false, message: projectError.message };
+  if (!projectRow) {
+    return { ok: false, message: "El proyecto asociado a la muestra no está disponible." };
+  }
+
+  const resolution = resolveHierarchyFromTreeSample({
+    treeSampleId,
+    treeSamples: [
+      {
+        id: sampleRow.id,
+        treeId: sampleRow.tree_id,
+        samplingEventId: sampleRow.sampling_event_id,
+        siteId: sampleRow.site_id,
+      },
+    ],
+    samplingEvents: [
+      {
+        id: eventRow.id,
+        siteId: eventRow.site_id,
+      },
+    ],
+    sites: [{ id: siteRow.id, projectId: siteRow.project_id }],
+    projects: [{ id: projectRow.id }],
+    trees: [{ id: treeRow.id, siteId: treeRow.site_id }],
+  });
+
+  if (!resolution.ok) {
+    return { ok: false, message: resolution.message };
+  }
+
+  const validation = validateExpectedContext(expected, resolution.resolved);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      resolved: resolution.resolved,
+      message:
+        validation.message ??
+        "La jerarquía cargada no coincide con la referenciada en el enlace.",
+    };
+  }
+
+  return { ok: true, resolved: resolution.resolved };
+}

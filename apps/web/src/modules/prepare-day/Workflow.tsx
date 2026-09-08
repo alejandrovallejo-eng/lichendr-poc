@@ -10,55 +10,82 @@ import { fetchSitesByProject } from "@/modules/sites/client";
 import { fetchSamplingEventsBySite } from "@/modules/sampling-events/client";
 import { preparaJornada, type PrepareDayResult } from "./client";
 import {
+  datetimeLocalToIsoString,
   formatLocalDate,
+  formatLocalDatetimeInputValue,
   mergeDraftWithSelection,
+  narrowDraftScope,
   resetIncompatibleSelections,
   suggestSamplingEventName,
 } from "./logic";
 
 type Mode = "existing" | "new";
 
+// Session storage key for the whole draft. It groups two independent things:
+//   - "persisted": identifiers that WERE actually created in a previous
+//     partial-failure attempt (used to prevent duplicate rows on retry).
+//   - "form": the current form field values so the user does not lose their
+//     typing if they refresh, navigate away, or hit "back". These are cleared
+//     on successful submit and via an explicit "Descartar borrador" action.
 const DRAFT_STORAGE_KEY = "lichendr:prepare-day:draft";
 
-function getLocalDatetimeLocalValue(date: Date) {
-  const tzOffset = date.getTimezoneOffset();
-  const localDate = new Date(date.getTime() - tzOffset * 60000);
-  return localDate.toISOString().slice(0, 16);
-}
-
-function localDatetimeLocalToISO(localValue: string) {
-  const localDate = new Date(localValue);
-  const timezoneOffsetMs = localDate.getTimezoneOffset() * 60000;
-  return new Date(localDate.getTime() - timezoneOffsetMs).toISOString();
-}
-
-interface DraftState {
+interface PersistedIds {
   projectId?: string;
   siteId?: string;
   eventId?: string;
 }
 
-function readDraft(): DraftState | null {
+interface FormDraft {
+  projectMode?: Mode;
+  siteMode?: Mode;
+  eventMode?: Mode;
+  existingProjectId?: string;
+  existingSiteId?: string;
+  existingEventId?: string;
+  projectName?: string;
+  projectDescription?: string;
+  siteName?: string;
+  siteDescription?: string;
+  siteProvince?: string;
+  siteMunicipality?: string;
+  siteLatitude?: string;
+  siteLongitude?: string;
+  siteGpsAccuracyM?: string;
+  siteNotes?: string;
+  siteRadiusM?: number;
+  siteLocationSource?: "manual" | "gps" | "unknown";
+  eventSampledAt?: string;
+  eventNameOverride?: string | null;
+  eventObservers?: string;
+  eventNotes?: string;
+}
+
+interface StoredDraft {
+  persisted?: PersistedIds;
+  form?: FormDraft;
+}
+
+function readDraft(): StoredDraft | null {
   if (typeof window === "undefined") return null;
   try {
     const value = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
     if (!value) return null;
-    const parsed = JSON.parse(value) as DraftState;
+    const parsed = JSON.parse(value) as StoredDraft;
     if (typeof parsed !== "object" || parsed === null) return null;
-    return {
-      projectId: typeof parsed.projectId === "string" ? parsed.projectId : undefined,
-      siteId: typeof parsed.siteId === "string" ? parsed.siteId : undefined,
-      eventId: typeof parsed.eventId === "string" ? parsed.eventId : undefined,
-    };
+    // Also tolerate legacy shape where the entire object was the persisted ids.
+    if ("persisted" in parsed || "form" in parsed) {
+      return parsed;
+    }
+    return { persisted: parsed as PersistedIds };
   } catch {
     return null;
   }
 }
 
-function writeDraft(next: DraftState | null) {
+function writeDraft(next: StoredDraft | null) {
   if (typeof window === "undefined") return;
   try {
-    if (!next) {
+    if (!next || (!next.persisted && !next.form)) {
       window.sessionStorage.removeItem(DRAFT_STORAGE_KEY);
       return;
     }
@@ -67,6 +94,12 @@ function writeDraft(next: DraftState | null) {
     // sessionStorage may be unavailable (private mode, quota). We degrade
     // gracefully — the flow still works, only partial-failure recovery is lost.
   }
+}
+
+// Merge the current draft with a mutation of the persisted ids or the form.
+function mutateDraft(mutation: (prev: StoredDraft) => StoredDraft) {
+  const prev = readDraft() ?? {};
+  writeDraft(mutation(prev));
 }
 
 export default function PrepareDayWorkflow() {
@@ -109,7 +142,7 @@ export default function PrepareDayWorkflow() {
   const [gpsMessage, setGpsMessage] = useState<string | null>(null);
 
   // New event fields.
-  const [eventSampledAt, setEventSampledAt] = useState<string>(() => getLocalDatetimeLocalValue(new Date()));
+  const [eventSampledAt, setEventSampledAt] = useState<string>(() => formatLocalDatetimeInputValue(new Date()));
   const [eventNameOverride, setEventNameOverride] = useState<string | null>(null);
   const [eventObservers, setEventObservers] = useState("");
   const [eventNotes, setEventNotes] = useState("");
@@ -122,36 +155,96 @@ export default function PrepareDayWorkflow() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // True once mount hydration has finished; used to gate the form-field auto
+  // save effect so we do not overwrite a persisted draft with the initial
+  // (empty) state before the mount effect had a chance to restore it.
+  const [hydrated, setHydrated] = useState(false);
+  // Whether we started this session from a stored draft (persisted ids OR
+  // form fields). Only used to reveal the "Descartar borrador" affordance
+  // before the user has typed anything themselves. After the user has typed
+  // ANY input (a non-default value below), the button also becomes visible
+  // via the memo, so this state does not need to react to typing.
+  const [restoredFromDraft, setRestoredFromDraft] = useState(false);
 
-  // Load projects at mount. Also apply the draft persisted from a previous
-  // partial failure so the user can pick up where they left off.
+  // Load projects at mount. Restore the persisted draft (both partial-failure
+  // identifiers and the in-progress form fields the user was typing).
   useEffect(() => {
     let active = true;
     (async () => {
       setLoadingProjects(true);
       const draft = readDraft();
+      const persisted = draft?.persisted ?? {};
+      const form = draft?.form ?? {};
       const { projects: rows, error: err } = await fetchProjects();
       if (!active) return;
       if (err) setError(err);
       setProjects(rows);
-      if (draft?.projectId && rows.some((row) => row.id === draft.projectId)) {
+
+      // Restore persisted (partial-failure) identifiers first so downstream
+      // effects see the right values on their first run.
+      if (persisted.projectId && rows.some((row) => row.id === persisted.projectId)) {
         setProjectMode("existing");
-        setExistingProjectId(draft.projectId);
+        setExistingProjectId(persisted.projectId);
       }
-      if (draft?.siteId) {
+      if (persisted.siteId) {
         setSiteMode("existing");
-        setExistingSiteId(draft.siteId);
+        setExistingSiteId(persisted.siteId);
       }
-      if (draft?.eventId) {
+      if (persisted.eventId) {
         setEventMode("existing");
-        setExistingEventId(draft.eventId);
+        setExistingEventId(persisted.eventId);
       }
-      if (draft && (draft.projectId || draft.siteId || draft.eventId)) {
+
+      // Then restore any form fields the user had typed but not yet saved.
+      // Persisted identifiers take precedence over form values.
+      if (form.projectMode && !persisted.projectId) setProjectMode(form.projectMode);
+      if (form.siteMode && !persisted.siteId) setSiteMode(form.siteMode);
+      if (form.eventMode && !persisted.eventId) setEventMode(form.eventMode);
+      if (form.existingProjectId && !persisted.projectId
+          && rows.some((row) => row.id === form.existingProjectId)) {
+        setExistingProjectId(form.existingProjectId);
+      }
+      if (form.existingSiteId && !persisted.siteId) setExistingSiteId(form.existingSiteId);
+      if (form.existingEventId && !persisted.eventId) setExistingEventId(form.existingEventId);
+      if (typeof form.projectName === "string") setProjectName(form.projectName);
+      if (typeof form.projectDescription === "string") setProjectDescription(form.projectDescription);
+      if (typeof form.siteName === "string") setSiteName(form.siteName);
+      if (typeof form.siteDescription === "string") setSiteDescription(form.siteDescription);
+      if (typeof form.siteProvince === "string") setSiteProvince(form.siteProvince);
+      if (typeof form.siteMunicipality === "string") setSiteMunicipality(form.siteMunicipality);
+      if (typeof form.siteLatitude === "string") setSiteLatitude(form.siteLatitude);
+      if (typeof form.siteLongitude === "string") setSiteLongitude(form.siteLongitude);
+      if (typeof form.siteGpsAccuracyM === "string") setSiteGpsAccuracyM(form.siteGpsAccuracyM);
+      if (typeof form.siteNotes === "string") setSiteNotes(form.siteNotes);
+      if (typeof form.siteRadiusM === "number") setSiteRadiusM(form.siteRadiusM);
+      if (form.siteLocationSource === "manual" || form.siteLocationSource === "gps"
+          || form.siteLocationSource === "unknown") {
+        setSiteLocationSource(form.siteLocationSource);
+      }
+      if (typeof form.eventSampledAt === "string") setEventSampledAt(form.eventSampledAt);
+      if (form.eventNameOverride === null || typeof form.eventNameOverride === "string") {
+        setEventNameOverride(form.eventNameOverride);
+      }
+      if (typeof form.eventObservers === "string") setEventObservers(form.eventObservers);
+      if (typeof form.eventNotes === "string") setEventNotes(form.eventNotes);
+
+      const hasPersisted = !!(persisted.projectId || persisted.siteId || persisted.eventId);
+      const hasFormData = !!(
+        form.projectName || form.siteName || form.eventObservers || form.eventNotes
+        || form.siteNotes || form.siteDescription
+      );
+      setRestoredFromDraft(hasPersisted || hasFormData);
+      if (hasPersisted) {
         setNotice(
           "Retomamos tu selección anterior. Puedes continuar sin recrear proyecto, sitio ni jornada.",
         );
+      } else if (hasFormData) {
+        setNotice(
+          "Recuperamos los campos que habías escrito. Puedes seguir editando o descartar el borrador.",
+        );
       }
       setLoadingProjects(false);
+      setHydrated(true);
     })();
     return () => {
       active = false;
@@ -197,6 +290,64 @@ export default function PrepareDayWorkflow() {
       active = false;
     };
   }, [existingSiteId]);
+
+  // Auto-save form fields to sessionStorage as the user types. This keeps
+  // partially-typed data across page refreshes, "back" navigation, and browser
+  // crashes — which was one of the QA feedback items ("hoy se pierden").
+  useEffect(() => {
+    if (!hydrated) return;
+    mutateDraft((prev) => ({
+      persisted: prev.persisted,
+      form: {
+        projectMode,
+        siteMode,
+        eventMode,
+        existingProjectId,
+        existingSiteId,
+        existingEventId,
+        projectName,
+        projectDescription,
+        siteName,
+        siteDescription,
+        siteProvince,
+        siteMunicipality,
+        siteLatitude,
+        siteLongitude,
+        siteGpsAccuracyM,
+        siteNotes,
+        siteRadiusM,
+        siteLocationSource,
+        eventSampledAt,
+        eventNameOverride,
+        eventObservers,
+        eventNotes,
+      },
+    }));
+  }, [
+    hydrated,
+    projectMode,
+    siteMode,
+    eventMode,
+    existingProjectId,
+    existingSiteId,
+    existingEventId,
+    projectName,
+    projectDescription,
+    siteName,
+    siteDescription,
+    siteProvince,
+    siteMunicipality,
+    siteLatitude,
+    siteLongitude,
+    siteGpsAccuracyM,
+    siteNotes,
+    siteRadiusM,
+    siteLocationSource,
+    eventSampledAt,
+    eventNameOverride,
+    eventObservers,
+    eventNotes,
+  ]);
 
   // Automatically suggest a jornada name derived from the date, respecting
   // existing names on the site so we do not collide. The user can still edit —
@@ -250,13 +401,54 @@ export default function PrepareDayWorkflow() {
     setProjectMode(mode);
     setError(null);
     if (mode === "new") {
-      // Clear existing selection so the flow does not accidentally reuse it.
+      // Any previously-persisted identifiers (project + descendants) belonged
+      // to a different intent. Discard them so preparaJornada does not reuse
+      // them silently — the user asked for a fresh project.
+      mutateDraft((prev) => ({
+        persisted: prev.persisted
+          ? (narrowDraftScope(prev.persisted, "drop_all") ?? undefined)
+          : undefined,
+        form: prev.form,
+      }));
       setExistingProjectId(undefined);
       setSites([]);
       setEvents([]);
       setSiteMode("new");
       setEventMode("new");
       setExistingSiteId(undefined);
+      setExistingEventId(undefined);
+    }
+  };
+
+  const handleSiteMode = (mode: Mode) => {
+    setSiteMode(mode);
+    setError(null);
+    if (mode === "new") {
+      // Site + event persisted identifiers belong to the previous site, so we
+      // drop them but keep the project part of the draft.
+      mutateDraft((prev) => ({
+        persisted: prev.persisted
+          ? (narrowDraftScope(prev.persisted, "drop_below_project") ?? undefined)
+          : undefined,
+        form: prev.form,
+      }));
+      setExistingSiteId(undefined);
+      setEvents([]);
+      setEventMode("new");
+      setExistingEventId(undefined);
+    }
+  };
+
+  const handleEventMode = (mode: Mode) => {
+    setEventMode(mode);
+    setError(null);
+    if (mode === "new") {
+      mutateDraft((prev) => ({
+        persisted: prev.persisted
+          ? (narrowDraftScope(prev.persisted, "drop_below_site") ?? undefined)
+          : undefined,
+        form: prev.form,
+      }));
       setExistingEventId(undefined);
     }
   };
@@ -277,6 +469,15 @@ export default function PrepareDayWorkflow() {
       setSiteMode("existing");
       setEventMode("existing");
     }
+    // If the user picks a project different from the persisted one, drop the
+    // persisted site + event — they belong to the previous project and would
+    // reappear via mergeDraftWithSelection otherwise.
+    mutateDraft((prev) => {
+      const persisted = prev.persisted;
+      if (!persisted?.projectId || persisted.projectId === id) return prev;
+      const narrowed = narrowDraftScope({ ...persisted, projectId: id }, "drop_below_project");
+      return { persisted: narrowed ?? undefined, form: prev.form };
+    });
   };
 
   const handleSelectExistingSite = (id: string | undefined) => {
@@ -287,7 +488,95 @@ export default function PrepareDayWorkflow() {
     );
     setExistingSiteId(next.siteId);
     setExistingEventId(next.eventId);
+    // Drop persisted event if the site the user chose differs from the persisted one.
+    mutateDraft((prev) => {
+      const persisted = prev.persisted;
+      if (!persisted?.siteId || persisted.siteId === id) return prev;
+      const narrowed = narrowDraftScope(
+        { ...persisted, siteId: id },
+        "drop_below_site",
+      );
+      return { persisted: narrowed ?? undefined, form: prev.form };
+    });
   };
+
+  // Explicit "Descartar borrador" affordance. Clears both persisted ids and
+  // the form fields so the user can start over without leftover state.
+  const handleDiscardDraft = () => {
+    writeDraft(null);
+    setProjectMode("new");
+    setSiteMode("new");
+    setEventMode("new");
+    setExistingProjectId(undefined);
+    setExistingSiteId(undefined);
+    setExistingEventId(undefined);
+    setProjectName("");
+    setProjectDescription("");
+    setSiteName("");
+    setSiteDescription("");
+    setSiteProvince("");
+    setSiteMunicipality("");
+    setSiteLatitude("");
+    setSiteLongitude("");
+    setSiteGpsAccuracyM("");
+    setSiteNotes("");
+    setSiteRadiusM(100);
+    setSiteLocationSource("manual");
+    setSites([]);
+    setEvents([]);
+    setEventSampledAt(formatLocalDatetimeInputValue(new Date()));
+    setEventNameOverride(null);
+    setEventObservers("");
+    setEventNotes("");
+    setError(null);
+    setNotice(null);
+    setRestoredFromDraft(false);
+  };
+
+  // Reveal the "Descartar borrador" button whenever there is anything the
+  // user might want to explicitly discard: a persisted-from-partial-failure
+  // draft, or ANY typed content. Computing this from state (instead of a
+  // useEffect+setState) avoids the react-hooks/set-state-in-effect lint.
+  const hasDraft = useMemo(() => {
+    if (restoredFromDraft) return true;
+    if (existingProjectId || existingSiteId || existingEventId) return true;
+    if (
+      projectName.trim() ||
+      projectDescription.trim() ||
+      siteName.trim() ||
+      siteDescription.trim() ||
+      siteProvince.trim() ||
+      siteMunicipality.trim() ||
+      siteLatitude.trim() ||
+      siteLongitude.trim() ||
+      siteGpsAccuracyM.trim() ||
+      siteNotes.trim() ||
+      eventObservers.trim() ||
+      eventNotes.trim() ||
+      eventNameOverride !== null
+    ) {
+      return true;
+    }
+    return false;
+  }, [
+    restoredFromDraft,
+    existingProjectId,
+    existingSiteId,
+    existingEventId,
+    projectName,
+    projectDescription,
+    siteName,
+    siteDescription,
+    siteProvince,
+    siteMunicipality,
+    siteLatitude,
+    siteLongitude,
+    siteGpsAccuracyM,
+    siteNotes,
+    eventObservers,
+    eventNotes,
+    eventNameOverride,
+  ]);
 
   const validate = (): string | null => {
     if (projectMode === "existing" && !existingProjectId) {
@@ -358,11 +647,13 @@ export default function PrepareDayWorkflow() {
     if (submitting) return;
     setSubmitting(true);
 
-    const draft = mergeDraftWithSelection(readDraft(), {
+    const currentSelection = {
       projectId: projectMode === "existing" ? existingProjectId : undefined,
       siteId: siteMode === "existing" ? existingSiteId : undefined,
       eventId: eventMode === "existing" ? existingEventId : undefined,
-    });
+    };
+    const storedDraft = readDraft();
+    const draft = mergeDraftWithSelection(storedDraft?.persisted ?? null, currentSelection);
 
     const result: PrepareDayResult = await preparaJornada({
       project:
@@ -395,7 +686,7 @@ export default function PrepareDayWorkflow() {
           : {
               mode: "new",
               name: effectiveEventName.trim(),
-              sampledAt: localDatetimeLocalToISO(eventSampledAt),
+              sampledAt: datetimeLocalToIsoString(eventSampledAt),
               observerNames: eventObservers.trim() || undefined,
               notes: eventNotes.trim() || undefined,
             },
@@ -404,11 +695,17 @@ export default function PrepareDayWorkflow() {
 
     if (!result.ok) {
       // Persist whatever we did create so the retry does not duplicate rows.
+      // Keep the form fields around so the user can edit and retry.
+      const previousForm = readDraft()?.form;
       writeDraft({
-        projectId: result.failure.persisted.projectId,
-        siteId: result.failure.persisted.siteId,
-        eventId: result.failure.persisted.eventId,
+        persisted: {
+          projectId: result.failure.persisted.projectId,
+          siteId: result.failure.persisted.siteId,
+          eventId: result.failure.persisted.eventId,
+        },
+        form: previousForm,
       });
+      setRestoredFromDraft(true);
       const contextMsg =
         result.failure.step === "project"
           ? "No pudimos guardar el proyecto."
@@ -422,6 +719,7 @@ export default function PrepareDayWorkflow() {
 
     // Success — clear the draft and navigate to the jornada.
     writeDraft(null);
+    setRestoredFromDraft(false);
     router.push(`/jornada/${result.eventId}`);
   };
 
@@ -555,7 +853,7 @@ export default function PrepareDayWorkflow() {
                 name="site-mode"
                 value="existing"
                 checked={siteMode === "existing"}
-                onChange={() => setSiteMode("existing")}
+                onChange={() => handleSiteMode("existing")}
                 disabled={sites.length === 0}
               />
               Usar existente
@@ -566,7 +864,7 @@ export default function PrepareDayWorkflow() {
                 name="site-mode"
                 value="new"
                 checked={siteMode === "new"}
-                onChange={() => setSiteMode("new")}
+                onChange={() => handleSiteMode("new")}
               />
               Crear uno nuevo
             </label>
@@ -798,7 +1096,7 @@ export default function PrepareDayWorkflow() {
                 name="event-mode"
                 value="existing"
                 checked={eventMode === "existing"}
-                onChange={() => setEventMode("existing")}
+                onChange={() => handleEventMode("existing")}
                 disabled={events.length === 0}
               />
               Usar existente
@@ -809,7 +1107,7 @@ export default function PrepareDayWorkflow() {
                 name="event-mode"
                 value="new"
                 checked={eventMode === "new"}
-                onChange={() => setEventMode("new")}
+                onChange={() => handleEventMode("new")}
               />
               Crear una nueva
             </label>
@@ -944,6 +1242,21 @@ export default function PrepareDayWorkflow() {
           >
             {submitting ? "Guardando…" : "Guardar y comenzar con los árboles"}
           </button>
+          {hasDraft ? (
+            <button
+              type="button"
+              onClick={handleDiscardDraft}
+              className="px-3 py-2 rounded border text-sm"
+              style={{
+                background: "var(--ld-card)",
+                color: "var(--ld-text)",
+                borderColor: "var(--ld-border)",
+              }}
+              aria-label="Descartar borrador y empezar en blanco"
+            >
+              Descartar borrador
+            </button>
+          ) : null}
           <Link href="/" className="text-sm underline" style={{ color: "var(--ld-primary)" }}>
             Volver al panel
           </Link>

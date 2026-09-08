@@ -9,12 +9,14 @@ import {
   type ChangeEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
 import { fetchProjects } from "@/modules/projects/client";
 import { fetchSitesByProject } from "@/modules/sites/client";
 import { fetchSamplingEventsBySite } from "@/modules/sampling-events/client";
 import { fetchTreesBySite } from "@/modules/trees/client";
 import type { Project, SamplingEvent, Site, Tree } from "@/types/domain";
+import { resolveFourViewContext } from "@/modules/prepare-day/client";
 import {
   analyzeStoredFourViewImage,
   ensureTreeSampleForTree,
@@ -259,19 +261,36 @@ function ResultVisual({ slot, layer }: { slot: SlotState; layer: string }) {
 }
 
 export default function FourViewWorkflow() {
+  const searchParams = useSearchParams();
+  const urlContext = useMemo(() => {
+    // Snapshot the URL context once on mount. Reading it once and using the
+    // snapshot for the whole session prevents an unexpected navigation from
+    // silently swapping the selected tree mid-capture.
+    return {
+      projectId: searchParams?.get("projectId") ?? "",
+      siteId: searchParams?.get("siteId") ?? "",
+      eventId: searchParams?.get("eventId") ?? "",
+      treeSampleId: searchParams?.get("treeSampleId") ?? "",
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [sites, setSites] = useState<Site[]>([]);
   const [events, setEvents] = useState<SamplingEvent[]>([]);
   const [trees, setTrees] = useState<Tree[]>([]);
-  const [projectId, setProjectId] = useState("");
-  const [siteId, setSiteId] = useState("");
-  const [eventId, setEventId] = useState("");
+  const [projectId, setProjectId] = useState(urlContext.projectId);
+  const [siteId, setSiteId] = useState(urlContext.siteId);
+  const [eventId, setEventId] = useState(urlContext.eventId);
   const [treeId, setTreeId] = useState("");
   const [slots, setSlots] = useState<Record<Direction, SlotState>>(EMPTY_SLOTS);
   const [series, setSeries] = useState<CaptureSeriesRow | null>(null);
   const [contextConfirmed, setContextConfirmed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  // Distinct from globalError so we can render it as an alert AND disable
+  // capture. When URL context does not resolve we refuse to select any tree.
+  const [contextMismatchError, setContextMismatchError] = useState<string | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [evaluated, setEvaluated] = useState<EvaluatedTreeRow[]>([]);
   const [fieldCircumferenceCm, setFieldCircumferenceCm] = useState("");
@@ -289,36 +308,108 @@ export default function FourViewWorkflow() {
     setContextConfirmed(false);
   };
 
+  // Resolve the URL context once on mount. If a `treeSampleId` was provided,
+  // walk the sample → event → site → project hierarchy and seed the four
+  // dropdowns with those exact identifiers. If the walk fails we surface an
+  // error and refuse to auto-select a different tree. This closes the
+  // "wrong tree" bug from the QA validation.
+  useEffect(() => {
+    if (!urlContext.treeSampleId) return;
+    let active = true;
+    (async () => {
+      const result = await resolveFourViewContext(urlContext.treeSampleId, {
+        projectId: urlContext.projectId || undefined,
+        siteId: urlContext.siteId || undefined,
+        eventId: urlContext.eventId || undefined,
+      });
+      if (!active) return;
+      if (!result.ok) {
+        setContextMismatchError(
+          result.message ??
+            "No se pudo resolver el árbol referenciado en el enlace. Vuelve a la jornada y ábrelo de nuevo.",
+        );
+        return;
+      }
+      const resolved = result.resolved!;
+      setProjectId(resolved.projectId);
+      setSiteId(resolved.siteId);
+      setEventId(resolved.eventId);
+      setTreeId(resolved.treeId);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [urlContext]);
+
   useEffect(() => {
     void fetchProjects().then(({ projects: rows, error }) => {
       if (error) setGlobalError(error);
       setProjects(rows);
-      setProjectId((current) => rows.some((item) => item.id === current) ? current : (rows[0]?.id ?? ""));
+      setProjectId((current) => {
+        if (current && rows.some((item) => item.id === current)) return current;
+        // If the URL asked for a specific project but it is not in the list,
+        // surface the error instead of silently swapping to a different
+        // project. Otherwise (no URL context), pick the first available row.
+        if (urlContext.projectId && current === urlContext.projectId) {
+          setContextMismatchError(
+            "El proyecto del enlace no está disponible con tu sesión. Vuelve a Preparar jornada y comprueba el contexto.",
+          );
+          return current;
+        }
+        return rows[0]?.id ?? "";
+      });
     });
     void listEvaluatedTrees().then(setEvaluated).catch(() => undefined);
-  }, []);
+  }, [urlContext]);
   useEffect(() => {
     if (!projectId) return;
     void fetchSitesByProject(projectId).then(({ sites: rows, error }) => {
       if (error) setGlobalError(error);
       setSites(rows);
-      setSiteId((current) => rows.some((item) => item.id === current) ? current : (rows[0]?.id ?? ""));
+      setSiteId((current) => {
+        if (current && rows.some((item) => item.id === current)) return current;
+        if (urlContext.siteId && current === urlContext.siteId) {
+          setContextMismatchError(
+            "El sitio del enlace no está disponible en este proyecto. Vuelve a la jornada y abre el árbol de nuevo.",
+          );
+          return current;
+        }
+        return rows[0]?.id ?? "";
+      });
     });
-  }, [projectId]);
+  }, [projectId, urlContext]);
   useEffect(() => {
     if (!siteId) return;
     void Promise.all([fetchSamplingEventsBySite(siteId), fetchTreesBySite(siteId)]).then(([eventResult, treeResult]) => {
       if (eventResult.error || treeResult.error) setGlobalError(eventResult.error ?? treeResult.error);
       setEvents(eventResult.samplingEvents);
       setTrees(treeResult.trees);
-      setEventId((current) => eventResult.samplingEvents.some((item) => item.id === current)
-        ? current
-        : (eventResult.samplingEvents[0]?.id ?? ""));
-      setTreeId((current) => treeResult.trees.some((item) => item.id === current)
-        ? current
-        : (treeResult.trees[0]?.id ?? ""));
+      setEventId((current) => {
+        if (current && eventResult.samplingEvents.some((item) => item.id === current)) return current;
+        if (urlContext.eventId && current === urlContext.eventId) {
+          setContextMismatchError(
+            "La jornada del enlace no está disponible. Vuelve a Preparar jornada.",
+          );
+          return current;
+        }
+        return eventResult.samplingEvents[0]?.id ?? "";
+      });
+      setTreeId((current) => {
+        if (current && treeResult.trees.some((item) => item.id === current)) return current;
+        // If we came from a `treeSampleId` URL and the resolver already picked
+        // a `treeId`, don't stomp it here — surface an error if the tree is
+        // not in this site (should never happen because the resolver already
+        // checks parent-child, but defensive).
+        if (urlContext.treeSampleId && current) {
+          setContextMismatchError(
+            "El árbol referenciado no pertenece a este sitio. Vuelve a la jornada y abre el árbol correcto.",
+          );
+          return current;
+        }
+        return treeResult.trees[0]?.id ?? "";
+      });
     });
-  }, [siteId]);
+  }, [siteId, urlContext]);
   useEffect(() => {
     const listener = (event: DeviceOrientationEvent) => {
       const withCompass = event as DeviceOrientationEvent & { webkitCompassHeading?: number };
@@ -810,7 +901,7 @@ export default function FourViewWorkflow() {
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            disabled={!eventId || !treeId || contextConfirmed || operationLocked}
+            disabled={!eventId || !treeId || contextConfirmed || operationLocked || !!contextMismatchError}
             onClick={() => setContextConfirmed(true)}
             className="rounded bg-emerald-800 px-4 py-2 text-sm text-white disabled:opacity-50"
           >
@@ -818,6 +909,16 @@ export default function FourViewWorkflow() {
           </button>
           {contextConfirmed ? <span className="text-sm text-emerald-800">Contexto bloqueado para esta serie; cambia un selector para reiniciar.</span> : null}
         </div>
+        {contextMismatchError ? (
+          <div
+            role="alert"
+            className="mt-4 rounded border px-4 py-3 text-sm"
+            style={{ background: "#F9DAD6", color: "#842029", borderColor: "#F5C2C7" }}
+          >
+            <strong className="block mb-1">No se puede iniciar la captura con este enlace.</strong>
+            {contextMismatchError}
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>

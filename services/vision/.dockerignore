@@ -1,0 +1,14 @@
+# Exclude from Docker build context
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.pytest_cache
+.mypy_cache
+checkpoints/
+*.pt
+*.pth
+tests/
+.env
+*.env

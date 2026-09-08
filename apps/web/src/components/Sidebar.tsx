@@ -8,7 +8,7 @@ export default function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="w-64 hidden lg:block p-4" style={{ background: "var(--ld-sidebar)" }}>
+    <aside className="w-64 hidden md:block p-4" style={{ background: "var(--ld-sidebar)" }}>
       <div className="mb-6 font-semibold text-white">LichenDR</div>
       <nav className="flex flex-col gap-1">
         {navigation.map((n) => {

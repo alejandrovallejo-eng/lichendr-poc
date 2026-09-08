@@ -477,13 +477,20 @@ export default function SamplingEventsPage() {
                     {event.notes ? (
                       <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}><strong>Notas:</strong> {event.notes}</p>
                     ) : null}
-                    <div className="mt-3">
+                    <div className="mt-3 flex flex-wrap gap-3">
+                      <a
+                        href={`/jornada/${event.id}`}
+                        className="text-sm font-medium"
+                        style={{ color: "var(--ld-primary)" }}
+                      >
+                        Árboles de esta jornada
+                      </a>
                       <a
                         href={`/trees?projectId=${selectedProjectId}&siteId=${selectedSiteId}&eventId=${event.id}`}
                         className="text-sm font-medium"
                         style={{ color: "var(--ld-primary)" }}
                       >
-                        Gestionar árboles
+                        Vista clásica
                       </a>
                     </div>
                   </div>

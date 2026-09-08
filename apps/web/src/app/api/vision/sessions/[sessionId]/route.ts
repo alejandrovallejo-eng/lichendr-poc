@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
-
-const VISION_SERVICE_URL = process.env.VISION_SERVICE_URL ?? "http://127.0.0.1:8000";
+import { VISION_SERVICE_URL, visionAuthHeaders } from "@/lib/vision";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +19,7 @@ export async function DELETE(
   try {
     const response = await fetch(`${VISION_SERVICE_URL}/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
+      headers: { ...visionAuthHeaders() },
       signal: AbortSignal.timeout(10_000),
     });
 

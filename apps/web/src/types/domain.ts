@@ -1,6 +1,14 @@
 // Domain types for LichenDR v1 (initial)
 
 export type UUID = string;
+export type PollutantUnitCode = "ug_m3" | "mg_m3" | "ng_m3" | "ppm" | "ppb";
+
+export interface PollutantMeasurement {
+  pollutantCode: "PM2.5" | "PM10" | "NO2" | "SO2" | "NH3" | "O3" | "CO";
+  value: number;
+  unitCode: PollutantUnitCode;
+  averagingPeriodMinutes: number | null;
+}
 
 export interface Project {
   id: UUID;
@@ -34,7 +42,7 @@ export interface SamplingEvent {
   observerNames?: string;
   weatherNotes?: string;
   protocolVersion: string;
-  status: "draft" | "completed";
+  status: "draft" | "provisional_ai" | "completed";
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -136,7 +144,7 @@ export interface AnnotationRegion {
   annotationSetId: UUID;
   classification: "lichen" | "bark" | "moss" | "algae" | "shadow" | "glare" | "unknown";
   morphotypeId?: UUID | null;
-  source: "mobile_sam";
+  source: "mobile_sam" | "manual" | "color_assisted" | "automatic_four_view";
   modelName: string;
   modelVersion?: string | null;
   maskBucket: string;
@@ -145,6 +153,9 @@ export interface AnnotationRegion {
   maskHeightPx: number;
   areaPixels: number;
   score?: number | null;
+  representativeColorHex?: string | null;
+  colorToleranceDeltaE?: number | null;
+  regionRole?: "trunk" | null;
   positivePoints: unknown[];
   negativePoints: unknown[];
   status: "draft" | "accepted" | "rejected";

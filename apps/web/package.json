@@ -8,20 +8,26 @@
     "dev": "next dev",
     "prebuild": "npm run prepare:onnx",
     "build": "next build",
+    "postbuild": "node scripts/verify-sharp-runtime.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npm run test:unit && npm run test:proxy && npm run test:ready",
+    "test:ready": "tsc --noEmit false --incremental false --module commonjs --moduleResolution node --target es2022 --esModuleInterop true --outDir /tmp/lichendr-ready-tests src/modules/annotations/vision-ready.ts src/modules/annotations/vision-ready.test.ts && node --test /tmp/lichendr-ready-tests/vision-ready.test.js",
+    "test:unit": "rm -rf /tmp/lichendr-web-tests && tsc --noEmit false --incremental false --module commonjs --moduleResolution node --target es2022 --esModuleInterop true --rewriteRelativeImportExtensions --outDir /tmp/lichendr-web-tests src/modules/analysis/metrics.ts src/modules/annotations/annotation-target.ts src/modules/annotations/annotation-target.test.ts src/modules/annotations/studio-mask-utils.ts src/modules/annotations/studio-mask-utils.test.ts src/modules/environmental-quality/science.ts src/modules/environmental-quality/science.test.ts src/modules/images/persistence.ts src/modules/images/persistence.test.ts src/modules/four-view/assistance.ts src/modules/four-view/assistance.test.ts src/modules/four-view/manual-flow.ts src/modules/four-view/manual-flow.test.ts src/modules/four-view/metrics.ts src/modules/four-view/metrics.test.ts src/modules/four-view/science.ts src/modules/four-view/science.test.ts src/modules/four-view/navigation.ts src/modules/four-view/navigation.test.ts src/modules/four-view/stored-analysis.ts src/modules/four-view/stored-analysis.test.ts src/modules/prepare-day/logic.ts src/modules/prepare-day/logic.test.ts && node --test /tmp/lichendr-web-tests/annotations/annotation-target.test.js /tmp/lichendr-web-tests/annotations/studio-mask-utils.test.js /tmp/lichendr-web-tests/environmental-quality/science.test.js /tmp/lichendr-web-tests/images/persistence.test.js /tmp/lichendr-web-tests/four-view/assistance.test.js /tmp/lichendr-web-tests/four-view/manual-flow.test.js /tmp/lichendr-web-tests/four-view/metrics.test.js /tmp/lichendr-web-tests/four-view/science.test.js /tmp/lichendr-web-tests/four-view/navigation.test.js /tmp/lichendr-web-tests/four-view/stored-analysis.test.js /tmp/lichendr-web-tests/prepare-day/logic.test.js",
+    "test:proxy": "rm -rf /tmp/lichendr-proxy-tests && tsc --noEmit false --incremental false --module commonjs --moduleResolution node --target es2022 --esModuleInterop true --rewriteRelativeImportExtensions --outDir /tmp/lichendr-proxy-tests src/types/heic-decode.d.ts src/lib/vision-analysis-image.ts src/lib/vision-analysis-image.test.ts src/lib/vision-analysis-proxy.ts src/lib/vision-analysis-proxy.test.ts && NODE_PATH=$PWD/node_modules node --test /tmp/lichendr-proxy-tests/vision-analysis-image.test.js /tmp/lichendr-proxy-tests/vision-analysis-proxy.test.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.9",
     "exifr": "^7.1.3",
+    "heic-decode": "2.1.0",
     "konva": "^10.3.0",
     "next": "16.2.11",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-konva": "^19.2.5",
-    "tus-js-client": "^4.3.1"
+    "sharp": "0.35.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -32,5 +38,9 @@
     "eslint-config-next": "16.2.11",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "@img/sharp-libvips-linux-x64": "1.3.3",
+    "@img/sharp-linux-x64": "0.35.4"
   }
 }

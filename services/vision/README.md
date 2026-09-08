@@ -1,6 +1,6 @@
 # Vision Service — MobileSAM
 
-A minimal FastAPI service that runs **MobileSAM vit_t** on CPU and exposes three endpoints consumed exclusively by the Next.js server-side proxy.
+A FastAPI service that runs **MobileSAM vit_t** on CPU for both the advanced editor and the automatic four-view workflow.
 
 ## Architecture
 
@@ -46,8 +46,27 @@ Returns `{ sessionId, width, height, prepareMs }`.
 x/y are normalised [0–1]. label 1 = positive, 0 = negative.
 Returns up to three in-memory PNG data URL candidates, dimensions, scores, `areaPixels`, the true constant model name (`MobileSAM vit_t`) and recommended index. Boolean mask matrices are never returned to the browser.
 
+The service runs one inference request at a time with one Uvicorn worker. Images are
+reduced proportionally to a 1024 px longest side before MobileSAM embedding, while
+normalized prompts and returned mask dimensions preserve the same geometry. RSS is
+logged before, during, and after inference, and temporary predictor state is released
+after every request; only up to three small active-session embeddings are retained for
+prompt refinement. Decoded inputs above 20 megapixels are rejected before allocation
+to keep the process inside the free-tier memory budget.
+
 ### `DELETE /sessions/{sessionId}`
 Frees the session immediately.
+
+### Automatic frame endpoints
+
+- `POST /template/validate`: validates JPEG/PNG/HEIC/HEIF signatures and the four expected `DICT_5X5_50` IDs.
+- `POST /rectify`: applies the physical frame homography and returns the exact 400 × 2000 inner window.
+- `POST /analyze-view`: uses multipart `action=detect|confirm_corners|analyze_confirmed`. Every decodable image can enter manual selection, even with zero ArUco or no safe proposal. `analyze_confirmed` validates the ordered inner-opening corners and rectifies to 400 × 2000 px without calculating lichen coverage. It also proposes trunk edges and an uncertainty range from the 10 cm physical reference. `manual_mode=manual_confirmed|manual_assisted_provisional` records whether all corners were visible or any geometry was estimated.
+- `GET /processing/status`: reports readiness and confirms that inference is sequential.
+
+Every frame response reports detected/missing IDs, rejected candidates, successful pyramid level and variant, method, confidence, reprojection error and a specific rejection reason. MobileSAM and CIELAB run later in Annotation Studio on the saved rectification. Its visual morphotypes are not taxonomic identifications. A view with critical blur, exposure, resolution or homography errors returns `repeat_photo` without a silent coverage percentage.
+
+`scripts/dev-with-vision.sh` waits at least 180 seconds for MobileSAM by default. Increase `VISION_STARTUP_TIMEOUT` when needed; values below 180 are rejected. A short configurable `VISION_STARTUP_GRACE` prevents a backend that finishes immediately after the main timeout from being terminated.
 
 ## Constraints
 

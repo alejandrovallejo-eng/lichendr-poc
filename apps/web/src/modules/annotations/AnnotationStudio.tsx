@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Circle, Group, Image as KonvaImage, Layer, Line, Stage } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
+import type { Stage as KonvaStage } from "konva/lib/Stage";
 import {
   ANNOTATION_REGION_CLASSES,
   createMorphotypeForAnnotationSet,
@@ -459,6 +460,7 @@ export default function AnnotationStudio({
   const candidateRenderFrameRef = useRef<number | null>(null);
   const candidateRenderRequestRef = useRef<CandidateRenderRequest | null>(null);
   const stageSizeRef = useRef({ width: 900, height: 620 });
+  const stageRef = useRef<KonvaStage | null>(null);
 
   const [workingImage, setWorkingImage] = useState<WorkingImage | null>(null);
   const [candidateCanvas, setCandidateCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -586,7 +588,7 @@ export default function AnnotationStudio({
     const image = workingImageRef.current;
     if (!image || !mask) {
       if (candidateRenderFrameRef.current !== null) {
-        cancelAnimationFrame(candidateRenderFrameRef.current);
+        window.clearTimeout(candidateRenderFrameRef.current);
         candidateRenderFrameRef.current = null;
       }
       candidateRenderRequestRef.current = null;
@@ -595,7 +597,8 @@ export default function AnnotationStudio({
     }
     candidateRenderRequestRef.current = { mask, opacity, target };
     if (candidateRenderFrameRef.current !== null) return;
-    candidateRenderFrameRef.current = requestAnimationFrame(() => {
+    // Coalesce updates without depending on Safari's animation-frame delivery.
+    candidateRenderFrameRef.current = window.setTimeout(() => {
       candidateRenderFrameRef.current = null;
       const nextImage = workingImageRef.current;
       const request = candidateRenderRequestRef.current;
@@ -616,7 +619,7 @@ export default function AnnotationStudio({
       candidateCanvasRef.current = canvas;
       setCandidateCanvas(canvas);
       setCanvasRevision((current) => current + 1);
-    });
+    }, 16);
   }, []);
 
   const renderLayers = useCallback((nextLayers: StudioLayer[], nextSelectedId: string | null) => {
@@ -977,7 +980,7 @@ export default function AnnotationStudio({
       clearVisionSession();
       colorWorkerRef.current?.terminate();
       colorWorkerRef.current = null;
-      if (candidateRenderFrameRef.current !== null) cancelAnimationFrame(candidateRenderFrameRef.current);
+      if (candidateRenderFrameRef.current !== null) window.clearTimeout(candidateRenderFrameRef.current);
     };
   }, [cancelColorAnalysis, cancelVisionRequest, clearVisionSession, createColorWorker]);
 
@@ -1006,7 +1009,7 @@ export default function AnnotationStudio({
       setColorPalette([]);
       setColorAnalysisFeedback({ kind: "idle", message: null, pixelReadFailure: false });
       if (candidateRenderFrameRef.current !== null) {
-        cancelAnimationFrame(candidateRenderFrameRef.current);
+        window.clearTimeout(candidateRenderFrameRef.current);
         candidateRenderFrameRef.current = null;
       }
       candidateRenderRequestRef.current = null;
@@ -2252,6 +2255,13 @@ export default function AnnotationStudio({
     }
   };
 
+  useEffect(() => {
+    // Critical image/mask updates must be visible even if automatic batchDraw
+    // is waiting for a suspended animation frame. Keep normal Konva batching.
+    const timer = window.setTimeout(() => stageRef.current?.draw(), 16);
+    return () => window.clearTimeout(timer);
+  }, [workingImage, candidateCanvas, layersCanvas, canvasRevision, stageSize, view, points, polygonPoints]);
+
   const stageOrigin = workingImage ? {
     x: (stageSize.width - workingImage.width * displayScale) / 2 + view.x,
     y: (stageSize.height - workingImage.height * displayScale) / 2 + view.y,
@@ -2422,6 +2432,7 @@ export default function AnnotationStudio({
             style={{ cursor: busy ? "wait" : activeTool === "select" ? "grab" : activeTool === "eraser" ? "cell" : "crosshair" }}
           >
             <Stage
+              ref={stageRef}
               width={stageSize.width}
               height={stageSize.height}
               onPointerDown={handleCanvasPointerDown}

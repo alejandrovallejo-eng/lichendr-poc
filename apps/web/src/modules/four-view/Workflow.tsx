@@ -934,6 +934,12 @@ export default function FourViewWorkflow() {
         loadSeriesViews(row.series.id),
       ]);
       const viewsByDirection = new Map(views.map((view) => [view.direction, view]));
+      // Opening another stored evaluation is a context change: drop any gate
+      // state so the previous tree cannot influence this one.
+      seriesAnalysis.current.reset();
+      DIRECTIONS.forEach((direction) => manualOperations.current.invalidate(direction));
+      operationTokens.current = {};
+      setContextFromLink(false);
       setProjectId(row.projectId);
       setSiteId(row.siteId);
       setEventId(row.eventId);

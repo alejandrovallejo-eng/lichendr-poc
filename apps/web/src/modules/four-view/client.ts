@@ -659,3 +659,58 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
     }];
   });
 }
+
+export interface SeriesContext {
+  projectId: string;
+  siteId: string;
+  eventId: string;
+  treeId: string;
+  treeSampleId: string;
+  project: string;
+  site: string;
+  event: string;
+  tree: string;
+}
+
+// Resolve the readable project / site / jornada / tree names of one series so
+// the review screen can show where the user is working without asking again
+// and without exposing identifiers.
+export async function loadSeriesContext(seriesId: string): Promise<SeriesContext | null> {
+  await ensureSession();
+  const { data: series, error } = await supabase
+    .from("capture_series")
+    .select("id, tree_sample_id")
+    .eq("id", seriesId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!series) return null;
+  const { data: sample, error: sampleError } = await supabase
+    .from("tree_samples")
+    .select("id, tree_id, site_id, sampling_event_id")
+    .eq("id", series.tree_sample_id)
+    .maybeSingle();
+  if (sampleError) throw sampleError;
+  if (!sample) return null;
+  const [{ data: site }, { data: event }, { data: tree }] = await Promise.all([
+    supabase.from("sites").select("id, name, project_id").eq("id", sample.site_id).maybeSingle(),
+    supabase.from("sampling_events").select("id, name").eq("id", sample.sampling_event_id).maybeSingle(),
+    supabase.from("trees").select("id, code").eq("id", sample.tree_id).maybeSingle(),
+  ]);
+  if (!site) return null;
+  const { data: project } = await supabase
+    .from("projects")
+    .select("id, name")
+    .eq("id", site.project_id)
+    .maybeSingle();
+  return {
+    projectId: site.project_id,
+    siteId: sample.site_id,
+    eventId: sample.sampling_event_id,
+    treeId: sample.tree_id,
+    treeSampleId: sample.id,
+    project: project?.name ?? "",
+    site: site.name,
+    event: event?.name ?? "",
+    tree: tree?.code ?? "",
+  };
+}

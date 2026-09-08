@@ -659,3 +659,85 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
     }];
   });
 }
+
+export interface SeriesContext {  projectId: string;
+  siteId: string;
+  eventId: string;
+  treeId: string;
+  treeSampleId: string;
+  project: string;
+  site: string;
+  event: string;
+  tree: string;
+}
+
+// Resolve the readable project / site / jornada / tree names of one series so
+// the review screen can show where the user is working without asking again
+// and without exposing identifiers.
+export async function loadSeriesContext(seriesId: string): Promise<SeriesContext | null> {
+  await ensureSession();
+  const { data: series, error } = await supabase
+    .from("capture_series")
+    .select("id, tree_sample_id")
+    .eq("id", seriesId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!series) return null;
+  const { data: sample, error: sampleError } = await supabase
+    .from("tree_samples")
+    .select("id, tree_id, site_id, sampling_event_id")
+    .eq("id", series.tree_sample_id)
+    .maybeSingle();
+  if (sampleError) throw sampleError;
+  if (!sample) return null;
+  const [{ data: site }, { data: event }, { data: tree }] = await Promise.all([
+    supabase.from("sites").select("id, name, project_id").eq("id", sample.site_id).maybeSingle(),
+    supabase.from("sampling_events").select("id, name").eq("id", sample.sampling_event_id).maybeSingle(),
+    supabase.from("trees").select("id, code").eq("id", sample.tree_id).maybeSingle(),
+  ]);
+  if (!site) return null;
+  const { data: project } = await supabase
+    .from("projects")
+    .select("id, name")
+    .eq("id", site.project_id)
+    .maybeSingle();
+  return {
+    projectId: site.project_id,
+    siteId: sample.site_id,
+    eventId: sample.sampling_event_id,
+    treeId: sample.tree_id,
+    treeSampleId: sample.id,
+    project: project?.name ?? "",
+    site: site.name,
+    event: event?.name ?? "",
+    tree: tree?.code ?? "",
+  };
+}
+
+// Looks up the evaluation of a tree in a jornada WITHOUT creating it. Used when
+// reopening the capture screen: the existing series must be restored, never
+// replaced by a new one.
+export async function findTreeSampleId(eventId: string, treeId: string): Promise<string | null> {
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("tree_samples")
+    .select("id")
+    .eq("sampling_event_id", eventId)
+    .eq("tree_id", treeId)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.id ?? null;
+}
+
+// Most recent capture series of a tree sample, without creating one.
+export async function findCaptureSeriesForSample(treeSampleId: string): Promise<CaptureSeriesRow | null> {
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("capture_series")
+    .select("*")
+    .eq("tree_sample_id", treeSampleId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  return data?.[0] ?? null;
+}

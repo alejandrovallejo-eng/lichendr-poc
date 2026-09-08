@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Circle, Group, Image as KonvaImage, Layer, Line, Stage } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
+import type { Stage as KonvaStage } from "konva/lib/Stage";
 import {
   ANNOTATION_REGION_CLASSES,
   createMorphotypeForAnnotationSet,
@@ -60,6 +61,7 @@ import type {
   SimilarColorComponent,
 } from "@/modules/annotations/color-worker-types";
 import { isMaskCompatibleWithTarget } from "./annotation-target";
+import { waitForVisionReady } from "./vision-ready";
 
 const MAX_WORKING_DIMENSION = 2048;
 const SEGMENT_DEBOUNCE_MS = 250;
@@ -458,6 +460,7 @@ export default function AnnotationStudio({
   const candidateRenderFrameRef = useRef<number | null>(null);
   const candidateRenderRequestRef = useRef<CandidateRenderRequest | null>(null);
   const stageSizeRef = useRef({ width: 900, height: 620 });
+  const stageRef = useRef<KonvaStage | null>(null);
 
   const [workingImage, setWorkingImage] = useState<WorkingImage | null>(null);
   const [candidateCanvas, setCandidateCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -585,7 +588,7 @@ export default function AnnotationStudio({
     const image = workingImageRef.current;
     if (!image || !mask) {
       if (candidateRenderFrameRef.current !== null) {
-        cancelAnimationFrame(candidateRenderFrameRef.current);
+        window.clearTimeout(candidateRenderFrameRef.current);
         candidateRenderFrameRef.current = null;
       }
       candidateRenderRequestRef.current = null;
@@ -594,7 +597,8 @@ export default function AnnotationStudio({
     }
     candidateRenderRequestRef.current = { mask, opacity, target };
     if (candidateRenderFrameRef.current !== null) return;
-    candidateRenderFrameRef.current = requestAnimationFrame(() => {
+    // Coalesce updates without depending on Safari's animation-frame delivery.
+    candidateRenderFrameRef.current = window.setTimeout(() => {
       candidateRenderFrameRef.current = null;
       const nextImage = workingImageRef.current;
       const request = candidateRenderRequestRef.current;
@@ -615,7 +619,7 @@ export default function AnnotationStudio({
       candidateCanvasRef.current = canvas;
       setCandidateCanvas(canvas);
       setCanvasRevision((current) => current + 1);
-    });
+    }, 16);
   }, []);
 
   const renderLayers = useCallback((nextLayers: StudioLayer[], nextSelectedId: string | null) => {
@@ -976,7 +980,7 @@ export default function AnnotationStudio({
       clearVisionSession();
       colorWorkerRef.current?.terminate();
       colorWorkerRef.current = null;
-      if (candidateRenderFrameRef.current !== null) cancelAnimationFrame(candidateRenderFrameRef.current);
+      if (candidateRenderFrameRef.current !== null) window.clearTimeout(candidateRenderFrameRef.current);
     };
   }, [cancelColorAnalysis, cancelVisionRequest, clearVisionSession, createColorWorker]);
 
@@ -1005,7 +1009,7 @@ export default function AnnotationStudio({
       setColorPalette([]);
       setColorAnalysisFeedback({ kind: "idle", message: null, pixelReadFailure: false });
       if (candidateRenderFrameRef.current !== null) {
-        cancelAnimationFrame(candidateRenderFrameRef.current);
+        window.clearTimeout(candidateRenderFrameRef.current);
         candidateRenderFrameRef.current = null;
       }
       candidateRenderRequestRef.current = null;
@@ -1148,6 +1152,7 @@ export default function AnnotationStudio({
       });
       const formData = new FormData();
       formData.append("image", blob, "analysis.jpg");
+      await waitForVisionReady(controller.signal);
       const response = await fetch("/api/vision/prepare", { method: "POST", body: formData, signal: controller.signal });
       const result = await response.json() as { sessionId?: string; error?: string };
       if (!response.ok || !result.sessionId) throw new Error(result.error ?? "No se pudo preparar MobileSAM.");
@@ -1157,9 +1162,10 @@ export default function AnnotationStudio({
       setBusy(null);
       return result.sessionId;
     } catch (reason) {
-      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current) {
+      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current && requestId === visionRequestRef.current) {
         setBusy(null);
-        setError("MobileSAM no está disponible. Puedes dibujar la máscara manualmente.");
+        setError("La IA no pudo completar el análisis. Tu fotografía y tus puntos se conservan; puedes reintentar o dibujar la máscara manualmente.");
+        setStudioState("error");
       }
       return null;
     }
@@ -1203,6 +1209,7 @@ export default function AnnotationStudio({
     const controller = new AbortController();
     visionAbortRef.current = controller;
     setBusy("segment");
+    setError(null);
     setStudioState(candidateTarget === "trunk" ? "proposing-trunk" : "proposing-region");
     try {
       const response = await fetch("/api/vision/segment", {
@@ -1225,13 +1232,14 @@ export default function AnnotationStudio({
       setBusy(null);
       setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "reviewing-region");
     } catch (reason) {
-      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current) {
+      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current && requestId === visionRequestRef.current) {
         setBusy(null);
+        clearVisionSession();
         setError("No se pudo generar la selección IA.");
         setStudioState("error");
       }
     }
-  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, prepareVision, setCandidate, setStudioState]);
+  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, clearVisionSession, prepareVision, setCandidate, setStudioState]);
 
   const scheduleSegment = useCallback((nextPoints: PointPrompt[]) => {
     if (segmentationTimerRef.current) clearTimeout(segmentationTimerRef.current);
@@ -2247,6 +2255,13 @@ export default function AnnotationStudio({
     }
   };
 
+  useEffect(() => {
+    // Critical image/mask updates must be visible even if automatic batchDraw
+    // is waiting for a suspended animation frame. Keep normal Konva batching.
+    const timer = window.setTimeout(() => stageRef.current?.draw(), 16);
+    return () => window.clearTimeout(timer);
+  }, [workingImage, candidateCanvas, layersCanvas, canvasRevision, stageSize, view, points, polygonPoints]);
+
   const stageOrigin = workingImage ? {
     x: (stageSize.width - workingImage.width * displayScale) / 2 + view.x,
     y: (stageSize.height - workingImage.height * displayScale) / 2 + view.y,
@@ -2284,7 +2299,7 @@ export default function AnnotationStudio({
               {busy === "reopen" ? "Reabriendo…" : "Editar evaluación"}
             </button>
           ) : (
-            <button type="button" aria-busy={busy === "complete"} disabled={Boolean(busy)} onClick={() => void finalizeEvaluation()} className="studio-primary rounded border px-5 py-3 text-sm font-semibold disabled:opacity-50">
+            <button type="button" aria-busy={busy === "complete"} disabled={Boolean(busy) || studioState === "error"} onClick={() => void finalizeEvaluation()} className="studio-primary rounded border px-5 py-3 text-sm font-semibold disabled:opacity-50">
               {busy === "complete" ? "Finalizando evaluación…" : "Finalizar y guardar evaluación"}
             </button>
           )}
@@ -2417,6 +2432,7 @@ export default function AnnotationStudio({
             style={{ cursor: busy ? "wait" : activeTool === "select" ? "grab" : activeTool === "eraser" ? "cell" : "crosshair" }}
           >
             <Stage
+              ref={stageRef}
               width={stageSize.width}
               height={stageSize.height}
               onPointerDown={handleCanvasPointerDown}
@@ -2510,6 +2526,7 @@ export default function AnnotationStudio({
           {error ? (
             <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700" role="alert">
               <p>{error}</p>
+              {!isReadOnly && studioState === "error" && points.length > 0 ? <button type="button" disabled={Boolean(busy)} onClick={() => void segment(points)} className="m-2 rounded border border-red-300 bg-white px-3 py-2 text-sm font-semibold disabled:opacity-50">Reintentar IA con mis puntos</button> : null}
               {!isReadOnly ? <button type="button" onClick={() => setError(null)} className="mt-2 rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold">Descartar aviso</button> : null}
               {!isReadOnly ? incompatibleRegions.map((region) => (
                 <button

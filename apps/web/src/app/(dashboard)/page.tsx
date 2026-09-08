@@ -18,15 +18,32 @@ export default function DashboardPage() {
         <MetricCard label="Imágenes" value={0} />
       </div>
 
-      <div className="mb-6">
-        <a
-          href="/projects"
-          className="inline-block px-4 py-2 rounded border"
-          style={{ background: "var(--ld-sand)", color: "var(--ld-text)", borderColor: "var(--ld-border)" }}
-        >
-          Crear primer proyecto
-        </a>
-      </div>
+      <section
+        className="mb-6 p-4 rounded border"
+        style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}
+      >
+        <h2 className="font-semibold mb-2" style={{ color: "var(--ld-text)" }}>Comenzar aquí</h2>
+        <p className="text-sm mb-3" style={{ color: "var(--ld-text-secondary)" }}>
+          Prepara tu próxima jornada en un solo paso: elige o crea proyecto, sitio y jornada,
+          y continúa con los árboles.
+        </p>
+        <div className="flex flex-wrap gap-3">
+          <a
+            href="/preparar-jornada"
+            className="inline-block px-4 py-2 rounded border font-medium"
+            style={{ background: "var(--ld-sand)", color: "var(--ld-text)", borderColor: "var(--ld-border)" }}
+          >
+            Preparar jornada
+          </a>
+          <a
+            href="/projects"
+            className="inline-block px-4 py-2 rounded border text-sm"
+            style={{ background: "#fff", color: "var(--ld-text)", borderColor: "var(--ld-border)" }}
+          >
+            Ver proyectos existentes
+          </a>
+        </div>
+      </section>
 
       <section className="mb-6">
         <h3 className="font-semibold" style={{ color: "var(--ld-text)" }}>Flujo</h3>

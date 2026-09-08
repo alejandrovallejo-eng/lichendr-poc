@@ -60,6 +60,7 @@ import type {
   SimilarColorComponent,
 } from "@/modules/annotations/color-worker-types";
 import { isMaskCompatibleWithTarget } from "./annotation-target";
+import { waitForVisionReady } from "./vision-ready";
 
 const MAX_WORKING_DIMENSION = 2048;
 const SEGMENT_DEBOUNCE_MS = 250;
@@ -1148,6 +1149,7 @@ export default function AnnotationStudio({
       });
       const formData = new FormData();
       formData.append("image", blob, "analysis.jpg");
+      await waitForVisionReady(controller.signal);
       const response = await fetch("/api/vision/prepare", { method: "POST", body: formData, signal: controller.signal });
       const result = await response.json() as { sessionId?: string; error?: string };
       if (!response.ok || !result.sessionId) throw new Error(result.error ?? "No se pudo preparar MobileSAM.");
@@ -1157,9 +1159,10 @@ export default function AnnotationStudio({
       setBusy(null);
       return result.sessionId;
     } catch (reason) {
-      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current) {
+      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current && requestId === visionRequestRef.current) {
         setBusy(null);
-        setError("MobileSAM no está disponible. Puedes dibujar la máscara manualmente.");
+        setError("La IA no pudo completar el análisis. Tu fotografía y tus puntos se conservan; puedes reintentar o dibujar la máscara manualmente.");
+        setStudioState("error");
       }
       return null;
     }
@@ -1203,6 +1206,7 @@ export default function AnnotationStudio({
     const controller = new AbortController();
     visionAbortRef.current = controller;
     setBusy("segment");
+    setError(null);
     setStudioState(candidateTarget === "trunk" ? "proposing-trunk" : "proposing-region");
     try {
       const response = await fetch("/api/vision/segment", {
@@ -1225,13 +1229,14 @@ export default function AnnotationStudio({
       setBusy(null);
       setStudioState(candidateTarget === "trunk" ? "reviewing-trunk" : "reviewing-region");
     } catch (reason) {
-      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current) {
+      if ((reason as { name?: string }).name !== "AbortError" && mountedRef.current && requestId === visionRequestRef.current) {
         setBusy(null);
+        clearVisionSession();
         setError("No se pudo generar la selección IA.");
         setStudioState("error");
       }
     }
-  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, prepareVision, setCandidate, setStudioState]);
+  }, [applyMobileSamCandidate, candidateMetadata?.source, candidateTarget, clearVisionSession, prepareVision, setCandidate, setStudioState]);
 
   const scheduleSegment = useCallback((nextPoints: PointPrompt[]) => {
     if (segmentationTimerRef.current) clearTimeout(segmentationTimerRef.current);
@@ -2284,7 +2289,7 @@ export default function AnnotationStudio({
               {busy === "reopen" ? "Reabriendo…" : "Editar evaluación"}
             </button>
           ) : (
-            <button type="button" aria-busy={busy === "complete"} disabled={Boolean(busy)} onClick={() => void finalizeEvaluation()} className="studio-primary rounded border px-5 py-3 text-sm font-semibold disabled:opacity-50">
+            <button type="button" aria-busy={busy === "complete"} disabled={Boolean(busy) || studioState === "error"} onClick={() => void finalizeEvaluation()} className="studio-primary rounded border px-5 py-3 text-sm font-semibold disabled:opacity-50">
               {busy === "complete" ? "Finalizando evaluación…" : "Finalizar y guardar evaluación"}
             </button>
           )}
@@ -2510,6 +2515,7 @@ export default function AnnotationStudio({
           {error ? (
             <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700" role="alert">
               <p>{error}</p>
+              {!isReadOnly && studioState === "error" && points.length > 0 ? <button type="button" disabled={Boolean(busy)} onClick={() => void segment(points)} className="m-2 rounded border border-red-300 bg-white px-3 py-2 text-sm font-semibold disabled:opacity-50">Reintentar IA con mis puntos</button> : null}
               {!isReadOnly ? <button type="button" onClick={() => setError(null)} className="mt-2 rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold">Descartar aviso</button> : null}
               {!isReadOnly ? incompatibleRegions.map((region) => (
                 <button

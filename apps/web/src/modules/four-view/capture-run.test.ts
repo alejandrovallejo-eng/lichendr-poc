@@ -45,6 +45,7 @@ function services(
   recorded: Recorded,
   options: {
     failUploadOn?: Direction;
+    failPrepareOn?: Direction;
     failAnalysisOn?: Direction;
     seriesId?: string;
   } = {},
@@ -63,6 +64,7 @@ function services(
     },
     prepareView: async (direction) => {
       recorded.calls.push(`prepare:${direction}`);
+      if (options.failPrepareOn === direction) throw new Error("No se pudo preparar la fotografía.");
     },
     analyzeView: async (direction) => {
       recorded.calls.push(`analyze:${direction}`);
@@ -273,4 +275,98 @@ test("las fotografías de otra serie no se aceptan como parte de esta", async ()
   assert.equal(result.uploadsCompleted, false);
   assert.equal(recorded.analyzed.length, 0);
   assert.ok(events.errors.some((message) => /no pertenecen/.test(message)));
+});
+
+test("una vista ya guardada vuelve a prepararse antes de cualquier inferencia", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const result = await runSeriesCapture(
+    slots({ N: storedSlot("N"), E: storedSlot("E"), S: storedSlot("S"), W: storedSlot("W") }),
+    services(recorded),
+    events.handlers,
+  );
+  assert.equal(result.completed, true);
+  // No se vuelve a subir el original, pero sí se revalida su derivado.
+  assert.equal(recorded.calls.filter((call) => call.startsWith("store:")).length, 0);
+  assert.deepEqual(result.prepared, ["N", "E", "S", "W"]);
+  const firstAnalysis = recorded.calls.findIndex((call) => call.startsWith("analyze:"));
+  const lastPrepare = recorded.calls.map((call, index) => (call.startsWith("prepare:") ? index : -1))
+    .reduce((max, index) => Math.max(max, index), -1);
+  assert.ok(firstAnalysis > lastPrepare, "ninguna inferencia empieza antes de preparar las cuatro");
+});
+
+test("una preparación fallida conserva el original pero impide la inferencia de la serie", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const result = await runSeriesCapture(
+    slots({ N: selectedSlot(), E: selectedSlot(), S: selectedSlot(), W: selectedSlot() }),
+    services(recorded, { failPrepareOn: "N" }),
+    events.handlers,
+  );
+  assert.equal(result.analysisStarted, false);
+  assert.ok(!recorded.calls.some((call) => call.startsWith("analyze:")));
+  assert.deepEqual(result.uploadFailures, ["N"]);
+  // El original sí quedó guardado: el siguiente intento no pide otra fotografía.
+  assert.deepEqual(recorded.stored, ["N", "E", "S", "W"]);
+  assert.ok(events.statuses.includes("N:error"));
+});
+
+test("tras una preparación fallida el reintento la revalida y no analiza si vuelve a fallar", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const restored = slots({
+    N: { ...storedSlot("N"), status: "error" },
+    E: storedSlot("E"),
+    S: storedSlot("S"),
+    W: storedSlot("W"),
+  });
+  const result = await runSeriesCapture(restored, services(recorded, { failPrepareOn: "N" }), events.handlers);
+  assert.ok(recorded.calls.includes("prepare:N"), "el reintento revalida el derivado que falló");
+  assert.equal(result.analysisStarted, false);
+  assert.ok(!recorded.calls.some((call) => call.startsWith("analyze:")));
+});
+
+test("cambiar de contexto durante la carga no lanza las cargas siguientes", async () => {
+  const recorded = recorder();
+  let valid = true;
+  const events = callbacks({ isCurrentContext: () => valid });
+  const result = await runSeriesCapture(
+    slots({ N: selectedSlot(), E: selectedSlot(), S: selectedSlot(), W: selectedSlot() }),
+    {
+      ...services(recorded),
+      storeView: async (direction) => {
+        recorded.calls.push(`store:${direction}`);
+        if (direction === "N") valid = false;
+        recorded.stored.push(direction);
+        return { viewId: `view-${direction}`, imageId: `img-${direction}`, seriesId: "serie-1" };
+      },
+    },
+    events.handlers,
+  );
+  assert.deepEqual(recorded.calls, ["ensureContext", "store:N"]);
+  assert.equal(result.uploadsCompleted, false);
+  assert.ok(!recorded.calls.includes("finalize"));
+});
+
+test("cambiar de contexto durante la primera inferencia no analiza las demás vistas", async () => {
+  const recorded = recorder();
+  let valid = true;
+  const events = callbacks({ isCurrentRequest: () => true, isCurrentContext: () => valid });
+  const result = await runSeriesCapture(
+    slots({ N: selectedSlot(), E: selectedSlot(), S: selectedSlot(), W: selectedSlot() }),
+    {
+      ...services(recorded),
+      analyzeView: async (direction) => {
+        recorded.calls.push(`analyze:${direction}`);
+        if (direction === "N") valid = false;
+        recorded.analyzed.push(direction);
+        return "usable";
+      },
+    },
+    events.handlers,
+  );
+  assert.deepEqual(recorded.calls.filter((call) => call.startsWith("analyze:")), ["analyze:N"]);
+  assert.ok(!recorded.calls.includes("finalize"));
+  assert.deepEqual(result.analyzed, []);
+  assert.equal(result.completed, false);
 });

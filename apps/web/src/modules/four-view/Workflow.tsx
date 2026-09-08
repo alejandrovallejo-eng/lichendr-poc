@@ -51,6 +51,7 @@ import {
   contextMatchesTree,
   describeFailure,
   evaluateSeriesReadiness,
+  canPublishResponse,
   isStaleSlotResponse,
   restoredSlotStatus,
   seriesAttemptSignature,
@@ -605,6 +606,31 @@ export default function FourViewWorkflow() {
   slotsRef.current = slots;
   const contextRef = useRef<TreeContextIds | null>(null);
   contextRef.current = { projectId, siteId, eventId, treeId };
+  // Token of this mount. A screen that was left behind must not publish any
+  // response, neither into the state nor through the client.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Single guard used before every effect of an asynchronous operation: same
+  // mount, same tree and same photograph.
+  const mayPublish = (direction: Direction, requestKey: string, expected: TreeContextIds): boolean => (
+    canPublishResponse({
+      mounted: mounted.current,
+      currentContext: contextRef.current,
+      expectedContext: expected,
+      currentRequestKey: slotsRef.current[direction].requestKey,
+      expectedRequestKey: requestKey,
+    })
+  );
+  // Same guard for effects that are not tied to one photograph.
+  const mayPublishSeries = (expected: TreeContextIds): boolean => (
+    mounted.current && contextMatchesTree(contextRef.current, expected)
+  );
 
   // Applies a change to one space only when the photograph shown there is
   // still the one the operation started with; a late answer is discarded.
@@ -657,12 +683,13 @@ export default function FourViewWorkflow() {
       requestKey: slot.requestKey,
       context: { projectId, siteId, eventId, treeSampleId },
     });
-    setSlots((current) => ({
-      ...current,
-      [direction]: current[direction].requestKey === slot.requestKey
-        ? { ...current[direction], view }
-        : current[direction],
-    }));
+    // The stored original is only published on the same mount, tree and photograph.
+    if (mayPublish(direction, slot.requestKey, { projectId, siteId, eventId, treeId: treeId! })) {
+      setSlots((current) => ({
+        ...current,
+        [direction]: { ...current[direction], view },
+      }));
+    }
     return view;
   };
 
@@ -700,9 +727,12 @@ export default function FourViewWorkflow() {
     const services: SeriesRunServices<File> = {
       ensureContext: async () => {
         treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
-        activeSeries = await getOrCreateCaptureSeries(treeSampleId);
-        setSeries(activeSeries);
-        return { treeSampleId, seriesId: activeSeries.id };
+        const opened = await getOrCreateCaptureSeries(treeSampleId);
+        activeSeries = opened;
+        // Nothing is published on a screen that was left behind or that now
+        // shows a different tree.
+        if (mayPublishSeries(expectedContext)) setSeries(opened);
+        return { treeSampleId, seriesId: opened.id };
       },
       storeView: async (direction, slot, context) => {
         const view = await stageCaptureView({
@@ -722,9 +752,10 @@ export default function FourViewWorkflow() {
         const row = viewRows[direction]!;
         const requestKey = slotsRef.current[direction].requestKey;
         const result = await analyzeStoredFourViewImage(view.imageId);
-        if (isStaleSlotResponse(slotsRef.current[direction].requestKey, requestKey)) return "needs_review";
+        if (!mayPublish(direction, requestKey, expectedContext)) return "needs_review";
         if (result.status === "needs_confirmation") {
           const file = slotsRef.current[direction].file ?? await loadStoredImageFile(view.imageId);
+          if (!mayPublish(direction, requestKey, expectedContext)) return "needs_review";
           applyCornerProposal(direction, requestKey, result, file);
           return "needs_review";
         }
@@ -734,6 +765,7 @@ export default function FourViewWorkflow() {
           series: activeSeries!,
           context: { projectId, siteId, eventId, treeSampleId: context.treeSampleId },
         });
+        if (!mayPublish(direction, requestKey, expectedContext)) return "needs_review";
         patchSlot(direction, requestKey, (slot) => ({
           ...slot,
           result,
@@ -752,24 +784,30 @@ export default function FourViewWorkflow() {
           context.seriesId,
           DIRECTIONS.map((direction) => storedResults[direction] ?? null),
         );
+        if (!mayPublishSeries(expectedContext)) return;
         setSeries(updatedSeries);
-        setEvaluated(await listEvaluatedTrees());
+        const rows = await listEvaluatedTrees();
+        if (mayPublishSeries(expectedContext)) setEvaluated(rows);
       },
     };
 
     const callbacks: SeriesRunCallbacks = {
       onSlotStatus: (direction, requestKey, status, error) => {
+        if (!mayPublish(direction, requestKey, expectedContext)) return;
         patchSlot(direction, requestKey, (slot) => ({ ...slot, status, error: error ?? null }));
       },
       onStoredView: (direction, requestKey) => {
         const row = viewRows[direction];
-        if (row) patchSlot(direction, requestKey, (slot) => ({ ...slot, view: row }));
+        if (!row || !mayPublish(direction, requestKey, expectedContext)) return;
+        patchSlot(direction, requestKey, (slot) => ({ ...slot, view: row }));
       },
       isCurrentRequest: (direction, requestKey) => (
         !isStaleSlotResponse(slotsRef.current[direction].requestKey, requestKey)
       ),
-      isCurrentContext: () => contextMatchesTree(contextRef.current, expectedContext),
-      onError: (message) => setGlobalError(message),
+      isCurrentContext: () => mayPublishSeries(expectedContext),
+      onError: (message) => {
+        if (mayPublishSeries(expectedContext)) setGlobalError(message);
+      },
     };
 
     try {
@@ -780,7 +818,7 @@ export default function FourViewWorkflow() {
       setGlobalError(failure.message);
       return false;
     } finally {
-      setProcessing(false);
+      if (mounted.current) setProcessing(false);
     }
   };
 
@@ -929,32 +967,40 @@ export default function FourViewWorkflow() {
     if ((!slot.file && !slot.view) || ["saving_original", "preparing_ai", "processing", "analyzing"].includes(slot.status)) return;
     const operationToken = crypto.randomUUID();
     operationTokens.current[direction] = operationToken;
+    if (!projectId || !siteId || !eventId || !treeId) {
+      setGlobalError("No se conserva el contexto necesario para reintentar.");
+      return;
+    }
+    const expectedContext: TreeContextIds = { projectId, siteId, eventId, treeId };
+    // Same guard as the series run: same mount, same tree, same photograph and
+    // the retry that is still the current one for this space.
+    const stillMine = () => (
+      operationTokens.current[direction] === operationToken
+      && mayPublish(direction, slot.requestKey, expectedContext)
+    );
     setSlots((current) => ({
       ...current,
       [direction]: { ...current[direction], status: "saving_original", error: null },
     }));
     try {
-      if (!projectId || !siteId || !eventId || !treeId) {
-        throw new Error("No se conserva el contexto necesario para reintentar.");
-      }
       const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
       const activeSeries = series ?? await getOrCreateCaptureSeries(treeSampleId);
-      if (operationTokens.current[direction] !== operationToken) return;
+      if (!stillMine()) return;
       if (!series) setSeries(activeSeries);
       const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
-      if (operationTokens.current[direction] !== operationToken) return;
+      if (!stillMine()) return;
       setSlots((current) => ({
         ...current,
         [direction]: { ...current[direction], status: "preparing_ai" },
       }));
       await prepareStoredFourViewImage(view.image_id);
-      if (operationTokens.current[direction] !== operationToken) return;
+      if (!stillMine()) return;
       setSlots((current) => ({
         ...current,
         [direction]: { ...current[direction], status: "processing" },
       }));
       const result = await analyzeStoredFourViewImage(view.image_id);
-      if (operationTokens.current[direction] !== operationToken) return;
+      if (!stillMine()) return;
       if (result.status === "needs_confirmation") {
         const file = slot.file ?? await loadStoredImageFile(view.image_id);
         const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
@@ -977,7 +1023,7 @@ export default function FourViewWorkflow() {
         await saveSingleResult(direction, result, view, slot.requestKey, operationToken);
       }
     } catch (reason) {
-      if (operationTokens.current[direction] !== operationToken) return;
+      if (!stillMine()) return;
       setSlots((current) => ({
         ...current,
         [direction]: {

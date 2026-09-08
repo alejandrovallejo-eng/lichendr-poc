@@ -4,6 +4,7 @@ import {
   SeriesAnalysisGate,
   captureProgress,
   captureProgressLabel,
+  canPublishResponse,
   contextMatchesTree,
   describeFailure,
   evaluateSeriesReadiness,
@@ -288,4 +289,25 @@ test("la compuerta compartida sobrevive a un remontaje del componente", () => {
   // Una nueva instancia del componente obtiene la misma compuerta.
   assert.equal(sharedSeriesAnalysisGate().begin(signature), false);
   gate.reset();
+});
+
+// El adaptador de la pantalla de captura usa esta misma guarda antes de cada
+// efecto, así que se comprueba aquí sin necesidad de montar React.
+test("una respuesta no se publica si la pantalla se desmontó, cambió el árbol o la fotografía", () => {
+  const expectedContext = { projectId: "p1", siteId: "s1", eventId: "j1", treeId: "a1" };
+  const base = {
+    mounted: true,
+    currentContext: { ...expectedContext },
+    expectedContext,
+    currentRequestKey: "peticion-1",
+    expectedRequestKey: "peticion-1",
+  };
+  assert.equal(canPublishResponse(base), true);
+  assert.equal(canPublishResponse({ ...base, mounted: false }), false);
+  assert.equal(canPublishResponse({ ...base, currentContext: null }), false);
+  assert.equal(
+    canPublishResponse({ ...base, currentContext: { ...expectedContext, treeId: "a2" } }),
+    false,
+  );
+  assert.equal(canPublishResponse({ ...base, currentRequestKey: "peticion-2" }), false);
 });

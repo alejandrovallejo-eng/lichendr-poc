@@ -409,3 +409,27 @@ export function contextMatchesTree(
   }
   return true;
 }
+
+export interface PublishGuardInput {
+  // The capture screen is still mounted.
+  mounted: boolean;
+  // Context selected right now on screen.
+  currentContext: TreeContextIds | null;
+  // Context this operation started with.
+  expectedContext: TreeContextIds;
+  // Photograph shown right now in that space.
+  currentRequestKey: string;
+  // Photograph this operation started with.
+  expectedRequestKey: string;
+}
+
+// A response may only be published — written into the screen or saved through
+// the client — when the component is still mounted, the tree has not changed
+// and the photograph in that space is still the same one. Checking this BEFORE
+// every effect is what keeps a late answer from touching another tree, another
+// photograph or an unmounted screen.
+export function canPublishResponse(input: PublishGuardInput): boolean {
+  if (!input.mounted) return false;
+  if (!contextMatchesTree(input.currentContext, input.expectedContext)) return false;
+  return !isStaleSlotResponse(input.currentRequestKey, input.expectedRequestKey);
+}

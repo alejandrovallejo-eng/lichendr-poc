@@ -66,6 +66,8 @@ export interface SeriesRunResult {
   uploadsCompleted: boolean;
   // The analysis phase ran (it may still have produced views needing review).
   analysisStarted: boolean;
+  // Directions whose original was (re)prepared for the AI in this run.
+  prepared: Direction[];
   // Directions whose inference produced a usable result in this run.
   analyzed: Direction[];
   // Directions whose upload failed in this run.
@@ -78,6 +80,7 @@ export interface SeriesRunResult {
 const EMPTY_RESULT = (): SeriesRunResult => ({
   uploadsCompleted: false,
   analysisStarted: false,
+  prepared: [],
   analyzed: [],
   uploadFailures: [],
   completed: false,
@@ -111,34 +114,54 @@ export async function runSeriesCapture<TFile>(
 
   // Phase 1 — store and prepare the four originals. Serial on purpose: the
   // originals are large and the preparation is memory bound.
+  //
+  // A view whose original is already stored still goes through the preparation
+  // step: the derived proxy may never have been built (a previous attempt could
+  // have failed exactly there), and the endpoint is idempotent, so revalidating
+  // it costs nothing and never re-uploads the original.
   const stored: Partial<Record<Direction, StoredViewIdentity | null>> = {};
   for (const direction of DIRECTIONS) {
     const slot = slots[direction];
-    if (slot.view) {
-      stored[direction] = slot.view;
-      continue;
-    }
-    if (!slot.file) {
+    if (!slot.view && !slot.file) {
       stored[direction] = null;
       continue;
     }
-    callbacks.onSlotStatus(direction, slot.requestKey, "saving_original", null);
     try {
-      const view = await services.storeView(direction, slot, context);
-      if (!callbacks.isCurrentContext(context) || !callbacks.isCurrentRequest(direction, slot.requestKey)) {
-        stored[direction] = null;
+      let view = slot.view;
+      if (!view) {
+        callbacks.onSlotStatus(direction, slot.requestKey, "saving_original", null);
+        view = await services.storeView(direction, slot, context);
+        if (!callbacks.isCurrentContext(context)) {
+          outcome.reason = "El contexto cambió mientras se guardaban las fotografías.";
+          return outcome;
+        }
+        if (!callbacks.isCurrentRequest(direction, slot.requestKey)) {
+          stored[direction] = null;
+          continue;
+        }
+        callbacks.onStoredView(direction, slot.requestKey, view);
+      }
+      // Views that already produced a usable result need no new proxy.
+      if (slot.analyzed) {
+        stored[direction] = view;
         continue;
       }
-      callbacks.onStoredView(direction, slot.requestKey, view);
       callbacks.onSlotStatus(direction, slot.requestKey, "preparing_ai", null);
       await services.prepareView(direction, view, context);
-      if (!callbacks.isCurrentContext(context) || !callbacks.isCurrentRequest(direction, slot.requestKey)) {
+      if (!callbacks.isCurrentContext(context)) {
+        outcome.reason = "El contexto cambió mientras se preparaban las fotografías.";
+        return outcome;
+      }
+      if (!callbacks.isCurrentRequest(direction, slot.requestKey)) {
         stored[direction] = null;
         continue;
       }
       stored[direction] = view;
+      outcome.prepared.push(direction);
       callbacks.onSlotStatus(direction, slot.requestKey, "stored", null);
     } catch (reason) {
+      // The original is kept: only the preparation or the upload failed, and
+      // the next attempt revalidates it without asking for a new photograph.
       stored[direction] = null;
       outcome.uploadFailures.push(direction);
       if (callbacks.isCurrentRequest(direction, slot.requestKey)) {
@@ -146,7 +169,7 @@ export async function runSeriesCapture<TFile>(
           direction,
           slot.requestKey,
           "error",
-          failureMessage(reason, "No se pudo guardar esta fotografía."),
+          failureMessage(reason, "No se pudo guardar ni preparar esta fotografía."),
         );
       }
     }
@@ -164,20 +187,34 @@ export async function runSeriesCapture<TFile>(
     return outcome;
   }
 
-  // Phase 2 — inference, serial, only now that the four originals exist.
+  // Phase 2 — inference, serial, only now that the four originals are stored
+  // and their proxies revalidated.
   outcome.analysisStarted = true;
   for (const direction of DIRECTIONS) {
     const slot = slots[direction];
     const view = stored[direction]!;
+    // A context change aborts the whole run: no further call is issued.
+    if (!callbacks.isCurrentContext(context)) {
+      outcome.reason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
+      return outcome;
+    }
     if (slot.analyzed) continue;
     if (!callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
     callbacks.onSlotStatus(direction, slot.requestKey, "processing", null);
     try {
       const result = await services.analyzeView(direction, view, context);
-      if (!callbacks.isCurrentContext(context) || !callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
+      if (!callbacks.isCurrentContext(context)) {
+        outcome.reason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
+        return outcome;
+      }
+      if (!callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
       if (result === "usable") outcome.analyzed.push(direction);
     } catch (reason) {
-      if (!callbacks.isCurrentContext(context) || !callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
+      if (!callbacks.isCurrentContext(context)) {
+        outcome.reason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
+        return outcome;
+      }
+      if (!callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
       callbacks.onSlotStatus(
         direction,
         slot.requestKey,

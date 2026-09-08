@@ -1,9 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
-  MAX_AUTOMATIC_RETRIES,
   SeriesAnalysisGate,
-  automaticRetryDelayMs,
   captureProgress,
   captureProgressLabel,
   contextMatchesTree,
@@ -139,16 +137,10 @@ test("un fallo de carga se distingue de un fallo de análisis y conserva lo vál
 test("un problema permanente no se presenta como recuperable", () => {
   const failure = describeFailure("upload", "El formato del archivo es incompatible.");
   assert.equal(failure.retriable, false);
-  assert.equal(automaticRetryDelayMs(failure, 0), null);
-});
-
-test("los reintentos automáticos están limitados y espaciados", () => {
-  const failure = describeFailure("analysis", "Se agotó el tiempo de espera del servicio.");
-  assert.equal(failure.retriable, true);
-  const first = automaticRetryDelayMs(failure, 0);
-  const second = automaticRetryDelayMs(failure, 1);
-  assert.ok(first && second && second > first);
-  assert.equal(automaticRetryDelayMs(failure, MAX_AUTOMATIC_RETRIES), null);
+  // No hay reintentos automáticos en el flujo: la recuperación es siempre
+  // explícita, por vista o por serie.
+  const transient = describeFailure("analysis", "Se agotó el tiempo de espera del servicio.");
+  assert.equal(transient.retriable, true);
 });
 
 test("los detalles de diagnóstico no exponen enlaces firmados ni tokens", () => {

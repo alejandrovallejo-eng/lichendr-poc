@@ -302,17 +302,6 @@ export function describeFailure(kind: FailureKind, raw: string | null | undefine
   return { message, retriable, detail: safeDiagnosticDetail(raw) };
 }
 
-export const MAX_AUTOMATIC_RETRIES = 2;
-const RETRY_DELAYS_MS = [1500, 4000] as const;
-
-// Automatic retries only apply to failures identified as transient, are capped
-// and wait between attempts. Validation or permission failures never retry.
-export function automaticRetryDelayMs(failure: FriendlyFailure, attempt: number): number | null {
-  if (!failure.retriable) return null;
-  if (!Number.isInteger(attempt) || attempt < 0 || attempt >= MAX_AUTOMATIC_RETRIES) return null;
-  return RETRY_DELAYS_MS[attempt];
-}
-
 // A response is stale when the photograph it belongs to is no longer the one
 // displayed in that space, e.g. because the user replaced the image meanwhile.
 export function isStaleSlotResponse(currentRequestKey: string, responseRequestKey: string): boolean {

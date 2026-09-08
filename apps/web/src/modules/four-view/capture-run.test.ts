@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { runSeriesCapture, type RunSlot, type SeriesRunServices } from "./capture-run.ts";
+import { runSeriesCapture, runSingleViewRetry, type RunSlot, type SeriesRunServices } from "./capture-run.ts";
 import type { StoredViewIdentity } from "./capture-flow.ts";
 import { DIRECTIONS, type Direction } from "./types.ts";
 
@@ -369,4 +369,108 @@ test("cambiar de contexto durante la primera inferencia no analiza las demás vi
   assert.ok(!recorded.calls.includes("finalize"));
   assert.deepEqual(result.analyzed, []);
   assert.equal(result.completed, false);
+});
+
+// El botón «Reintentar solo esta vista» llama exactamente a este adaptador, así
+// que las reglas de la serie se comprueban aquí, no solo en un helper suelto.
+test("el reintento por vista no analiza nada si falta una fotografía de la serie", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const result = await runSingleViewRetry(
+    "N",
+    slots({ N: storedSlot("N"), E: storedSlot("E"), S: storedSlot("S") }),
+    services(recorded),
+    events.handlers,
+  );
+  assert.equal(result.analysisStarted, false);
+  assert.ok(!recorded.calls.some((call) => call.startsWith("analyze:")));
+  assert.ok(!recorded.calls.includes("finalize"));
+  assert.ok(events.errors.length > 0);
+});
+
+test("el reintento por vista no analiza si falla la preparación de otra vista", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const result = await runSingleViewRetry(
+    "N",
+    slots({ N: storedSlot("N"), E: storedSlot("E"), S: storedSlot("S"), W: storedSlot("W") }),
+    services(recorded, { failPrepareOn: "S" }),
+    events.handlers,
+  );
+  assert.equal(result.analysisStarted, false);
+  assert.ok(!recorded.calls.some((call) => call.startsWith("analyze:")));
+  // El original de la vista que falló se conserva: no se pide otra fotografía.
+  assert.equal(recorded.calls.filter((call) => call.startsWith("store:")).length, 0);
+  assert.ok(events.statuses.includes("S:error"));
+});
+
+test("con las cuatro preparadas el reintento analiza solo la vista elegida", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const analyzed = (direction: Direction) => ({ ...storedSlot(direction), analyzed: true });
+  const result = await runSingleViewRetry(
+    "S",
+    slots({ N: analyzed("N"), E: analyzed("E"), S: storedSlot("S"), W: analyzed("W") }),
+    services(recorded),
+    events.handlers,
+  );
+  assert.equal(result.completed, true);
+  assert.deepEqual(recorded.calls.filter((call) => call.startsWith("analyze:")), ["analyze:S"]);
+  // Ni re-subida de originales ni recálculo de las propuestas ya válidas.
+  assert.equal(recorded.calls.filter((call) => call.startsWith("store:")).length, 0);
+  assert.deepEqual(result.prepared, ["S"]);
+  assert.ok(recorded.calls.includes("finalize"));
+});
+
+test("el reintento revalida el proxy de la vista elegida aunque ya tuviera resultado", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const analyzed = (direction: Direction) => ({ ...storedSlot(direction), analyzed: true });
+  await runSingleViewRetry(
+    "N",
+    slots({ N: analyzed("N"), E: analyzed("E"), S: analyzed("S"), W: analyzed("W") }),
+    services(recorded),
+    events.handlers,
+  );
+  assert.deepEqual(recorded.calls.filter((call) => call.startsWith("prepare:")), ["prepare:N"]);
+  assert.deepEqual(recorded.calls.filter((call) => call.startsWith("analyze:")), ["analyze:N"]);
+});
+
+test("un rechazo al abrir la serie no lanza ninguna carga ni inferencia", async () => {
+  const recorded = recorder();
+  const events = callbacks();
+  const result = await runSeriesCapture(
+    slots({ N: selectedSlot(), E: selectedSlot(), S: selectedSlot(), W: selectedSlot() }),
+    {
+      ...services(recorded),
+      ensureContext: async () => {
+        recorded.calls.push("ensureContext");
+        throw new Error("El contexto cambió antes de abrir la serie de este árbol.");
+      },
+    },
+    events.handlers,
+  );
+  assert.deepEqual(recorded.calls, ["ensureContext"]);
+  assert.equal(result.uploadsCompleted, false);
+  assert.ok(events.errors.some((message) => /contexto/.test(message)));
+});
+
+test("un rechazo de carga por cambio de contexto detiene la fase de guardado", async () => {
+  const recorded = recorder();
+  let valid = true;
+  const events = callbacks({ isCurrentContext: () => valid });
+  const result = await runSeriesCapture(
+    slots({ N: selectedSlot(), E: selectedSlot(), S: selectedSlot(), W: selectedSlot() }),
+    {
+      ...services(recorded),
+      storeView: async (direction) => {
+        recorded.calls.push(`store:${direction}`);
+        valid = false;
+        throw new Error("La subida se interrumpió.");
+      },
+    },
+    events.handlers,
+  );
+  assert.deepEqual(recorded.calls, ["ensureContext", "store:N"]);
+  assert.equal(result.analysisStarted, false);
 });

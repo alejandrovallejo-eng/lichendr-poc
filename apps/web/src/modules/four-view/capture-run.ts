@@ -91,35 +91,46 @@ function failureMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
 
-export async function runSeriesCapture<TFile>(
+interface PreflightOutcome {
+  // Set when the run must stop without touching the analysis phase.
+  aborted: boolean;
+  context: RunContext | null;
+  stored: Partial<Record<Direction, StoredViewIdentity | null>>;
+}
+
+// Common preflight for every inference path, including the per-view retry: the
+// four originals of this series are stored and their private analysis proxies
+// revalidated (idempotent, never re-uploading a stored original) before a single
+// inference is allowed to start.
+async function runSeriesPreflight<TFile>(
   slots: Record<Direction, RunSlot<TFile>>,
   services: SeriesRunServices<TFile>,
   callbacks: SeriesRunCallbacks,
-): Promise<SeriesRunResult> {
-  const outcome = EMPTY_RESULT();
+  outcome: SeriesRunResult,
+): Promise<PreflightOutcome> {
+  const stored: Partial<Record<Direction, StoredViewIdentity | null>> = {};
   let context: RunContext;
   try {
     context = await services.ensureContext();
   } catch (reason) {
     outcome.reason = failureMessage(reason, "No se pudo abrir la serie de este árbol.");
     callbacks.onError(outcome.reason);
-    return outcome;
+    return { aborted: true, context: null, stored };
   }
   // A navigation or a tree change while the series was being opened must not
   // write anything into the newly selected context.
   if (!callbacks.isCurrentContext(context)) {
     outcome.reason = "El contexto cambió antes de empezar; no se guardó nada de este árbol.";
-    return outcome;
+    return { aborted: true, context: null, stored };
   }
 
-  // Phase 1 — store and prepare the four originals. Serial on purpose: the
-  // originals are large and the preparation is memory bound.
+  // Store and prepare the four originals. Serial on purpose: the originals are
+  // large and the preparation is memory bound.
   //
   // A view whose original is already stored still goes through the preparation
   // step: the derived proxy may never have been built (a previous attempt could
   // have failed exactly there), and the endpoint is idempotent, so revalidating
   // it costs nothing and never re-uploads the original.
-  const stored: Partial<Record<Direction, StoredViewIdentity | null>> = {};
   for (const direction of DIRECTIONS) {
     const slot = slots[direction];
     if (!slot.view && !slot.file) {
@@ -133,7 +144,7 @@ export async function runSeriesCapture<TFile>(
         view = await services.storeView(direction, slot, context);
         if (!callbacks.isCurrentContext(context)) {
           outcome.reason = "El contexto cambió mientras se guardaban las fotografías.";
-          return outcome;
+          return { aborted: true, context: null, stored };
         }
         if (!callbacks.isCurrentRequest(direction, slot.requestKey)) {
           stored[direction] = null;
@@ -150,7 +161,7 @@ export async function runSeriesCapture<TFile>(
       await services.prepareView(direction, view, context);
       if (!callbacks.isCurrentContext(context)) {
         outcome.reason = "El contexto cambió mientras se preparaban las fotografías.";
-        return outcome;
+        return { aborted: true, context: null, stored };
       }
       if (!callbacks.isCurrentRequest(direction, slot.requestKey)) {
         stored[direction] = null;
@@ -164,6 +175,11 @@ export async function runSeriesCapture<TFile>(
       // the next attempt revalidates it without asking for a new photograph.
       stored[direction] = null;
       outcome.uploadFailures.push(direction);
+      // A rejection caused by leaving this tree also aborts the run.
+      if (!callbacks.isCurrentContext(context)) {
+        outcome.reason = "El contexto cambió mientras se guardaban las fotografías.";
+        return { aborted: true, context: null, stored };
+      }
       if (callbacks.isCurrentRequest(direction, slot.requestKey)) {
         callbacks.onSlotStatus(
           direction,
@@ -179,40 +195,51 @@ export async function runSeriesCapture<TFile>(
   if (!check.ok) {
     outcome.reason = check.reason;
     callbacks.onError(check.reason ?? "Faltan fotografías guardadas para analizar la serie.");
-    return outcome;
+    return { aborted: true, context: null, stored };
   }
   outcome.uploadsCompleted = true;
   if (!callbacks.isCurrentContext(context)) {
     outcome.reason = "El contexto cambió antes del análisis; no se analizó nada.";
-    return outcome;
+    return { aborted: true, context: null, stored };
   }
+  return { aborted: false, context, stored };
+}
 
-  // Phase 2 — inference, serial, only now that the four originals are stored
-  // and their proxies revalidated.
+// Runs the inference of the given directions, serially, and recomputes the
+// series summary. Returns false when the run was aborted by a context change.
+async function runAnalysisPhase<TFile>(
+  targets: Direction[],
+  slots: Record<Direction, RunSlot<TFile>>,
+  stored: Partial<Record<Direction, StoredViewIdentity | null>>,
+  context: RunContext,
+  services: SeriesRunServices<TFile>,
+  callbacks: SeriesRunCallbacks,
+  outcome: SeriesRunResult,
+): Promise<void> {
   outcome.analysisStarted = true;
-  for (const direction of DIRECTIONS) {
+  const abortReason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
+  for (const direction of targets) {
     const slot = slots[direction];
     const view = stored[direction]!;
     // A context change aborts the whole run: no further call is issued.
     if (!callbacks.isCurrentContext(context)) {
-      outcome.reason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
-      return outcome;
+      outcome.reason = abortReason;
+      return;
     }
-    if (slot.analyzed) continue;
     if (!callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
     callbacks.onSlotStatus(direction, slot.requestKey, "processing", null);
     try {
       const result = await services.analyzeView(direction, view, context);
       if (!callbacks.isCurrentContext(context)) {
-        outcome.reason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
-        return outcome;
+        outcome.reason = abortReason;
+        return;
       }
       if (!callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
       if (result === "usable") outcome.analyzed.push(direction);
     } catch (reason) {
       if (!callbacks.isCurrentContext(context)) {
-        outcome.reason = "El contexto cambió durante el análisis; no se analizaron las vistas restantes.";
-        return outcome;
+        outcome.reason = abortReason;
+        return;
       }
       if (!callbacks.isCurrentRequest(direction, slot.requestKey)) continue;
       callbacks.onSlotStatus(
@@ -226,15 +253,66 @@ export async function runSeriesCapture<TFile>(
 
   if (!callbacks.isCurrentContext(context)) {
     outcome.reason = "El contexto cambió durante el análisis.";
-    return outcome;
+    return;
   }
   try {
     await services.finalize(context);
   } catch (reason) {
     outcome.reason = failureMessage(reason, "El análisis terminó, pero no se pudo actualizar el resumen de la serie.");
     callbacks.onError(outcome.reason);
-    return outcome;
+    return;
   }
   outcome.completed = true;
+}
+
+export async function runSeriesCapture<TFile>(
+  slots: Record<Direction, RunSlot<TFile>>,
+  services: SeriesRunServices<TFile>,
+  callbacks: SeriesRunCallbacks,
+): Promise<SeriesRunResult> {
+  const outcome = EMPTY_RESULT();
+  const preflight = await runSeriesPreflight(slots, services, callbacks, outcome);
+  if (preflight.aborted || !preflight.context) return outcome;
+  const targets = DIRECTIONS.filter((direction) => !slots[direction].analyzed);
+  await runAnalysisPhase(
+    targets,
+    slots,
+    preflight.stored,
+    preflight.context,
+    services,
+    callbacks,
+    outcome,
+  );
+  return outcome;
+}
+
+// Per-view retry. It goes through exactly the same preflight as the full run —
+// the four identities and proxies of this series must be valid — but analyses
+// only the chosen view, so a valid result or crop proposal of another view is
+// never recomputed and no stored original is uploaded again.
+export async function runSingleViewRetry<TFile>(
+  direction: Direction,
+  slots: Record<Direction, RunSlot<TFile>>,
+  services: SeriesRunServices<TFile>,
+  callbacks: SeriesRunCallbacks,
+): Promise<SeriesRunResult> {
+  const outcome = EMPTY_RESULT();
+  // The chosen view is always re-prepared and re-analysed, even if it already
+  // had a result: that is exactly what the user asked for.
+  const target: Record<Direction, RunSlot<TFile>> = {
+    ...slots,
+    [direction]: { ...slots[direction], analyzed: false },
+  };
+  const preflight = await runSeriesPreflight(target, services, callbacks, outcome);
+  if (preflight.aborted || !preflight.context) return outcome;
+  await runAnalysisPhase(
+    [direction],
+    target,
+    preflight.stored,
+    preflight.context,
+    services,
+    callbacks,
+    outcome,
+  );
   return outcome;
 }

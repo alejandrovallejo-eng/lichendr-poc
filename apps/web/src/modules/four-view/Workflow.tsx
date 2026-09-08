@@ -64,6 +64,7 @@ import {
 } from "./capture-flow";
 import {
   runSeriesCapture,
+  runSingleViewRetry,
   type RunSlot,
   type SeriesRunCallbacks,
   type SeriesRunServices,
@@ -515,6 +516,11 @@ export default function FourViewWorkflow() {
     ["saving_original", "preparing_ai", "processing", "analyzing"].includes(slots[direction].status)
   ));
   const operationLocked = processing || assistedBusy;
+  // A per-view retry still needs the four originals of the series, so the button
+  // is disabled — with a visible reason — while one of them is missing.
+  const retryBlockedReason = DIRECTIONS.every((direction) => slots[direction].file || slots[direction].view)
+    ? null
+    : "Faltan fotografías de esta serie: completa las cuatro vistas antes de reintentar.";
   const captureLocked = operationLocked || series?.status === "completed";
   const selectedProject = projects.find((project) => project.id === projectId);
   const selectedSite = sites.find((site) => site.id === siteId);
@@ -574,6 +580,9 @@ export default function FourViewWorkflow() {
     if (summary.calibrated && DIRECTIONS.some((direction) => (
       slots[direction].result?.trunk_estimate?.confidence === "low"
     ))) {
+      // Opening the trunk-edge review automatically is the intended behaviour
+      // when the calibrated result is not confident; it stays as it was.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setReviewingTrunkEdges(true);
     }
   }, [slots, summary.calibrated]);
@@ -603,9 +612,11 @@ export default function FourViewWorkflow() {
   // Latest slots and context, so a callback that resumes after an await can
   // check that it is still writing into the same photograph and the same tree.
   const slotsRef = useRef(slots);
-  slotsRef.current = slots;
-  const contextRef = useRef<TreeContextIds | null>(null);
-  contextRef.current = { projectId, siteId, eventId, treeId };
+  const contextRef = useRef<TreeContextIds | null>({ projectId, siteId, eventId, treeId });
+  useEffect(() => {
+    slotsRef.current = slots;
+    contextRef.current = { projectId, siteId, eventId, treeId };
+  });
   // Token of this mount. A screen that was left behind must not publish any
   // response, neither into the state nor through the client.
   const mounted = useRef(true);
@@ -667,53 +678,20 @@ export default function FourViewWorkflow() {
     }));
   };
 
-  const ensureStoredView = async (
-    direction: Direction,
-    slot: SlotState,
-    activeSeries: CaptureSeriesRow,
-    treeSampleId: string,
-  ): Promise<CaptureViewRow> => {    if (slot.view) return slot.view;
-    if (!slot.file || !projectId || !siteId || !eventId) {
-      throw new Error("No se conserva la fotografía o su contexto para subirla.");
-    }
-    const view = await stageCaptureView({
-      file: slot.file,
-      direction,
-      series: activeSeries,
-      requestKey: slot.requestKey,
-      context: { projectId, siteId, eventId, treeSampleId },
-    });
-    // The stored original is only published on the same mount, tree and photograph.
-    if (mayPublish(direction, slot.requestKey, { projectId, siteId, eventId, treeId: treeId! })) {
-      setSlots((current) => ({
-        ...current,
-        [direction]: { ...current[direction], view },
-      }));
-    }
-    return view;
-  };
-
-  // Runs the whole series through the shared orchestrator: the four originals
-  // are stored and prepared first, and inference only starts when the four
-  // stored identities are verified. It is only ever called through the gate
-  // below, which guarantees a single execution per set of four photographs.
-  const processAll = async (): Promise<boolean> => {
-    if (!projectId || !siteId || !eventId || !treeId || !canProcess) {
-      setGlobalError(readiness.reason ?? "Confirma el árbol y la jornada, y completa las cuatro vistas.");
-      return false;
-    }
-    setProcessing(true);
-    setGlobalError(null);
-    const expectedContext: TreeContextIds = { projectId, siteId, eventId, treeId };
+  // Builds the adapter between this screen and the shared orchestrator. Both the
+  // automatic series run and the per-view retry use exactly the same services,
+  // callbacks and guards, so the retry cannot skip the preflight of the four
+  // originals and their proxies.
+  const buildSeriesRunner = (expectedContext: TreeContextIds) => {
+    const { projectId: pid, siteId: sid, eventId: eid } = expectedContext;
     const viewRows: Partial<Record<Direction, CaptureViewRow>> = {};
     let activeSeries: CaptureSeriesRow | null = null;
-    let treeSampleId = "";
     DIRECTIONS.forEach((direction) => {
-      const stored = slots[direction].view;
+      const stored = slotsRef.current[direction].view;
       if (stored) viewRows[direction] = stored;
     });
     const runSlots = Object.fromEntries(DIRECTIONS.map((direction) => {
-      const slot = slots[direction];
+      const slot = slotsRef.current[direction];
       const run: RunSlot<File> = {
         file: slot.file,
         view: slot.view ? viewIdentity(slot.view) : null,
@@ -726,7 +704,12 @@ export default function FourViewWorkflow() {
 
     const services: SeriesRunServices<File> = {
       ensureContext: async () => {
-        treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
+        const treeSampleId = await ensureTreeSampleForTree(sid, eid, expectedContext.treeId);
+        // The tree may have changed while the sample was being resolved: do not
+        // open (or create) a series for a context nobody is looking at.
+        if (!mayPublishSeries(expectedContext)) {
+          throw new Error("El contexto cambió antes de abrir la serie de este árbol.");
+        }
         const opened = await getOrCreateCaptureSeries(treeSampleId);
         activeSeries = opened;
         // Nothing is published on a screen that was left behind or that now
@@ -740,7 +723,7 @@ export default function FourViewWorkflow() {
           direction,
           series: activeSeries!,
           requestKey: slot.requestKey,
-          context: { projectId, siteId, eventId, treeSampleId: context.treeSampleId },
+          context: { projectId: pid, siteId: sid, eventId: eid, treeSampleId: context.treeSampleId },
         });
         viewRows[direction] = view;
         return viewIdentity(view);
@@ -763,7 +746,7 @@ export default function FourViewWorkflow() {
           view: row,
           result,
           series: activeSeries!,
-          context: { projectId, siteId, eventId, treeSampleId: context.treeSampleId },
+          context: { projectId: pid, siteId: sid, eventId: eid, treeSampleId: context.treeSampleId },
         });
         if (!mayPublish(direction, requestKey, expectedContext)) return "needs_review";
         patchSlot(direction, requestKey, (slot) => ({
@@ -780,6 +763,9 @@ export default function FourViewWorkflow() {
       },
       finalize: async (context) => {
         const storedResults = await loadSeriesResults(context.seriesId);
+        // A tree change while the stored results were being read must not
+        // recompute the summary of a series nobody is looking at.
+        if (!mayPublishSeries(expectedContext)) return;
         const updatedSeries = await finalizeSeries(
           context.seriesId,
           DIRECTIONS.map((direction) => storedResults[direction] ?? null),
@@ -810,6 +796,22 @@ export default function FourViewWorkflow() {
       },
     };
 
+    return { runSlots, services, callbacks };
+  };
+
+  // Runs the whole series through the shared orchestrator: the four originals
+  // are stored and prepared first, and inference only starts when the four
+  // stored identities are verified. It is only ever called through the gate
+  // below, which guarantees a single execution per set of four photographs.
+  const processAll = async (): Promise<boolean> => {
+    if (!projectId || !siteId || !eventId || !treeId || !canProcess) {
+      setGlobalError(readiness.reason ?? "Confirma el árbol y la jornada, y completa las cuatro vistas.");
+      return false;
+    }
+    setProcessing(true);
+    setGlobalError(null);
+    const expectedContext: TreeContextIds = { projectId, siteId, eventId, treeId };
+    const { runSlots, services, callbacks } = buildSeriesRunner(expectedContext);
     try {
       const result = await runSeriesCapture(runSlots, services, callbacks);
       return result.completed;
@@ -825,7 +827,9 @@ export default function FourViewWorkflow() {
   // Keep the latest closure without turning it into an effect dependency: the
   // effect must react to readiness, never to every render.
   const processAllRef = useRef(processAll);
-  processAllRef.current = processAll;
+  useEffect(() => {
+    processAllRef.current = processAll;
+  });
 
   // The series run starts automatically, and only once, when the four
   // photographs of this tree are selected and ready. Double clicks, re-renders,
@@ -962,80 +966,35 @@ export default function FourViewWorkflow() {
     });
   };
 
+  // Per-view retry. It goes through the same preflight as the full run: the four
+  // originals of this series must exist and their proxies must be valid before
+  // any inference. Only the chosen view is analysed, so a valid result or crop
+  // proposal of another view is never recomputed and no original is re-uploaded.
   const retryDetection = async (direction: Direction) => {
     const slot = slots[direction];
     if ((!slot.file && !slot.view) || ["saving_original", "preparing_ai", "processing", "analyzing"].includes(slot.status)) return;
-    const operationToken = crypto.randomUUID();
-    operationTokens.current[direction] = operationToken;
     if (!projectId || !siteId || !eventId || !treeId) {
       setGlobalError("No se conserva el contexto necesario para reintentar.");
       return;
     }
     const expectedContext: TreeContextIds = { projectId, siteId, eventId, treeId };
-    // Same guard as the series run: same mount, same tree, same photograph and
-    // the retry that is still the current one for this space.
-    const stillMine = () => (
-      operationTokens.current[direction] === operationToken
-      && mayPublish(direction, slot.requestKey, expectedContext)
-    );
-    setSlots((current) => ({
-      ...current,
-      [direction]: { ...current[direction], status: "saving_original", error: null },
-    }));
+    const operationToken = crypto.randomUUID();
+    operationTokens.current[direction] = operationToken;
+    setProcessing(true);
+    setGlobalError(null);
+    const { runSlots, services, callbacks } = buildSeriesRunner(expectedContext);
     try {
-      const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
-      const activeSeries = series ?? await getOrCreateCaptureSeries(treeSampleId);
-      if (!stillMine()) return;
-      if (!series) setSeries(activeSeries);
-      const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
-      if (!stillMine()) return;
-      setSlots((current) => ({
-        ...current,
-        [direction]: { ...current[direction], status: "preparing_ai" },
-      }));
-      await prepareStoredFourViewImage(view.image_id);
-      if (!stillMine()) return;
-      setSlots((current) => ({
-        ...current,
-        [direction]: { ...current[direction], status: "processing" },
-      }));
-      const result = await analyzeStoredFourViewImage(view.image_id);
-      if (!stillMine()) return;
-      if (result.status === "needs_confirmation") {
-        const file = slot.file ?? await loadStoredImageFile(view.image_id);
-        const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
-        const geometryError = cornerGeometryError(proposedCorners, result.source_width, result.source_height);
-        setSlots((current) => ({
-          ...current,
-          [direction]: {
-            ...current[direction],
-            file,
-            result,
-            status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
-            error: geometryError,
-            corners: proposedCorners,
-            initialCorners: proposedCorners?.map((point) => ({ ...point })) ?? null,
-            estimatedGeometry: false,
-            provisionalAcknowledged: false,
-          },
-        }));
-      } else {
-        await saveSingleResult(direction, result, view, slot.requestKey, operationToken);
-      }
+      await runSingleViewRetry(direction, runSlots, services, callbacks);
     } catch (reason) {
-      if (!stillMine()) return;
-      setSlots((current) => ({
-        ...current,
-        [direction]: {
-          ...current[direction],
-          status: "error",
-          error: reason instanceof Error ? reason.message : "No se pudo reintentar la detección.",
-        },
-      }));
+      if (mayPublish(direction, slot.requestKey, expectedContext)) {
+        const failure = describeFailure("analysis", reason instanceof Error ? reason.message : null);
+        setGlobalError(failure.message);
+      }
     } finally {
       if (operationTokens.current[direction] === operationToken) {
         delete operationTokens.current[direction];
       }
+      if (mounted.current) setProcessing(false);
     }
   };
 
@@ -1417,7 +1376,8 @@ export default function FourViewWorkflow() {
                   {failure.retriable ? (
                     <button
                       type="button"
-                      disabled={operationLocked}
+                      disabled={operationLocked || Boolean(retryBlockedReason)}
+                      title={retryBlockedReason ?? undefined}
                       className="mt-2 rounded border border-current px-3 py-2 text-sm font-semibold disabled:opacity-50"
                       onClick={() => void retryDetection(direction)}
                     >
@@ -1538,7 +1498,8 @@ export default function FourViewWorkflow() {
                     </button>
                     <button
                       type="button"
-                      disabled={operationLocked}
+                      disabled={operationLocked || Boolean(retryBlockedReason)}
+                      title={retryBlockedReason ?? undefined}
                       className="rounded border px-3 py-2 text-sm disabled:opacity-50"
                       onClick={() => void retryDetection(direction)}
                     >
@@ -1559,9 +1520,11 @@ export default function FourViewWorkflow() {
                     La fotografía original está guardada. Su propuesta de recorte no quedó registrada, así que se
                     vuelve a calcular sin volver a subir la fotografía.
                   </p>
+                  {retryBlockedReason ? <p className="mt-2 font-medium">{retryBlockedReason}</p> : null}
                   <button
                     type="button"
-                    disabled={operationLocked}
+                    disabled={operationLocked || Boolean(retryBlockedReason)}
+                    title={retryBlockedReason ?? undefined}
                     className="mt-2 w-full rounded border border-emerald-800 px-3 py-2 text-sm font-semibold text-emerald-900 disabled:opacity-50"
                     onClick={() => void retryDetection(direction)}
                   >

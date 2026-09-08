@@ -11,6 +11,13 @@ export function nextTreeDestination(): string {
   return "/images";
 }
 
+// "Siguiente árbol de esta jornada": go back to the tree list of the same
+// jornada, keeping project, site and jornada intact. Only the tree changes.
+export function jornadaTreesDestination(eventId: string): string {
+  if (!eventId) throw new Error("La jornada no es válida.");
+  return `/jornada/${encodeURIComponent(eventId)}`;
+}
+
 export function captureToAnnotationsDestination(seriesId: string): string {
   if (!seriesId) throw new Error("La serie de captura no es válida.");
   return `/annotations?captureSeriesId=${encodeURIComponent(seriesId)}&view=0&tool=ai`;

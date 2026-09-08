@@ -42,7 +42,17 @@ import {
   defaultManualCorners,
   runManualOperation,
 } from "./manual-flow";
-import { captureToAnnotationsDestination } from "./navigation";
+import { captureToAnnotationsDestination, jornadaTreesDestination } from "./navigation";
+import {
+  SeriesAnalysisGate,
+  captureProgressLabel,
+  describeFailure,
+  evaluateSeriesReadiness,
+  seriesAttemptSignature,
+  slotStatusLabel,
+  summarizeCaptureContext,
+  type SlotSnapshot,
+} from "./capture-flow";
 import { combineTrunkEstimates, correctTrunkEdges, summarizeCalibration } from "./science";
 import {
   DIRECTIONS,
@@ -109,17 +119,46 @@ function suggestedDirection(heading: number | null): Direction | null {
   return "W";
 }
 
+function slotSnapshot(slot: SlotState): SlotSnapshot {
+  return {
+    status: slot.status,
+    hasPhoto: Boolean(slot.file || slot.view),
+    hasResult: Boolean(slot.result?.rectified_image_data_url),
+  };
+}
+
 function statusLabel(slot: SlotState): string {
-  if (slot.status === "empty") return "Sin fotografía";
-  if (slot.status === "ready") return "Lista para procesar";
-  if (slot.status === "saving_original") return "Guardando original";
-  if (slot.status === "preparing_ai") return "Preparando imagen para IA";
-  if (slot.status === "processing") return "Analizando";
-  if (slot.status === "needs_confirmation") return "Necesita confirmación manual";
-  if (slot.status === "four_points_ready") return "Cuatro puntos listos";
-  if (slot.status === "analyzing") return "Procesando análisis";
-  if (slot.status === "saved") return "Rectificada y calibrada";
-  return "Error recuperable";
+  return slotStatusLabel(slotSnapshot(slot));
+}
+
+// Small preview of the photograph kept in the slot. It never deforms the
+// picture and falls back to the rectified image when the original file is no
+// longer in memory (for example after reopening a stored evaluation).
+function SlotThumbnail({ slot }: { slot: SlotState }) {
+  const objectUrl = useMemo(
+    () => (slot.file ? URL.createObjectURL(slot.file) : null),
+    [slot.file],
+  );
+  useEffect(() => () => {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }, [objectUrl]);
+  const source = objectUrl ?? slot.result?.rectified_image_data_url ?? null;
+  if (!source) {
+    return (
+      <div
+        className="mt-3 flex h-32 items-center justify-center rounded border border-dashed text-xs"
+        style={{ borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}
+      >
+        Sin fotografía todavía
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3 h-32 overflow-hidden rounded border bg-slate-100" style={{ borderColor: "var(--ld-border)" }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={source} alt="" className="h-full w-full object-contain" />
+    </div>
+  );
 }
 
 function CornerEditor({
@@ -297,10 +336,16 @@ export default function FourViewWorkflow() {
   const [reviewingTrunkEdges, setReviewingTrunkEdges] = useState(false);
   const manualOperations = useRef(new ManualOperationGate());
   const operationTokens = useRef<Partial<Record<Direction, string>>>({});
+  // Guards the series analysis so it runs exactly once per set of four photos.
+  const seriesAnalysis = useRef(new SeriesAnalysisGate());
+  // True when the tree arrived from "Árboles de esta jornada": the context is
+  // already decided and must not be asked again.
+  const [contextFromLink, setContextFromLink] = useState(false);
 
   const resetCapture = () => {
     operationTokens.current = {};
     DIRECTIONS.forEach((direction) => manualOperations.current.invalidate(direction));
+    seriesAnalysis.current.reset();
     setSlots(EMPTY_SLOTS());
     setSeries(null);
     setFieldCircumferenceCm("");
@@ -335,6 +380,10 @@ export default function FourViewWorkflow() {
       setSiteId(resolved.siteId);
       setEventId(resolved.eventId);
       setTreeId(resolved.treeId);
+      // The user already chose project, site, jornada and tree in the previous
+      // screen: do not ask for them again, just show them.
+      setContextFromLink(true);
+      setContextConfirmed(true);
     })();
     return () => {
       active = false;
@@ -426,7 +475,6 @@ export default function FourViewWorkflow() {
 
   const selectedTree = trees.find((tree) => tree.id === treeId);
   const selectedEvent = events.find((event) => event.id === eventId);
-  const capturedCount = DIRECTIONS.filter((direction) => slots[direction].file || slots[direction].result).length;
   const summary = useMemo(() => summarizeCalibration(DIRECTIONS.map((direction) => slots[direction].result)), [slots]);
   const trunkEstimate = useMemo(() => combineTrunkEstimates(Object.fromEntries(
     DIRECTIONS.map((direction) => [direction, slots[direction].result?.trunk_estimate ?? null]),
@@ -437,10 +485,43 @@ export default function FourViewWorkflow() {
   ));
   const operationLocked = processing || assistedBusy;
   const captureLocked = operationLocked || series?.status === "completed";
+  const selectedProject = projects.find((project) => project.id === projectId);
+  const selectedSite = sites.find((site) => site.id === siteId);
+  const contextEntries = summarizeCaptureContext({
+    project: selectedProject?.name,
+    site: selectedSite?.name,
+    event: selectedEvent?.name,
+    tree: selectedTree?.code,
+  });
+  // Readiness of the four spaces, computed with the shared pure logic so the
+  // rule "four views before analysing" is testable outside React.
+  const readiness = useMemo(
+    () => evaluateSeriesReadiness(Object.fromEntries(
+      DIRECTIONS.map((direction) => [direction, slotSnapshot(slots[direction])]),
+    ) as Record<Direction, SlotSnapshot>),
+    [slots],
+  );
+  // Work still pending for this attempt: nothing to launch when every view is
+  // already analysed and saved.
+  const pendingWork = DIRECTIONS.some((direction) => (
+    slots[direction].file && ["ready", "error"].includes(slots[direction].status)
+  ));
+  const attemptSignature = useMemo(() => seriesAttemptSignature(
+    `${treeId || "sin-arbol"}:${series?.id ?? "nueva"}`,
+    Object.fromEntries(DIRECTIONS.map((direction) => [direction, slots[direction].requestKey])) as Record<Direction, string>,
+  ), [treeId, series, slots]);
   const canProcess = contextConfirmed
+    && !contextMismatchError
     && series?.status !== "completed"
-    && DIRECTIONS.every((direction) => slots[direction].file || slots[direction].result?.rectified_image_data_url)
-    && DIRECTIONS.some((direction) => slots[direction].file && ["ready", "error"].includes(slots[direction].status));
+    && readiness.ready
+    && pendingWork;
+  const blockedReason = !contextConfirmed
+    ? "Confirma primero el árbol y la jornada."
+    : contextMismatchError
+      ? "El contexto del enlace no es válido."
+      : series?.status === "completed"
+        ? "Esta evaluación ya está completada."
+        : readiness.reason;
 
   useEffect(() => {
     if (summary.calibrated && DIRECTIONS.some((direction) => (
@@ -498,10 +579,12 @@ export default function FourViewWorkflow() {
     return view;
   };
 
-  const processAll = async () => {
+  // Analyses the whole series. It is only ever called through the gate below,
+  // which guarantees a single execution per set of four photographs.
+  const processAll = async (): Promise<boolean> => {
     if (!projectId || !siteId || !eventId || !treeId || !canProcess) {
-      setGlobalError("Confirma el árbol y la jornada, y completa las cuatro vistas.");
-      return;
+      setGlobalError(readiness.reason ?? "Confirma el árbol y la jornada, y completa las cuatro vistas.");
+      return false;
     }
     setProcessing(true);
     setGlobalError(null);
@@ -576,11 +659,41 @@ export default function FourViewWorkflow() {
       const updatedSeries = await finalizeSeries(activeSeries.id, DIRECTIONS.map((direction) => completed[direction]));
       setSeries(updatedSeries);
       setEvaluated(await listEvaluatedTrees());
+      return true;
     } catch (reason) {
-      setGlobalError(reason instanceof Error ? reason.message : "No se pudo completar la serie.");
+      const failure = describeFailure("analysis", reason instanceof Error ? reason.message : null);
+      setGlobalError(failure.message);
+      return false;
     } finally {
       setProcessing(false);
     }
+  };
+
+  // Keep the latest closure without turning it into an effect dependency: the
+  // effect must react to readiness, never to every render.
+  const processAllRef = useRef(processAll);
+  processAllRef.current = processAll;
+
+  // The analysis of the series starts automatically, and only once, when the
+  // four views of this tree and series are loaded and ready. Double clicks,
+  // re-renders, simultaneous uploads, retries and remounts all go through the
+  // same gate, so no duplicated run is possible.
+  useEffect(() => {
+    if (!canProcess) return;
+    if (!seriesAnalysis.current.begin(attemptSignature)) return;
+    void processAllRef.current().then((succeeded) => {
+      seriesAnalysis.current.finish(attemptSignature, succeeded);
+    });
+  }, [canProcess, attemptSignature]);
+
+  // Manual recovery once the automatic attempt failed: reuses the stored
+  // photographs and derived files, and never duplicates the series.
+  const retrySeriesAnalysis = () => {
+    seriesAnalysis.current.allowRetry(attemptSignature);
+    if (!seriesAnalysis.current.begin(attemptSignature)) return;
+    void processAllRef.current().then((succeeded) => {
+      seriesAnalysis.current.finish(attemptSignature, succeeded);
+    });
   };
 
   const saveSingleResult = async (
@@ -858,12 +971,56 @@ export default function FourViewWorkflow() {
         title="Captura científica de cuatro vistas"
         subtitle="Flujo automático con plantilla LICHENDR-FRAME-0.2. MobileSAM propone regiones visuales; no identifica especies."
       />
-      <div className="flex justify-end">
-        <Link href="/images/advanced" className="text-sm underline">Abrir carga manual avanzada</Link>
-      </div>
 
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
-        <div className="grid gap-4 md:grid-cols-4">
+        <h2 className="text-base font-semibold">Estás trabajando en</h2>
+        <dl className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {contextEntries.map((entry) => (
+            <div key={entry.label}>
+              <dt className="text-xs uppercase tracking-wide" style={{ color: "var(--ld-text-secondary)" }}>{entry.label}</dt>
+              <dd className="text-sm font-semibold">{entry.value}</dd>
+            </div>
+          ))}
+        </dl>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          {eventId ? (
+            <Link
+              href={jornadaTreesDestination(eventId)}
+              className="rounded border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--ld-border)", background: "#fff" }}
+            >
+              Volver a “Árboles de esta jornada”
+            </Link>
+          ) : null}
+          <Link href="/images/advanced" className="text-sm underline">Abrir carga manual avanzada</Link>
+        </div>
+        {contextMismatchError ? (
+          <div
+            role="alert"
+            className="mt-4 rounded border px-4 py-3 text-sm"
+            style={{ background: "#F9DAD6", color: "#842029", borderColor: "#F5C2C7" }}
+          >
+            <strong className="block mb-1">No se puede iniciar la captura con este enlace.</strong>
+            {contextMismatchError}
+            <p className="mt-2">
+              <Link href="/preparar-jornada" className="underline">Volver a “Preparar jornada”</Link> para elegir de nuevo el árbol. No se sustituye ningún registro automáticamente.
+            </p>
+          </div>
+        ) : null}
+      </section>
+
+      <details
+        className="rounded-lg border p-5"
+        style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}
+        open={!contextFromLink && !contextConfirmed}
+      >
+        <summary className="cursor-pointer text-sm font-semibold">
+          {contextFromLink ? "Cambiar de proyecto, sitio, jornada o árbol" : "Elegir proyecto, sitio, jornada y árbol"}
+        </summary>
+        <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
+          Al cambiar cualquiera de estos datos se reinicia la captura para no mezclar fotografías ni resultados de otro árbol.
+        </p>
+        <div className="mt-4 grid gap-4 md:grid-cols-4">
           <label className="text-sm">Proyecto
             <select disabled={operationLocked} className="mt-1 w-full rounded border p-2 disabled:opacity-50" value={projectId} onChange={(event) => {
               resetCapture(); setProjectId(event.target.value); setSiteId(""); setEventId(""); setTreeId(""); setSites([]); setEvents([]); setTrees([]);
@@ -893,11 +1050,6 @@ export default function FourViewWorkflow() {
             </select>
           </label>
         </div>
-        <div className="mt-4 grid gap-2 text-sm md:grid-cols-3">
-          <strong>Árbol seleccionado: {selectedTree?.code ?? "—"}</strong>
-          <strong>Jornada seleccionada: {selectedEvent?.name ?? "—"}</strong>
-          <strong>Serie fotográfica: {capturedCount} de 4</strong>
-        </div>
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -907,30 +1059,35 @@ export default function FourViewWorkflow() {
           >
             {contextConfirmed ? "Árbol y jornada confirmados" : "Confirmar árbol y jornada"}
           </button>
-          {contextConfirmed ? <span className="text-sm text-emerald-800">Contexto bloqueado para esta serie; cambia un selector para reiniciar.</span> : null}
+          {contextConfirmed ? <span className="text-sm text-emerald-800">Contexto fijado para esta serie; cambia un selector para reiniciar.</span> : null}
         </div>
-        {contextMismatchError ? (
-          <div
-            role="alert"
-            className="mt-4 rounded border px-4 py-3 text-sm"
-            style={{ background: "#F9DAD6", color: "#842029", borderColor: "#F5C2C7" }}
-          >
-            <strong className="block mb-1">No se puede iniciar la captura con este enlace.</strong>
-            {contextMismatchError}
-          </div>
-        ) : null}
-      </section>
+      </details>
 
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
-        <h2 className="font-semibold">Protocolo de captura</h2>
-        <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm">
-          {CAPTURE_INSTRUCTIONS.map((instruction) => <li key={instruction}>{instruction}</li>)}
-        </ol>
-        <p className="mt-3 text-sm">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-lg font-semibold">Fotografías del árbol</h2>
+          <p className="text-sm font-semibold" aria-live="polite">{captureProgressLabel(readiness.readyCount)}</p>
+        </div>
+        <p className="mt-2 text-sm">
           La escala se obtiene de la plantilla, no de la distancia. {suggestion
             ? `La brújula sugiere fotografiar ${DIRECTION_LABELS[suggestion]} ahora.`
             : "Sin orientación disponible: usa el espacio N/E/S/O correspondiente."}
         </p>
+        <details className="mt-3">
+          <summary className="cursor-pointer text-sm font-semibold">Ver el protocolo de captura obligatorio</summary>
+          <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm">
+            {CAPTURE_INSTRUCTIONS.map((instruction) => <li key={instruction}>{instruction}</li>)}
+          </ol>
+        </details>
+        {blockedReason ? (
+          <p className="mt-3 rounded p-3 text-sm" style={{ background: "#FFF3D6", color: "#664D03" }}>
+            {blockedReason}
+          </p>
+        ) : (
+          <p className="mt-3 rounded p-3 text-sm" style={{ background: "#E4F1D9", color: "#2C5C1A" }}>
+            Las cuatro vistas están listas: el análisis de la serie empieza automáticamente.
+          </p>
+        )}
       </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -949,14 +1106,26 @@ export default function FourViewWorkflow() {
             slot.result?.source_height ?? 0,
           );
           const requiresProvisionalConfirmation = slot.estimatedGeometry && !slot.provisionalAcknowledged;
+          const busy = ["saving_original", "preparing_ai", "processing", "analyzing"].includes(slot.status);
+          // Failures are explained in plain Spanish; the raw text is kept as a
+          // collapsible diagnostic detail, already stripped of links and tokens.
+          const failure = slot.error && ["error", "repeat"].includes(slot.status)
+            ? describeFailure(slot.view ? "analysis" : "upload", slot.error)
+            : null;
           return (
             <article
               key={direction}
               className={`min-h-64 rounded-lg border p-4 ${editingArea ? "xl:col-span-2" : ""}`}
               style={{ background: "var(--ld-card)", borderColor: suggestion === direction ? "#D9BD67" : "var(--ld-border)" }}
             >
-              <h2 className="text-xl font-bold">{DIRECTION_LABELS[direction]}</h2>
-              <p className="mt-1 text-sm">{statusLabel(slot)}</p>
+              <h2 className="text-xl font-bold">
+                {DIRECTION_LABELS[direction]} <span aria-hidden="true" className="text-sm font-semibold">({direction})</span>
+              </h2>
+              <p className="mt-1 inline-flex items-center gap-2 text-sm font-semibold">
+                {busy ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-800 border-t-transparent" /> : null}
+                {statusLabel(slot)}
+              </p>
+              <SlotThumbnail slot={slot} />
               <label
                 htmlFor={fileInputId}
                 className={`mt-5 block rounded bg-emerald-800 px-4 py-3 text-center text-white ${!contextConfirmed || captureLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
@@ -973,9 +1142,33 @@ export default function FourViewWorkflow() {
                 />
               </label>
               {slot.file ? <p className="mt-3 break-all text-xs">{slot.file.name}</p> : null}
-              {slot.error ? <p className="mt-3 text-sm text-red-700">{slot.error}</p> : null}
+              {failure ? (
+                <div className="mt-3 rounded border p-3 text-sm" style={{ background: "#F9DAD6", color: "#842029", borderColor: "#F5C2C7" }}>
+                  <p>{failure.message}</p>
+                  {failure.retriable ? (
+                    <button
+                      type="button"
+                      disabled={operationLocked}
+                      className="mt-2 rounded border border-current px-3 py-2 text-sm font-semibold disabled:opacity-50"
+                      onClick={() => void retryDetection(direction)}
+                    >
+                      Reintentar solo esta vista
+                    </button>
+                  ) : null}
+                  {failure.detail ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs">Detalle técnico</summary>
+                      <p className="mt-1 break-words text-xs">{failure.detail}</p>
+                    </details>
+                  ) : null}
+                </div>
+              ) : slot.error ? (
+                <p className="mt-3 text-sm text-red-700">{slot.error}</p>
+              ) : null}
               {slot.result ? (
-                <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 rounded bg-slate-50 p-3 text-xs">
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-xs font-semibold">Detalles técnicos de la detección</summary>
+                <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded bg-slate-50 p-3 text-xs">
                   <div><dt className="font-semibold">Método</dt><dd className="break-words">{slot.result.frame_detection.method}</dd></div>
                   <div><dt className="font-semibold">Confianza automática previa</dt><dd>{Math.round(slot.result.frame_detection.confidence * 100)}%</dd></div>
                   <div><dt className="font-semibold">Marcadores</dt><dd>{slot.result.frame_detection.detected_marker_ids.join(", ") || "Ninguno"}</dd></div>
@@ -985,6 +1178,7 @@ export default function FourViewWorkflow() {
                     <dd>{classificationLabel(slot.result.frame_detection.classification)}</dd>
                   </div>
                 </dl>
+                </details>
               ) : null}
               {slot.file && slot.result && !slot.corners && ["needs_confirmation", "repeat", "error"].includes(slot.status) ? (
                 <button
@@ -1105,15 +1299,28 @@ export default function FourViewWorkflow() {
         })}
       </section>
 
-      {globalError ? <div className="rounded border border-red-300 bg-red-50 p-4 text-sm text-red-800">{globalError}</div> : null}
-      <button
-        type="button"
-        disabled={operationLocked || !canProcess}
-        onClick={() => void processAll()}
-        className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
-      >
-        {processing ? "Rectificando secuencialmente…" : "Rectificar y calibrar las cuatro vistas"}
-      </button>
+      {globalError ? (
+        <div role="alert" className="rounded border border-red-300 bg-red-50 p-4 text-sm text-red-800">
+          <p>{globalError}</p>
+        </div>
+      ) : null}
+      <div className="space-y-2">
+        <p className="text-sm" aria-live="polite">
+          {processing
+            ? "Analizando las cuatro vistas, una por una, para no saturar el servicio."
+            : canProcess
+              ? "El análisis de la serie se inicia automáticamente."
+              : blockedReason ?? "Esta serie no tiene trabajo pendiente."}
+        </p>
+        <button
+          type="button"
+          disabled={operationLocked || !canProcess}
+          onClick={retrySeriesAnalysis}
+          className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
+        >
+          {processing ? "Analizando las cuatro vistas…" : "Reintentar el análisis de las cuatro vistas"}
+        </button>
+      </div>
 
       {series ? (
         <section className="space-y-4 rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
@@ -1202,6 +1409,21 @@ export default function FourViewWorkflow() {
           >
             Continuar al análisis de líquenes
           </button>
+          {!summary.calibrated ? (
+            <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>
+              Este paso se habilita cuando las cuatro vistas están rectificadas y calibradas. Sin calibración no se
+              calculan áreas físicas ni cobertura.
+            </p>
+          ) : null}
+          {eventId ? (
+            <Link
+              href={jornadaTreesDestination(eventId)}
+              className="block w-full rounded border px-5 py-3 text-center font-semibold"
+              style={{ borderColor: "var(--ld-border)", background: "#fff" }}
+            >
+              Siguiente árbol de esta jornada
+            </Link>
+          ) : null}
         </section>
       ) : null}
 

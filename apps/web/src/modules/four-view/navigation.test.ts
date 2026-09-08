@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   captureToAnnotationsDestination,
+  jornadaTreesDestination,
   nextFourViewDestination,
   nextTreeDestination,
   orderFourViewTargets,
@@ -41,4 +42,9 @@ test("el workspace recibe las cuatro imágenes rectificadas en orden N/E/S/O", (
   ]);
   assert.deepEqual(targets.map((target) => target.direction), ["N", "E", "S", "W"]);
   assert.equal(targets.length, 4);
+});
+
+test("siguiente árbol vuelve a los árboles de la misma jornada", () => {
+  assert.equal(jornadaTreesDestination("event-1"), "/jornada/event-1");
+  assert.throws(() => jornadaTreesDestination(""));
 });

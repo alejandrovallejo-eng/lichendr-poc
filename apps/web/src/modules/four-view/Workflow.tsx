@@ -21,6 +21,8 @@ import {
   analyzeStoredFourViewImage,
   ensureTreeSampleForTree,
   finalizeSeries,
+  findCaptureSeriesForSample,
+  findTreeSampleId,
   getOrCreateCaptureSeries,
   loadSeriesResults,
   loadSeriesViews,
@@ -44,15 +46,27 @@ import {
 } from "./manual-flow";
 import { captureToAnnotationsDestination, jornadaTreesDestination } from "./navigation";
 import {
-  SeriesAnalysisGate,
+  captureProgress,
   captureProgressLabel,
+  contextMatchesTree,
   describeFailure,
   evaluateSeriesReadiness,
+  isStaleSlotResponse,
+  restoredSlotStatus,
   seriesAttemptSignature,
+  sharedSeriesAnalysisGate,
   slotStatusLabel,
   summarizeCaptureContext,
   type SlotSnapshot,
+  type StoredViewIdentity,
+  type TreeContextIds,
 } from "./capture-flow";
+import {
+  runSeriesCapture,
+  type RunSlot,
+  type SeriesRunCallbacks,
+  type SeriesRunServices,
+} from "./capture-run";
 import { combineTrunkEstimates, correctTrunkEdges, summarizeCalibration } from "./science";
 import {
   DIRECTIONS,
@@ -71,6 +85,7 @@ type SlotState = {
     | "ready"
     | "saving_original"
     | "preparing_ai"
+    | "stored"
     | "processing"
     | "needs_confirmation"
     | "four_points_ready"
@@ -85,6 +100,10 @@ type SlotState = {
   estimatedGeometry: boolean;
   provisionalAcknowledged: boolean;
 };
+
+function viewIdentity(view: CaptureViewRow): StoredViewIdentity {
+  return { viewId: view.id, imageId: view.image_id, seriesId: view.capture_series_id };
+}
 
 const EMPTY_SLOT = (): SlotState => ({
   file: null,
@@ -123,6 +142,7 @@ function slotSnapshot(slot: SlotState): SlotSnapshot {
   return {
     status: slot.status,
     hasPhoto: Boolean(slot.file || slot.view),
+    hasStoredView: Boolean(slot.view),
     hasResult: Boolean(slot.result?.rectified_image_data_url),
   };
 }
@@ -146,10 +166,12 @@ function SlotThumbnail({ slot }: { slot: SlotState }) {
   if (!source) {
     return (
       <div
-        className="mt-3 flex h-32 items-center justify-center rounded border border-dashed text-xs"
+        className="mt-3 flex h-32 items-center justify-center rounded border border-dashed px-2 text-center text-xs"
         style={{ borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}
       >
-        Sin fotografía todavía
+        {slot.view
+          ? "Fotografía guardada; recuperando su miniatura"
+          : "Sin fotografía todavía"}
       </div>
     );
   }
@@ -337,7 +359,14 @@ export default function FourViewWorkflow() {
   const manualOperations = useRef(new ManualOperationGate());
   const operationTokens = useRef<Partial<Record<Direction, string>>>({});
   // Guards the series analysis so it runs exactly once per set of four photos.
-  const seriesAnalysis = useRef(new SeriesAnalysisGate());
+  // The gate lives outside the component, so a remount cannot restart an
+  // attempt that already finished. After a full reload the protection comes
+  // from the persisted views, which are neither re-uploaded nor re-analysed.
+  const seriesAnalysis = useRef(sharedSeriesAnalysisGate());
+  // Identifier of the series already restored on screen, so the recovery runs
+  // once per tree and never mixes another tree's photographs.
+  const restoredKey = useRef<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
   // True when the tree arrived from "Árboles de esta jornada": the context is
   // already decided and must not be asked again.
   const [contextFromLink, setContextFromLink] = useState(false);
@@ -346,6 +375,7 @@ export default function FourViewWorkflow() {
     operationTokens.current = {};
     DIRECTIONS.forEach((direction) => manualOperations.current.invalidate(direction));
     seriesAnalysis.current.reset();
+    restoredKey.current = null;
     setSlots(EMPTY_SLOTS());
     setSeries(null);
     setFieldCircumferenceCm("");
@@ -501,20 +531,36 @@ export default function FourViewWorkflow() {
     ) as Record<Direction, SlotSnapshot>),
     [slots],
   );
+  // Separate counters: a photograph waiting for calibration is still selected
+  // and still stored, so it never disappears from the progress summary.
+  const progress = useMemo(
+    () => captureProgress(Object.fromEntries(
+      DIRECTIONS.map((direction) => [direction, slotSnapshot(slots[direction])]),
+    ) as Record<Direction, SlotSnapshot>),
+    [slots],
+  );
   // Work still pending for this attempt: nothing to launch when every view is
-  // already analysed and saved.
-  const pendingWork = DIRECTIONS.some((direction) => (
-    slots[direction].file && ["ready", "error"].includes(slots[direction].status)
-  ));
+  // already stored and analysed.
+  const pendingWork = DIRECTIONS.some((direction) => {
+    const slot = slots[direction];
+    if (!slot.file && !slot.view) return false;
+    if (slot.result?.rectified_image_data_url) return false;
+    return ["ready", "stored", "error"].includes(slot.status);
+  });
   const attemptSignature = useMemo(() => seriesAttemptSignature(
     `${treeId || "sin-arbol"}:${series?.id ?? "nueva"}`,
     Object.fromEntries(DIRECTIONS.map((direction) => [direction, slots[direction].requestKey])) as Record<Direction, string>,
   ), [treeId, series, slots]);
   const canProcess = contextConfirmed
     && !contextMismatchError
+    && !restoring
     && series?.status !== "completed"
     && readiness.ready
     && pendingWork;
+  // The automatic start is reserved for a fresh capture: when the screen only
+  // restored photographs that were already stored, the user decides when to
+  // analyse them, so reopening a series never relaunches work by itself.
+  const canAutoStart = canProcess && DIRECTIONS.some((direction) => slots[direction].status === "ready");
   const blockedReason = !contextConfirmed
     ? "Confirma primero el árbol y la jornada."
     : contextMismatchError
@@ -553,13 +599,54 @@ export default function FourViewWorkflow() {
     event.currentTarget.value = "";
   };
 
+  // Latest slots and context, so a callback that resumes after an await can
+  // check that it is still writing into the same photograph and the same tree.
+  const slotsRef = useRef(slots);
+  slotsRef.current = slots;
+  const contextRef = useRef<TreeContextIds | null>(null);
+  contextRef.current = { projectId, siteId, eventId, treeId };
+
+  // Applies a change to one space only when the photograph shown there is
+  // still the one the operation started with; a late answer is discarded.
+  const patchSlot = (
+    direction: Direction,
+    requestKey: string,
+    update: (slot: SlotState) => SlotState,
+  ) => {
+    setSlots((current) => (
+      isStaleSlotResponse(current[direction].requestKey, requestKey)
+        ? current
+        : { ...current, [direction]: update(current[direction]) }
+    ));
+  };
+
+  const applyCornerProposal = (
+    direction: Direction,
+    requestKey: string,
+    result: VisionViewResult,
+    file: File | null,
+  ) => {
+    const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
+    const geometryError = cornerGeometryError(proposedCorners, result.source_width, result.source_height);
+    patchSlot(direction, requestKey, (slot) => ({
+      ...slot,
+      file: file ?? slot.file,
+      result,
+      status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
+      error: geometryError,
+      corners: proposedCorners,
+      initialCorners: proposedCorners?.map((point) => ({ ...point })) ?? null,
+      estimatedGeometry: false,
+      provisionalAcknowledged: false,
+    }));
+  };
+
   const ensureStoredView = async (
     direction: Direction,
     slot: SlotState,
     activeSeries: CaptureSeriesRow,
     treeSampleId: string,
-  ): Promise<CaptureViewRow> => {
-    if (slot.view) return slot.view;
+  ): Promise<CaptureViewRow> => {    if (slot.view) return slot.view;
     if (!slot.file || !projectId || !siteId || !eventId) {
       throw new Error("No se conserva la fotografía o su contexto para subirla.");
     }
@@ -579,8 +666,10 @@ export default function FourViewWorkflow() {
     return view;
   };
 
-  // Analyses the whole series. It is only ever called through the gate below,
-  // which guarantees a single execution per set of four photographs.
+  // Runs the whole series through the shared orchestrator: the four originals
+  // are stored and prepared first, and inference only starts when the four
+  // stored identities are verified. It is only ever called through the gate
+  // below, which guarantees a single execution per set of four photographs.
   const processAll = async (): Promise<boolean> => {
     if (!projectId || !siteId || !eventId || !treeId || !canProcess) {
       setGlobalError(readiness.reason ?? "Confirma el árbol y la jornada, y completa las cuatro vistas.");
@@ -588,78 +677,104 @@ export default function FourViewWorkflow() {
     }
     setProcessing(true);
     setGlobalError(null);
-    try {
-      const treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
-      const activeSeries = await getOrCreateCaptureSeries(treeSampleId);
-      setSeries(activeSeries);
-      const completed = Object.fromEntries(DIRECTIONS.map((direction) => {
-        const result = slots[direction].result;
-        return [direction, result?.rectified_image_data_url ? result : null];
-      })) as Record<Direction, VisionViewResult | null>;
-      for (const direction of DIRECTIONS) {
-        const slot = slots[direction];
-        const file = slot.file;
-        if (!file || !["ready", "error"].includes(slot.status)) continue;
-        setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "saving_original", error: null } }));
-        try {
-          const view = await ensureStoredView(direction, slot, activeSeries, treeSampleId);
-          setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "preparing_ai" } }));
-          await prepareStoredFourViewImage(view.image_id);
-          setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "processing" } }));
-          const result = await analyzeStoredFourViewImage(view.image_id);
-          if (result.status === "needs_confirmation") {
-            const file = slot.file ?? await loadStoredImageFile(view.image_id);
-            const proposedCorners = result.corner_proposal?.map((point) => ({ ...point })) ?? null;
-            const geometryError = cornerGeometryError(
-              proposedCorners,
-              result.source_width,
-              result.source_height,
-            );
-            setSlots((current) => ({
-              ...current,
-              [direction]: {
-                ...current[direction],
-                file,
-                result,
-                status: proposedCorners && !geometryError ? "four_points_ready" : "needs_confirmation",
-                error: geometryError,
-                corners: proposedCorners,
-                initialCorners: proposedCorners?.map((point) => ({ ...point })) ?? null,
-                estimatedGeometry: false,
-                provisionalAcknowledged: false,
-              },
-            }));
-            continue;
-          }
-          await saveProcessedView({
-            view,
-            result,
-            series: activeSeries,
-            context: { projectId, siteId, eventId, treeSampleId },
-          });
-          if (result.rectified_image_data_url) completed[direction] = result;
-          setSlots((current) => ({
-            ...current,
-            [direction]: {
-              ...current[direction],
-              result,
-              status: result.status === "repeat_photo" ? "repeat" : "saved",
-              error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
-              corners: null,
-              initialCorners: null,
-              estimatedGeometry: false,
-              provisionalAcknowledged: false,
-            },
-          }));
-        } catch (reason) {
-          const message = reason instanceof Error ? reason.message : "No se pudo procesar la vista.";
-          setSlots((current) => ({ ...current, [direction]: { ...current[direction], status: "error", error: message } }));
+    const expectedContext: TreeContextIds = { projectId, siteId, eventId, treeId };
+    const viewRows: Partial<Record<Direction, CaptureViewRow>> = {};
+    let activeSeries: CaptureSeriesRow | null = null;
+    let treeSampleId = "";
+    DIRECTIONS.forEach((direction) => {
+      const stored = slots[direction].view;
+      if (stored) viewRows[direction] = stored;
+    });
+    const runSlots = Object.fromEntries(DIRECTIONS.map((direction) => {
+      const slot = slots[direction];
+      const run: RunSlot<File> = {
+        file: slot.file,
+        view: slot.view ? viewIdentity(slot.view) : null,
+        requestKey: slot.requestKey,
+        status: slot.status,
+        analyzed: Boolean(slot.result?.rectified_image_data_url),
+      };
+      return [direction, run];
+    })) as Record<Direction, RunSlot<File>>;
+
+    const services: SeriesRunServices<File> = {
+      ensureContext: async () => {
+        treeSampleId = await ensureTreeSampleForTree(siteId, eventId, treeId);
+        activeSeries = await getOrCreateCaptureSeries(treeSampleId);
+        setSeries(activeSeries);
+        return { treeSampleId, seriesId: activeSeries.id };
+      },
+      storeView: async (direction, slot, context) => {
+        const view = await stageCaptureView({
+          file: slot.file!,
+          direction,
+          series: activeSeries!,
+          requestKey: slot.requestKey,
+          context: { projectId, siteId, eventId, treeSampleId: context.treeSampleId },
+        });
+        viewRows[direction] = view;
+        return viewIdentity(view);
+      },
+      prepareView: async (_direction, view) => {
+        await prepareStoredFourViewImage(view.imageId);
+      },
+      analyzeView: async (direction, view, context) => {
+        const row = viewRows[direction]!;
+        const requestKey = slotsRef.current[direction].requestKey;
+        const result = await analyzeStoredFourViewImage(view.imageId);
+        if (isStaleSlotResponse(slotsRef.current[direction].requestKey, requestKey)) return "needs_review";
+        if (result.status === "needs_confirmation") {
+          const file = slotsRef.current[direction].file ?? await loadStoredImageFile(view.imageId);
+          applyCornerProposal(direction, requestKey, result, file);
+          return "needs_review";
         }
-      }
-      const updatedSeries = await finalizeSeries(activeSeries.id, DIRECTIONS.map((direction) => completed[direction]));
-      setSeries(updatedSeries);
-      setEvaluated(await listEvaluatedTrees());
-      return true;
+        await saveProcessedView({
+          view: row,
+          result,
+          series: activeSeries!,
+          context: { projectId, siteId, eventId, treeSampleId: context.treeSampleId },
+        });
+        patchSlot(direction, requestKey, (slot) => ({
+          ...slot,
+          result,
+          status: result.status === "repeat_photo" ? "repeat" : "saved",
+          error: result.critical_errors.length ? result.critical_errors.join(", ") : null,
+          corners: null,
+          initialCorners: null,
+          estimatedGeometry: false,
+          provisionalAcknowledged: false,
+        }));
+        return result.rectified_image_data_url ? "usable" : "needs_review";
+      },
+      finalize: async (context) => {
+        const storedResults = await loadSeriesResults(context.seriesId);
+        const updatedSeries = await finalizeSeries(
+          context.seriesId,
+          DIRECTIONS.map((direction) => storedResults[direction] ?? null),
+        );
+        setSeries(updatedSeries);
+        setEvaluated(await listEvaluatedTrees());
+      },
+    };
+
+    const callbacks: SeriesRunCallbacks = {
+      onSlotStatus: (direction, requestKey, status, error) => {
+        patchSlot(direction, requestKey, (slot) => ({ ...slot, status, error: error ?? null }));
+      },
+      onStoredView: (direction, requestKey) => {
+        const row = viewRows[direction];
+        if (row) patchSlot(direction, requestKey, (slot) => ({ ...slot, view: row }));
+      },
+      isCurrentRequest: (direction, requestKey) => (
+        !isStaleSlotResponse(slotsRef.current[direction].requestKey, requestKey)
+      ),
+      isCurrentContext: () => contextMatchesTree(contextRef.current, expectedContext),
+      onError: (message) => setGlobalError(message),
+    };
+
+    try {
+      const result = await runSeriesCapture(runSlots, services, callbacks);
+      return result.completed;
     } catch (reason) {
       const failure = describeFailure("analysis", reason instanceof Error ? reason.message : null);
       setGlobalError(failure.message);
@@ -674,17 +789,18 @@ export default function FourViewWorkflow() {
   const processAllRef = useRef(processAll);
   processAllRef.current = processAll;
 
-  // The analysis of the series starts automatically, and only once, when the
-  // four views of this tree and series are loaded and ready. Double clicks,
-  // re-renders, simultaneous uploads, retries and remounts all go through the
-  // same gate, so no duplicated run is possible.
+  // The series run starts automatically, and only once, when the four
+  // photographs of this tree are selected and ready. Double clicks, re-renders,
+  // simultaneous uploads, retries and remounts all go through the same shared
+  // gate, so no duplicated run is possible while the page stays open. After a
+  // reload the already stored views are neither uploaded nor analysed again.
   useEffect(() => {
-    if (!canProcess) return;
+    if (!canAutoStart) return;
     if (!seriesAnalysis.current.begin(attemptSignature)) return;
     void processAllRef.current().then((succeeded) => {
       seriesAnalysis.current.finish(attemptSignature, succeeded);
     });
-  }, [canProcess, attemptSignature]);
+  }, [canAutoStart, attemptSignature]);
 
   // Manual recovery once the automatic attempt failed: reuses the stored
   // photographs and derived files, and never duplicates the series.
@@ -927,47 +1043,136 @@ export default function FourViewWorkflow() {
     }
   };
 
+  // Rebuilds the four spaces from what is really persisted for one series:
+  // stored originals, stored results and stored corner proposals. Nothing is
+  // invented: a photograph without analysis is shown as stored and pending, not
+  // as a failure, and a proposal that was never persisted is announced as such
+  // instead of pretending it was recovered.
+  const restoreSeriesState = async (seriesRow: CaptureSeriesRow, expected: TreeContextIds) => {
+    const [stored, views] = await Promise.all([
+      loadSeriesResults(seriesRow.id),
+      loadSeriesViews(seriesRow.id),
+    ]);
+    if (!contextMatchesTree(contextRef.current, expected)) return;
+    const viewsByDirection = new Map(views.map((view) => [view.direction, view]));
+    const current = slotsRef.current;
+    const restored = Object.fromEntries(DIRECTIONS.map((direction) => {
+      // A photograph the user has just chosen always wins over the recovery.
+      if (current[direction].file && !current[direction].view) {
+        return [direction, current[direction]];
+      }
+      const result = stored[direction] ?? null;
+      const view = viewsByDirection.get(direction) ?? null;
+      const usable = Boolean(result?.rectified_image_data_url);
+      const repeat = Boolean(result && !usable);
+      const proposal = !usable && result?.corner_proposal ? result.corner_proposal : null;
+      const status = restoredSlotStatus({
+        hasStoredView: Boolean(view),
+        hasUsableResult: usable,
+        repeat,
+        hasCornerProposal: Boolean(proposal),
+      });
+      const slot: SlotState = {
+        file: null,
+        view,
+        requestKey: crypto.randomUUID(),
+        result,
+        status,
+        error: result?.critical_errors.length ? result.critical_errors.join(", ") : null,
+        corners: proposal?.map((point) => ({ ...point })) ?? null,
+        initialCorners: proposal?.map((point) => ({ ...point })) ?? null,
+        estimatedGeometry: result?.frame_detection.classification === "manual_assisted_provisional",
+        provisionalAcknowledged: false,
+      };
+      return [direction, slot];
+    })) as Record<Direction, SlotState>;
+    setSlots(restored);
+    setSeries(seriesRow);
+    setFieldCircumferenceCm(seriesRow.circumference_cm?.toString()
+      ?? seriesRow.field_circumference_cm?.toString()
+      ?? "");
+    // Thumbnails and manual review need the original again. Originals stay in
+    // private storage: they are downloaded one by one for this session only and
+    // no signed URL is logged or shown.
+    for (const direction of DIRECTIONS) {
+      const slot = restored[direction];
+      if (!slot.view || slot.result?.rectified_image_data_url) continue;
+      try {
+        const file = await loadStoredImageFile(slot.view.image_id);
+        if (!contextMatchesTree(contextRef.current, expected)) return;
+        patchSlot(direction, slot.requestKey, (current) => ({ ...current, file }));
+      } catch {
+        patchSlot(direction, slot.requestKey, (current) => ({
+          ...current,
+          error: current.error
+            ?? "La fotografía sigue guardada, pero no se pudo recuperar su miniatura en esta sesión.",
+        }));
+      }
+    }
+  };
+
+  // Recovers the exact series of the selected tree when the screen opens or is
+  // reopened with the same link. It never falls back to another tree and never
+  // creates a new series.
+  useEffect(() => {
+    if (!contextConfirmed || !eventId || !treeId || contextMismatchError) return;
+    const key = `${eventId}:${treeId}`;
+    if (restoredKey.current === key) return;
+    restoredKey.current = key;
+    const expected: TreeContextIds = { projectId, siteId, eventId, treeId };
+    let active = true;
+    void (async () => {
+      setRestoring(true);
+      try {
+        const treeSampleId = await findTreeSampleId(eventId, treeId);
+        if (!treeSampleId || !active) return;
+        const existing = await findCaptureSeriesForSample(treeSampleId);
+        if (!existing || !active) return;
+        if (!contextMatchesTree(contextRef.current, expected)) return;
+        await restoreSeriesState(existing, expected);
+      } catch {
+        if (active) {
+          setGlobalError(
+            "No se pudo recuperar la captura guardada de este árbol. Vuelve a abrirlo desde la jornada; no se ha sustituido ningún registro.",
+          );
+        }
+      } finally {
+        if (active) setRestoring(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextConfirmed, eventId, treeId, contextMismatchError]);
+
   const openEvaluation = async (row: EvaluatedTreeRow) => {
     try {
-      const [stored, views] = await Promise.all([
-        loadSeriesResults(row.series.id),
-        loadSeriesViews(row.series.id),
-      ]);
-      const viewsByDirection = new Map(views.map((view) => [view.direction, view]));
       // Opening another stored evaluation is a context change: drop any gate
       // state so the previous tree cannot influence this one.
       seriesAnalysis.current.reset();
       DIRECTIONS.forEach((direction) => manualOperations.current.invalidate(direction));
       operationTokens.current = {};
       setContextFromLink(false);
+      setSlots(EMPTY_SLOTS());
       setProjectId(row.projectId);
       setSiteId(row.siteId);
       setEventId(row.eventId);
       setTreeId(row.treeId);
-      setSlots(Object.fromEntries(DIRECTIONS.map((direction) => {
-        const result = stored[direction] ?? null;
-        const view = viewsByDirection.get(direction) ?? null;
-        return [direction, {
-          file: null,
-          view,
-          requestKey: crypto.randomUUID(),
-          result,
-          status: result?.rectified_image_data_url ? "saved" : result ? "repeat" : view ? "error" : "empty",
-          error: result?.critical_errors.join(", ")
-            || (view ? "La fotografía está guardada y su análisis está pendiente. Puedes reintentar la IA." : null),
-          corners: null,
-          initialCorners: null,
-          estimatedGeometry: result?.frame_detection.classification === "manual_assisted_provisional",
-          provisionalAcknowledged: false,
-        }];
-      })) as Record<Direction, SlotState>);
-      setSeries(row.series);
-      setFieldCircumferenceCm(row.series.circumference_cm?.toString()
-        ?? row.series.field_circumference_cm?.toString()
-        ?? "");
       setContextConfirmed(true);
+      restoredKey.current = `${row.eventId}:${row.treeId}`;
+      contextRef.current = {
+        projectId: row.projectId,
+        siteId: row.siteId,
+        eventId: row.eventId,
+        treeId: row.treeId,
+      };
+      setRestoring(true);
+      await restoreSeriesState(row.series, contextRef.current);
     } catch {
       setGlobalError("No se pudo abrir la evaluación guardada.");
+    } finally {
+      setRestoring(false);
     }
   };
 
@@ -1072,7 +1277,7 @@ export default function FourViewWorkflow() {
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-lg font-semibold">Fotografías del árbol</h2>
-          <p className="text-sm font-semibold" aria-live="polite">{captureProgressLabel(readiness.readyCount)}</p>
+          <p className="text-sm font-semibold" aria-live="polite">{captureProgressLabel(progress)}</p>
         </div>
         <p className="mt-2 text-sm">
           La escala se obtiene de la plantilla, no de la distancia. {suggestion
@@ -1085,13 +1290,25 @@ export default function FourViewWorkflow() {
             {CAPTURE_INSTRUCTIONS.map((instruction) => <li key={instruction}>{instruction}</li>)}
           </ol>
         </details>
-        {blockedReason ? (
+        {restoring ? (
+          <p className="mt-3 rounded p-3 text-sm" aria-live="polite" style={{ background: "#E8EEF6", color: "#1F3A5F" }}>
+            Recuperando las fotografías ya guardadas de este árbol…
+          </p>
+        ) : blockedReason ? (
           <p className="mt-3 rounded p-3 text-sm" style={{ background: "#FFF3D6", color: "#664D03" }}>
             {blockedReason}
           </p>
+        ) : canAutoStart ? (
+          <p className="mt-3 rounded p-3 text-sm" style={{ background: "#E4F1D9", color: "#2C5C1A" }}>
+            Las cuatro fotografías están seleccionadas: primero se guardan las cuatro y después empieza el análisis.
+          </p>
+        ) : canProcess ? (
+          <p className="mt-3 rounded p-3 text-sm" style={{ background: "#E4F1D9", color: "#2C5C1A" }}>
+            Las cuatro fotografías están guardadas. Puedes analizarlas cuando quieras con el botón “Analizar las cuatro vistas”.
+          </p>
         ) : (
           <p className="mt-3 rounded p-3 text-sm" style={{ background: "#E4F1D9", color: "#2C5C1A" }}>
-            Las cuatro vistas están listas: el análisis de la serie empieza automáticamente.
+            Las cuatro vistas de esta serie ya están analizadas.
           </p>
         )}
       </section>
@@ -1290,15 +1507,21 @@ export default function FourViewWorkflow() {
               {slot.status === "repeat" ? (
                 <button type="button" disabled={operationLocked} className="mt-3 rounded border px-3 py-2 text-sm disabled:opacity-50" onClick={() => repeat(direction)}>Repetir esta vista</button>
               ) : null}
-              {slot.view && !slot.result && slot.status === "error" ? (
-                <button
-                  type="button"
-                  disabled={operationLocked}
-                  className="mt-3 rounded border border-emerald-800 px-3 py-2 text-sm font-semibold text-emerald-900 disabled:opacity-50"
-                  onClick={() => void retryDetection(direction)}
-                >
-                  Reintentar IA con la fotografía guardada
-                </button>
+              {slot.status === "stored" ? (
+                <div className="mt-3 rounded border p-3 text-sm" style={{ borderColor: "var(--ld-border)" }}>
+                  <p>
+                    La fotografía original está guardada. Su propuesta de recorte no quedó registrada, así que se
+                    vuelve a calcular sin volver a subir la fotografía.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={operationLocked}
+                    className="mt-2 w-full rounded border border-emerald-800 px-3 py-2 text-sm font-semibold text-emerald-900 disabled:opacity-50"
+                    onClick={() => void retryDetection(direction)}
+                  >
+                    Analizar esta vista guardada
+                  </button>
+                </div>
               ) : null}
             </article>
           );
@@ -1313,10 +1536,12 @@ export default function FourViewWorkflow() {
       <div className="space-y-2">
         <p className="text-sm" aria-live="polite">
           {processing
-            ? "Analizando las cuatro vistas, una por una, para no saturar el servicio."
-            : canProcess
-              ? "El análisis de la serie se inicia automáticamente."
-              : blockedReason ?? "Esta serie no tiene trabajo pendiente."}
+            ? "Guardando y analizando las cuatro vistas, una por una, para no saturar el servicio."
+            : canAutoStart
+              ? "El análisis de la serie empieza automáticamente cuando las cuatro fotografías estén guardadas."
+              : canProcess
+                ? "Las fotografías guardadas están listas para analizarse."
+                : blockedReason ?? "Esta serie no tiene trabajo pendiente."}
         </p>
         <button
           type="button"
@@ -1324,8 +1549,13 @@ export default function FourViewWorkflow() {
           onClick={retrySeriesAnalysis}
           className="w-full rounded bg-emerald-800 px-5 py-4 font-semibold text-white disabled:opacity-50"
         >
-          {processing ? "Analizando las cuatro vistas…" : "Reintentar el análisis de las cuatro vistas"}
+          {processing ? "Guardando y analizando las cuatro vistas…" : "Analizar las cuatro vistas"}
         </button>
+        {!canProcess && !processing ? (
+          <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>
+            {blockedReason ?? "No hay nada pendiente que analizar en esta serie."}
+          </p>
+        ) : null}
       </div>
 
       {series ? (

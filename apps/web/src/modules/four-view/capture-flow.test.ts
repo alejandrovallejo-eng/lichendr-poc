@@ -4,23 +4,28 @@ import {
   MAX_AUTOMATIC_RETRIES,
   SeriesAnalysisGate,
   automaticRetryDelayMs,
+  captureProgress,
   captureProgressLabel,
   contextMatchesTree,
   describeFailure,
   evaluateSeriesReadiness,
   isStaleSlotResponse,
   readySlotCount,
+  restoredSlotStatus,
   safeDiagnosticDetail,
   seriesAttemptSignature,
+  sharedSeriesAnalysisGate,
   slotStatusLabel,
   summarizeCaptureContext,
+  verifyStoredSeries,
   type SlotSnapshot,
 } from "./capture-flow.ts";
 import { DIRECTIONS, type Direction } from "./types.ts";
 
-const empty: SlotSnapshot = { status: "empty", hasPhoto: false, hasResult: false };
-const ready: SlotSnapshot = { status: "ready", hasPhoto: true, hasResult: false };
-const saved: SlotSnapshot = { status: "saved", hasPhoto: true, hasResult: true };
+const empty: SlotSnapshot = { status: "empty", hasPhoto: false, hasStoredView: false, hasResult: false };
+const ready: SlotSnapshot = { status: "ready", hasPhoto: true, hasStoredView: false, hasResult: false };
+const stored: SlotSnapshot = { status: "stored", hasPhoto: true, hasStoredView: true, hasResult: false };
+const saved: SlotSnapshot = { status: "saved", hasPhoto: true, hasStoredView: true, hasResult: true };
 
 function slots(overrides: Partial<Record<Direction, SlotSnapshot>> = {}): Record<Direction, SlotSnapshot> {
   return {
@@ -56,7 +61,7 @@ test("una carga fallida impide tratar la serie como completa", () => {
     N: ready,
     E: ready,
     S: ready,
-    W: { status: "error", hasPhoto: true, hasResult: false },
+    W: { status: "error", hasPhoto: true, hasStoredView: false, hasResult: false },
   }));
   assert.equal(readiness.ready, false);
   assert.deepEqual(readiness.missing, ["W"]);
@@ -68,7 +73,7 @@ test("una vista pendiente de calibración manual mantiene bloqueada la serie", (
     N: ready,
     E: ready,
     S: ready,
-    W: { status: "needs_confirmation", hasPhoto: true, hasResult: false },
+    W: { status: "needs_confirmation", hasPhoto: true, hasStoredView: true, hasResult: false },
   }));
   assert.equal(readiness.ready, false);
   assert.match(readiness.reason ?? "", /revisión/);
@@ -76,7 +81,7 @@ test("una vista pendiente de calibración manual mantiene bloqueada la serie", (
 
 test("una carga en curso no habilita el análisis aunque haya cuatro fotografías", () => {
   const readiness = evaluateSeriesReadiness(slots({
-    N: { status: "saving_original", hasPhoto: true, hasResult: false },
+    N: { status: "saving_original", hasPhoto: true, hasStoredView: false, hasResult: false },
     E: ready,
     S: ready,
     W: ready,
@@ -84,7 +89,10 @@ test("una carga en curso no habilita el análisis aunque haya cuatro fotografía
   assert.equal(readiness.ready, false);
   assert.match(readiness.reason ?? "", /preparando/i);
   assert.equal(readySlotCount(slots({ E: ready, S: ready, W: ready })), 3);
-  assert.equal(captureProgressLabel(3), "3 de 4 fotografías listas");
+  assert.equal(
+    captureProgressLabel(captureProgress(slots({ E: ready, S: ready, W: ready }))),
+    "3 de 4 fotografías seleccionadas · 0 guardadas · 0 analizadas",
+  );
 });
 
 test("con las cuatro vistas listas el análisis empieza una sola vez", () => {
@@ -184,11 +192,108 @@ test("siguiente árbol conserva proyecto, sitio y jornada y solo cambia el árbo
 
 test("los estados se nombran en español sencillo", () => {
   assert.equal(slotStatusLabel(empty), "Falta fotografía");
-  assert.equal(slotStatusLabel({ status: "saving_original", hasPhoto: true, hasResult: false }), "Subiendo");
-  assert.equal(slotStatusLabel({ status: "preparing_ai", hasPhoto: true, hasResult: false }), "Preparando fotografía");
-  assert.equal(slotStatusLabel(ready), "Lista");
-  assert.equal(slotStatusLabel({ status: "analyzing", hasPhoto: true, hasResult: false }), "Analizando");
-  assert.equal(slotStatusLabel({ status: "needs_confirmation", hasPhoto: true, hasResult: false }), "Requiere revisión");
+  assert.equal(slotStatusLabel({ status: "saving_original", hasPhoto: true, hasStoredView: false, hasResult: false }), "Subiendo");
+  assert.equal(slotStatusLabel({ status: "preparing_ai", hasPhoto: true, hasStoredView: false, hasResult: false }), "Preparando fotografía");
+  assert.equal(slotStatusLabel(ready), "Lista para guardar");
+  assert.equal(slotStatusLabel(stored), "Fotografía guardada; falta analizar");
+  assert.equal(slotStatusLabel({ status: "analyzing", hasPhoto: true, hasStoredView: true, hasResult: false }), "Analizando");
+  assert.equal(slotStatusLabel({ status: "needs_confirmation", hasPhoto: true, hasStoredView: true, hasResult: false }), "Requiere revisión");
   assert.equal(slotStatusLabel(saved), "Completado");
-  assert.equal(slotStatusLabel({ status: "error", hasPhoto: true, hasResult: false }), "No se pudo completar");
+  assert.equal(slotStatusLabel({ status: "error", hasPhoto: true, hasStoredView: false, hasResult: false }), "No se pudo completar");
+});
+
+test("las fotografías guardadas no desaparecen del progreso cuando requieren revisión", () => {
+  const review: SlotSnapshot = {
+    status: "four_points_ready",
+    hasPhoto: true,
+    hasStoredView: true,
+    hasResult: false,
+  };
+  const progress = captureProgress(slots({ N: saved, E: saved, S: review, W: review }));
+  assert.equal(progress.selected, 4);
+  assert.equal(progress.stored, 4);
+  assert.equal(progress.processed, 2);
+  assert.equal(progress.needsReview, 2);
+  assert.equal(
+    captureProgressLabel(progress),
+    "4 de 4 fotografías seleccionadas · 4 guardadas · 2 analizadas · 2 requieren revisión",
+  );
+});
+
+test("el progreso no se contradice mientras una vista se está analizando", () => {
+  const analyzing: SlotSnapshot = {
+    status: "processing",
+    hasPhoto: true,
+    hasStoredView: true,
+    hasResult: false,
+  };
+  const progress = captureProgress(slots({ N: analyzing, E: stored, S: stored, W: stored }));
+  assert.equal(progress.selected, 4);
+  assert.equal(progress.stored, 4);
+  assert.equal(progress.processed, 0);
+  assert.equal(progress.failed, 0);
+});
+
+test("la inferencia exige cuatro originales guardados de la misma serie", () => {
+  const identity = (viewId: string, seriesId = "serie-1") => ({
+    viewId,
+    imageId: `img-${viewId}`,
+    seriesId,
+  });
+  const complete = verifyStoredSeries(
+    { N: identity("n"), E: identity("e"), S: identity("s"), W: identity("w") },
+    "serie-1",
+  );
+  assert.equal(complete.ok, true);
+  const incomplete = verifyStoredSeries(
+    { N: identity("n"), E: identity("e"), S: identity("s"), W: null },
+    "serie-1",
+  );
+  assert.equal(incomplete.ok, false);
+  assert.deepEqual(incomplete.missing, ["W"]);
+  assert.match(incomplete.reason ?? "", /no empieza/);
+  const foreign = verifyStoredSeries(
+    { N: identity("n"), E: identity("e"), S: identity("s"), W: identity("w", "serie-2") },
+    "serie-1",
+  );
+  assert.equal(foreign.ok, false);
+  assert.deepEqual(foreign.mismatched, ["W"]);
+});
+
+test("al reabrir la misma serie las fotografías guardadas no se muestran como ausentes", () => {
+  assert.equal(
+    restoredSlotStatus({ hasStoredView: true, hasUsableResult: true, repeat: false, hasCornerProposal: false }),
+    "saved",
+  );
+  assert.equal(
+    restoredSlotStatus({ hasStoredView: true, hasUsableResult: false, repeat: false, hasCornerProposal: true }),
+    "four_points_ready",
+  );
+  assert.equal(
+    restoredSlotStatus({ hasStoredView: true, hasUsableResult: false, repeat: false, hasCornerProposal: false }),
+    "stored",
+  );
+  assert.equal(
+    restoredSlotStatus({ hasStoredView: false, hasUsableResult: false, repeat: false, hasCornerProposal: false }),
+    "empty",
+  );
+});
+
+test("una serie restaurada sigue habilitada para analizarse sin volver a subir nada", () => {
+  const readiness = evaluateSeriesReadiness(slots({ N: stored, E: stored, S: stored, W: stored }));
+  assert.equal(readiness.ready, true);
+  const progress = captureProgress(slots({ N: stored, E: stored, S: stored, W: stored }));
+  assert.equal(progress.stored, 4);
+  assert.equal(progress.processed, 0);
+});
+
+test("la compuerta compartida sobrevive a un remontaje del componente", () => {
+  const signature = seriesAttemptSignature("serie-1", { N: "a", E: "b", S: "c", W: "d" });
+  const gate = sharedSeriesAnalysisGate();
+  gate.reset();
+  assert.equal(gate.begin(signature), true);
+  gate.finish(signature, true);
+  // Una nueva instancia del componente obtiene la misma compuerta.
+  assert.equal(sharedSeriesAnalysisGate().begin(signature), false);
+  gate.reset();
 });

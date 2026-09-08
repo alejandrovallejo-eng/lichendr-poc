@@ -660,8 +660,7 @@ export async function listEvaluatedTrees(): Promise<EvaluatedTreeRow[]> {
   });
 }
 
-export interface SeriesContext {
-  projectId: string;
+export interface SeriesContext {  projectId: string;
   siteId: string;
   eventId: string;
   treeId: string;
@@ -713,4 +712,32 @@ export async function loadSeriesContext(seriesId: string): Promise<SeriesContext
     event: event?.name ?? "",
     tree: tree?.code ?? "",
   };
+}
+
+// Looks up the evaluation of a tree in a jornada WITHOUT creating it. Used when
+// reopening the capture screen: the existing series must be restored, never
+// replaced by a new one.
+export async function findTreeSampleId(eventId: string, treeId: string): Promise<string | null> {
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("tree_samples")
+    .select("id")
+    .eq("sampling_event_id", eventId)
+    .eq("tree_id", treeId)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.id ?? null;
+}
+
+// Most recent capture series of a tree sample, without creating one.
+export async function findCaptureSeriesForSample(treeSampleId: string): Promise<CaptureSeriesRow | null> {
+  await ensureSession();
+  const { data, error } = await supabase
+    .from("capture_series")
+    .select("*")
+    .eq("tree_sample_id", treeSampleId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  return data?.[0] ?? null;
 }

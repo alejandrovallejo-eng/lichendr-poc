@@ -14,6 +14,9 @@ export type SlotStatus =
   | "ready"
   | "saving_original"
   | "preparing_ai"
+  // The original is already stored on the server and prepared for the AI, but
+  // the scientific analysis of the series has not run for it yet.
+  | "stored"
   | "processing"
   | "needs_confirmation"
   | "four_points_ready"
@@ -26,6 +29,8 @@ export interface SlotSnapshot {
   status: SlotStatus;
   // A photograph exists for this view, either in memory or already stored.
   hasPhoto: boolean;
+  // The original is persisted on the server (capture_views row + image).
+  hasStoredView: boolean;
   // The view already produced a usable rectified image.
   hasResult: boolean;
 }
@@ -50,22 +55,61 @@ export function isSlotBusy(status: SlotStatus): boolean {
   return BUSY_STATUSES.includes(status);
 }
 
-// A view is "ready" for the series analysis when its photograph exists and is
+// A view is "ready" for the series run when its photograph exists and is
 // neither uploading nor waiting for a manual decision.
 export function isSlotReady(slot: SlotSnapshot): boolean {
   if (!slot.hasPhoto) return false;
   if (isSlotBusy(slot.status)) return false;
   if (slot.status === "error" || slot.status === "repeat") return false;
   if (slot.status === "needs_confirmation" || slot.status === "four_points_ready") return false;
-  return slot.status === "ready" || slot.status === "saved" || slot.hasResult;
+  return slot.status === "ready" || slot.status === "stored" || slot.status === "saved" || slot.hasResult;
 }
 
 export function readySlotCount(slots: Record<Direction, SlotSnapshot>): number {
   return DIRECTIONS.filter((direction) => isSlotReady(slots[direction])).length;
 }
 
-export function captureProgressLabel(readyCount: number): string {
-  return `${readyCount} de 4 fotografías listas`;
+// Separate counters for the four things that can be true at the same time.
+// A photograph that is waiting for manual calibration is still selected and
+// still stored: it must never disappear from the progress summary.
+export interface CaptureProgress {
+  // A photograph was chosen or is already stored for that space.
+  selected: number;
+  // The original is persisted on the server.
+  stored: number;
+  // The view produced a usable rectified image.
+  processed: number;
+  // The view needs a human decision (calibration, repeat).
+  needsReview: number;
+  // The view failed and could not be completed.
+  failed: number;
+}
+
+export function captureProgress(slots: Record<Direction, SlotSnapshot>): CaptureProgress {
+  const snapshots = DIRECTIONS.map((direction) => slots[direction]);
+  return {
+    selected: snapshots.filter((slot) => slot.hasPhoto).length,
+    stored: snapshots.filter((slot) => slot.hasStoredView).length,
+    processed: snapshots.filter((slot) => slot.hasResult).length,
+    needsReview: snapshots.filter((slot) => (
+      slot.status === "needs_confirmation"
+      || slot.status === "four_points_ready"
+      || slot.status === "repeat"
+    )).length,
+    failed: snapshots.filter((slot) => slot.status === "error").length,
+  };
+}
+
+// Plain, non-contradictory summary. No invented percentages or ETAs.
+export function captureProgressLabel(progress: CaptureProgress): string {
+  const parts = [
+    `${progress.selected} de 4 fotografías seleccionadas`,
+    `${progress.stored} guardadas`,
+    `${progress.processed} analizadas`,
+  ];
+  if (progress.needsReview > 0) parts.push(`${progress.needsReview} requieren revisión`);
+  if (progress.failed > 0) parts.push(`${progress.failed} no se pudieron completar`);
+  return parts.join(" · ");
 }
 
 export interface SeriesReadiness {
@@ -140,6 +184,57 @@ export class SeriesAnalysisGate {
     this.running = null;
     this.finished.clear();
   }
+}
+
+// A single gate instance shared by every mount of the capture screen. Keeping
+// it outside the component means that unmounting and mounting again (a React
+// remount, a client-side navigation back and forth) cannot resurrect an attempt
+// that already finished. A full page reload does start a new gate: in that case
+// the protection against repeating work comes from the persisted state, because
+// views that are already stored are neither uploaded nor analysed again.
+let shared: SeriesAnalysisGate | null = null;
+
+export function sharedSeriesAnalysisGate(): SeriesAnalysisGate {
+  if (!shared) shared = new SeriesAnalysisGate();
+  return shared;
+}
+
+export interface StoredViewIdentity {
+  viewId: string;
+  imageId: string;
+  seriesId: string;
+}
+
+export interface StoredSeriesCheck {
+  ok: boolean;
+  missing: Direction[];
+  mismatched: Direction[];
+  reason: string | null;
+}
+
+// Before any inference runs, the four originals must be stored and their
+// identities must belong to the series being analysed. A single failed upload
+// keeps the whole series out of the analysis phase.
+export function verifyStoredSeries(
+  views: Partial<Record<Direction, StoredViewIdentity | null>>,
+  seriesId: string,
+): StoredSeriesCheck {
+  const missing = DIRECTIONS.filter((direction) => {
+    const view = views[direction];
+    return !view || !view.viewId || !view.imageId;
+  });
+  const mismatched = DIRECTIONS.filter((direction) => {
+    const view = views[direction];
+    return Boolean(view?.viewId) && view!.seriesId !== seriesId;
+  });
+  if (missing.length === 0 && mismatched.length === 0) {
+    return { ok: true, missing, mismatched, reason: null };
+  }
+  const names = [...missing, ...mismatched].map((direction) => DIRECTION_LABELS[direction]).join(", ");
+  const reason = mismatched.length > 0
+    ? `Estas fotografías no pertenecen a esta serie: ${names}. No se analiza nada para no mezclar árboles.`
+    : `No se pudieron guardar todas las fotografías (${names}). El análisis no empieza hasta que las cuatro estén guardadas.`;
+  return { ok: false, missing, mismatched, reason };
 }
 
 export type FailureKind = "upload" | "analysis";
@@ -229,11 +324,13 @@ export function slotStatusLabel(slot: SlotSnapshot): string {
     case "empty":
       return "Falta fotografía";
     case "ready":
-      return "Lista";
+      return "Lista para guardar";
     case "saving_original":
       return "Subiendo";
     case "preparing_ai":
       return "Preparando fotografía";
+    case "stored":
+      return "Fotografía guardada; falta analizar";
     case "processing":
     case "analyzing":
       return "Analizando";
@@ -247,6 +344,28 @@ export function slotStatusLabel(slot: SlotSnapshot): string {
     default:
       return "No se pudo completar";
   }
+}
+
+export interface RestoredViewInput {
+  // The capture_views row exists for this direction.
+  hasStoredView: boolean;
+  // A stored result with a usable rectified image was recovered.
+  hasUsableResult: boolean;
+  // The stored result asks for a new photograph.
+  repeat: boolean;
+  // A corner proposal was persisted and can be reviewed without re-uploading.
+  hasCornerProposal: boolean;
+}
+
+// State of a space when the same series is reopened. A stored photograph is
+// never presented as missing, and a view whose analysis never finished is not
+// presented as a failure: it is simply pending, with one clear retry.
+export function restoredSlotStatus(input: RestoredViewInput): SlotStatus {
+  if (!input.hasStoredView) return "empty";
+  if (input.repeat) return "repeat";
+  if (input.hasUsableResult) return "saved";
+  if (input.hasCornerProposal) return "four_points_ready";
+  return "stored";
 }
 
 export interface ContextEntry {

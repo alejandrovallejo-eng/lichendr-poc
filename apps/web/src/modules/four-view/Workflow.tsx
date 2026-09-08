@@ -70,6 +70,8 @@ import {
   type SeriesRunServices,
 } from "./capture-run";
 import { combineTrunkEstimates, correctTrunkEdges, summarizeCalibration } from "./science";
+import { RegionSuggestionsPanel } from "@/modules/region-suggestions/RegionSuggestionsPanel";
+import { regionSuggestionsEnabled } from "@/modules/region-suggestions/flag";
 import {
   DIRECTIONS,
   DIRECTION_LABELS,
@@ -348,6 +350,11 @@ export default function FourViewWorkflow() {
   const [treeId, setTreeId] = useState("");
   const [slots, setSlots] = useState<Record<Direction, SlotState>>(EMPTY_SLOTS);
   const [series, setSeries] = useState<CaptureSeriesRow | null>(null);
+  // NEXT_PUBLIC_ flags are inlined at build time, so the variable is read
+  // literally here instead of through a dynamic lookup.
+  const suggestionsEnabled = regionSuggestionsEnabled({
+    NEXT_PUBLIC_BIOCLIP_SUGGESTIONS: process.env.NEXT_PUBLIC_BIOCLIP_SUGGESTIONS,
+  });
   const [contextConfirmed, setContextConfirmed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -1596,6 +1603,26 @@ export default function FourViewWorkflow() {
               );
             })}
           </div>
+          {/* Pilot behind an OFF-by-default flag: with the flag off this block
+              is not rendered, so no BioCLIP call is ever made and the existing
+              four-view flow is untouched. */}
+          {suggestionsEnabled && series?.tree_sample_id ? (
+            <div className="grid gap-4">
+              {DIRECTIONS.map((direction) => {
+                const slot = slots[direction];
+                if (!slot.file || !slot.view) return null;
+                return (
+                  <RegionSuggestionsPanel
+                    key={`suggestions-${direction}`}
+                    treeSampleId={series.tree_sample_id}
+                    direction={direction}
+                    imageId={slot.view.image_id}
+                    file={slot.file}
+                  />
+                );
+              })}
+            </div>
+          ) : null}
           <section className="rounded border p-4" style={{ borderColor: "var(--ld-border)" }}>
             <h2 className="text-lg font-semibold">Tamaño del tronco</h2>
             <label className="mt-3 block max-w-md text-sm">

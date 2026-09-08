@@ -6,4 +6,4 @@ pillow-heif==0.21.0
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
 pydantic==2.10.4
-timm
+onnxruntime==1.20.1

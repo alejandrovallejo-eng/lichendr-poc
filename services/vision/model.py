@@ -10,20 +10,19 @@ import os
 import secrets
 import threading
 import time
+from contextlib import nullcontext
 from collections import OrderedDict
-from typing import TYPE_CHECKING
 
 import numpy as np
 import cv2
 from PIL import Image, ImageOps
 
-try:
-    import torch
-except ImportError:  # Allows validation/rectification tests without the model runtime.
-    torch = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:
-    pass
+torch = None
+if os.environ.get("VISION_RUNTIME", "torch") != "onnx":
+    try:
+        import torch
+    except ImportError:  # Allows validation/rectification tests without the model runtime.
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,11 @@ def current_rss_mb() -> float:
             resident_pages = int(status.read().split()[1])
         return resident_pages * page_size / (1024 * 1024)
     except (OSError, ValueError, IndexError):
-        return 0.0
+        try:
+            import psutil
+            return psutil.Process().memory_info().rss / (1024 * 1024)
+        except ImportError:
+            return 0.0
 
 
 def log_rss(stage: str) -> None:
@@ -86,6 +89,9 @@ def _release_predictor_image(predictor: object) -> None:
 
 def _load_mobilesam(checkpoint_path: str) -> object:
     """Load MobileSAM and return a SamPredictor."""
+    if os.environ.get("VISION_RUNTIME", "torch") == "onnx":
+        from onnx_predictor import OnnxPredictor
+        return OnnxPredictor(os.environ.get("MOBILESAM_ONNX_DIR", "/app/onnx"))
     if torch is None:
         raise RuntimeError("PyTorch is not installed.")
     from mobile_sam import SamPredictor, sam_model_registry  # type: ignore[import]
@@ -105,7 +111,7 @@ def load_model(checkpoint_path: str) -> None:
     with _model_lock:
         if _model_loaded:
             return
-        logger.info("Loading MobileSAM vit_t from %s …", checkpoint_path)
+        logger.info("Loading MobileSAM vit_t (%s) …", os.environ.get("VISION_RUNTIME", "torch"))
         started = time.monotonic()
         try:
             _predictor = _load_mobilesam(checkpoint_path)
@@ -132,9 +138,7 @@ def automatic_segment_image(image_rgb: np.ndarray) -> list[dict]:
     log_rss("automatic inference before embedding")
     with _inference_lock:
         try:
-            if torch is None:
-                raise RuntimeError("PyTorch is not installed.")
-            with torch.inference_mode():
+            with torch.inference_mode() if torch is not None else nullcontext():
                 _predictor.set_image(resized)  # type: ignore[union-attr]
                 log_rss("automatic inference after embedding")
                 for row in range(5):
@@ -284,9 +288,7 @@ def prepare_session(image_bytes: bytes, mime: str) -> tuple[str, int, int, float
 
     with _inference_lock:
         try:
-            if torch is None:
-                raise RuntimeError("PyTorch is not installed.")
-            with torch.inference_mode():
+            with torch.inference_mode() if torch is not None else nullcontext():
                 _predictor.set_image(image_np)  # type: ignore[union-attr]
                 features = _capture_predictor_features(_predictor)
                 log_rss("prepare after embedding")
@@ -353,9 +355,7 @@ def segment_session(
             )
             point_labels = np.array([p["label"] for p in points], dtype=np.int32)
 
-            if torch is None:
-                raise RuntimeError("PyTorch is not installed.")
-            with torch.inference_mode():
+            with torch.inference_mode() if torch is not None else nullcontext():
                 masks, scores, logits = _predictor.predict(  # type: ignore[union-attr]
                     point_coords=point_coords,
                     point_labels=point_labels,

@@ -2,6 +2,12 @@
 # docker-entrypoint.sh — download MobileSAM checkpoint if absent, then start server.
 set -eu
 
+# Graphs are checked and baked into the Docker image; no runtime download.
+if [ "${VISION_RUNTIME:-torch}" = "onnx" ]; then
+    exec uvicorn app:app --host 0.0.0.0 --port "${PORT:-8000}" \
+        --workers 1 --log-level info --timeout-keep-alive 75
+fi
+
 CHECKPOINT_DIR="/app/checkpoints"
 CHECKPOINT_FILE="${CHECKPOINT_DIR}/mobile_sam.pt"
 # Official MobileSAM weights — Apache-2.0 licence

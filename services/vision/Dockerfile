@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && python -c "import importlib.util; assert importlib.util.find_spec('torch') is None"
 COPY --from=exporter /build/onnx /app/onnx
 COPY app.py frame.py model.py onnx_predictor.py schemas.py verify_real_inference.py ./
-ENV VISION_RUNTIME=onnx MOBILESAM_ONNX_DIR=/app/onnx MALLOC_ARENA_MAX=2
+ENV VISION_RUNTIME=onnx MOBILESAM_ONNX_DIR=/app/onnx MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_MMAP_THRESHOLD_=131072
 # Gate the actual Linux runtime, not a mock: fail the build above 450 MiB.
 RUN python -c "from PIL import Image; Image.effect_noise((1536,2048),64).convert('RGB').save('/tmp/inference-check.jpg')" \
     && python verify_real_inference.py /tmp/inference-check.jpg --repeat 3 --max-peak-mb 450 \

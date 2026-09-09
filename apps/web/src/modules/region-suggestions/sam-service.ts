@@ -25,6 +25,10 @@ export const MAX_WORKING_SIDE = 1024;
 
 export interface SegmentationSession {
   sessionId: string;
+  // Signed authorisation issued by the server for this session. The browser only
+  // carries it back; it cannot read or forge it, and a ticket of another user is
+  // useless because the owner is taken from the session, never from the ticket.
+  ticket: string;
   // Dimensions of the ANALYSIS PROXY the session was prepared from, which is
   // the space every mask returned by the service lives in.
   width: number;
@@ -110,7 +114,7 @@ export async function prepareSegmentationSession(
     signal,
   });
   const payload = await readJson(response);
-  if (!response.ok || typeof payload.sessionId !== "string") {
+  if (!response.ok || typeof payload.sessionId !== "string" || typeof payload.ticket !== "string") {
     throw new SegmentationServiceError(
       typeof payload.error === "string"
         ? payload.error
@@ -123,18 +127,22 @@ export async function prepareSegmentationSession(
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
     throw new SegmentationServiceError("MobileSAM devolvió dimensiones inválidas.", response.status);
   }
-  return { sessionId: payload.sessionId, width, height };
+  return { sessionId: payload.sessionId, ticket: payload.ticket, width, height };
 }
 
 export async function segmentAtPoint(
-  sessionId: string,
+  session: SegmentationSession,
   point: { x: number; y: number },
   signal?: AbortSignal,
 ): Promise<{ candidates: ServiceCandidate[]; recommendedIndex: number }> {
   const response = await fetch("/api/vision/region-suggestions/segment", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, points: [{ x: point.x, y: point.y, label: 1 }] }),
+    body: JSON.stringify({
+      sessionId: session.sessionId,
+      ticket: session.ticket,
+      points: [{ x: point.x, y: point.y, label: 1 }],
+    }),
     signal,
   });
   const payload = await readJson(response);
@@ -153,11 +161,12 @@ export async function segmentAtPoint(
   };
 }
 
-export async function releaseSegmentationSession(sessionId: string): Promise<void> {
+export async function releaseSegmentationSession(session: SegmentationSession): Promise<void> {
   try {
-    await fetch(`/api/vision/region-suggestions/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-    });
+    await fetch(
+      `/api/vision/region-suggestions/sessions/${encodeURIComponent(session.sessionId)}`,
+      { method: "DELETE", headers: { "x-sam-session-ticket": session.ticket } },
+    );
   } catch {
     // The service expires its own sessions; a failure here is not a review error.
   }

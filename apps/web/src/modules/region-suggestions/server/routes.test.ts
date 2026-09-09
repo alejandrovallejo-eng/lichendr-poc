@@ -13,9 +13,9 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import sharp from "sharp";
-import { handleSamPrepare, handleSamSegment } from "./sam-handlers.ts";
+import { handleSamPrepare, handleSamRelease, handleSamSegment } from "./sam-handlers.ts";
 import { handleRegionSuggestions } from "./suggest.ts";
-import { clearSamSessions } from "./sessions.ts";
+import { issueSessionTicket } from "./session-ticket.ts";
 import { resetSerialCoordinator } from "./serial.ts";
 import { clearSuggestionCache } from "../../../app/api/vision/region-suggestions/cache.ts";
 
@@ -290,7 +290,6 @@ async function prepareDeps(
 }
 
 function reset(): void {
-  clearSamSessions();
   clearSuggestionCache();
   resetSerialCoordinator();
 }
@@ -389,6 +388,34 @@ test("four panels preparing at once are serialised into one worker", async () =>
   assert.equal(log.maxConcurrent, 1);
 });
 
+test("a session prepared in one instance is segmented in another", async () => {
+  // Vercel gives no affinity between the invocation that prepares and the one
+  // that segments (https://vercel.com/docs/functions). This simulates the second
+  // instance in the same way the reviewer reproduced it with a fresh process:
+  // NOTHING is carried over except what the browser sends back.
+  reset();
+  const log = emptyLog();
+  const instanceA = await prepareDeps({ log });
+  const prepared = await handleSamPrepare(
+    instanceA,
+    jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }),
+  );
+  assert.equal(prepared.status, 200);
+  const sessionId = prepared.body.sessionId as string;
+  const ticket = prepared.body.ticket as string;
+  assert.equal(typeof ticket, "string");
+
+  // A cold instance: no shared module state at all.
+  reset();
+  const instanceB = await prepareDeps({ log: emptyLog() });
+  const segmented = await handleSamSegment(
+    instanceB,
+    jsonRequest({ sessionId, ticket, points: [{ x: 10, y: 10, label: 1 }] }),
+  );
+  assert.equal(segmented.status, 200);
+  assert.equal(segmented.body.space, "analysis_proxy");
+});
+
 test("a session of another owner cannot be segmented", async () => {
   reset();
   const log = emptyLog();
@@ -398,19 +425,130 @@ test("a session of another owner cannot be segmented", async () => {
     jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }),
   );
   const sessionId = prepared.body.sessionId as string;
+  const ticket = prepared.body.ticket as string;
 
-  const intruderDeps = await prepareDeps({ log, user: OTHER_OWNER });
+  const intruderLog = emptyLog();
+  const intruderDeps = await prepareDeps({ log: intruderLog, user: OTHER_OWNER });
   const result = await handleSamSegment(
     intruderDeps,
-    jsonRequest({ sessionId, points: [{ x: 10, y: 10, label: 1 }] }),
+    jsonRequest({ sessionId, ticket, points: [{ x: 10, y: 10, label: 1 }] }),
   );
   assert.equal(result.status, 404);
+  // A stolen ticket does not reach MobileSAM either.
+  assert.ok(!intruderLog.urls.some((url) => url.endsWith("/segment")));
 
   const owned = await handleSamSegment(
     deps,
-    jsonRequest({ sessionId, points: [{ x: 10, y: 10, label: 1 }] }),
+    jsonRequest({ sessionId, ticket, points: [{ x: 10, y: 10, label: 1 }] }),
   );
   assert.equal(owned.status, 200);
+});
+
+test("a tampered, forged or absent ticket is refused", async () => {
+  reset();
+  const log = emptyLog();
+  const deps = await prepareDeps({ log });
+  const prepared = await handleSamPrepare(
+    deps,
+    jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }),
+  );
+  const sessionId = prepared.body.sessionId as string;
+  const ticket = prepared.body.ticket as string;
+  const [payload, signature] = ticket.split(".");
+  const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+
+  // Same signature, claims rewritten to another owner and another view.
+  const rewritten = Buffer.from(
+    JSON.stringify({ ...claims, ownerId: OTHER_OWNER, direction: "E" }),
+    "utf8",
+  ).toString("base64url");
+
+  const attempts = [
+    undefined,
+    "",
+    "not-a-ticket",
+    `${rewritten}.${signature}`,
+    `${payload}.${"0".repeat(64)}`,
+    // A ticket for a session id that is not the one being segmented.
+    issueSessionTicket({
+      sessionId: "session-abcdef-999",
+      ownerId: OWNER,
+      imageId: IMAGE_IDS.N,
+      treeSampleId: TREE,
+      direction: "N",
+      width: PROXY_WIDTH,
+      height: PROXY_HEIGHT,
+    }),
+  ];
+  for (const attempt of attempts) {
+    const attemptLog = emptyLog();
+    const attemptDeps = await prepareDeps({ log: attemptLog });
+    const result = await handleSamSegment(
+      attemptDeps,
+      jsonRequest({ sessionId, ticket: attempt, points: [{ x: 10, y: 10, label: 1 }] }),
+    );
+    assert.ok(result.status === 400 || result.status === 404, `status ${result.status}`);
+    assert.ok(!attemptLog.urls.some((url) => url.endsWith("/segment")));
+  }
+});
+
+test("an expired ticket is refused even with a valid signature", async () => {
+  reset();
+  const log = emptyLog();
+  const deps = await prepareDeps({ log });
+  const expired = issueSessionTicket(
+    {
+      sessionId: "session-abcdef-1",
+      ownerId: OWNER,
+      imageId: IMAGE_IDS.N,
+      treeSampleId: TREE,
+      direction: "N",
+      width: PROXY_WIDTH,
+      height: PROXY_HEIGHT,
+    },
+    Date.now() - 60_000,
+    1_000,
+  );
+  const result = await handleSamSegment(
+    deps,
+    jsonRequest({
+      sessionId: "session-abcdef-1",
+      ticket: expired,
+      points: [{ x: 10, y: 10, label: 1 }],
+    }),
+  );
+  assert.equal(result.status, 404);
+  assert.ok(!log.urls.some((url) => url.endsWith("/segment")));
+});
+
+test("releasing works from another instance and only for the owner", async () => {
+  reset();
+  const prepared = await handleSamPrepare(
+    await prepareDeps({ log: emptyLog() }),
+    jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }),
+  );
+  const sessionId = prepared.body.sessionId as string;
+  const ticket = prepared.body.ticket as string;
+
+  reset();
+  const intruderLog = emptyLog();
+  const intruder = await handleSamRelease(
+    await prepareDeps({ log: intruderLog, user: OTHER_OWNER }),
+    sessionId,
+    ticket,
+  );
+  assert.equal(intruder.status, 404);
+  assert.ok(!intruderLog.urls.some((url) => url.includes("/sessions/")));
+
+  const ownerLog = emptyLog();
+  const released = await handleSamRelease(
+    await prepareDeps({ log: ownerLog }),
+    sessionId,
+    ticket,
+  );
+  assert.equal(released.status, 200);
+  assert.equal(released.body.released, true);
+  assert.ok(ownerLog.urls.some((url) => url.includes("/sessions/")));
 });
 
 function suggestRequest() {

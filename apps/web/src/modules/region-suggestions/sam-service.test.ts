@@ -5,6 +5,7 @@ import {
   MAX_WORKING_SIDE,
   pickBestCandidate,
   prepareSegmentationSession,
+  segmentAtPoint,
   workingSize,
   type ServiceCandidate,
 } from "./sam-service.ts";
@@ -48,7 +49,15 @@ test("preparar una sesión envía una referencia, nunca la fotografía original"
       body: init?.body,
       contentType: (init?.headers as Record<string, string> | undefined)?.["Content-Type"] ?? null,
     });
-    return Response.json({ sessionId: "abcdefgh", width: 2048, height: 1536 });
+    if (url.endsWith("/prepare")) {
+      return Response.json({
+        sessionId: "abcdefgh",
+        ticket: "ticket-firmado.abc",
+        width: 2048,
+        height: 1536,
+      });
+    }
+    return Response.json({ candidates: [], recommendedIndex: 0, space: "analysis_proxy" });
   }) as typeof fetch;
   try {
     const session = await prepareSegmentationSession({
@@ -57,11 +66,20 @@ test("preparar una sesión envía una referencia, nunca la fotografía original"
       direction: "N",
     });
     assert.equal(session.sessionId, "abcdefgh");
+    assert.equal(session.ticket, "ticket-firmado.abc");
     assert.equal(session.width, 2048);
+    // El ticket firmado viaja en cada uso: el servidor no guarda estado local.
+    await segmentAtPoint(session, { x: 10, y: 10 });
+    assert.equal(calls[1].url, "/api/vision/region-suggestions/segment");
+    assert.deepEqual(JSON.parse(calls[1].body as string), {
+      sessionId: "abcdefgh",
+      ticket: "ticket-firmado.abc",
+      points: [{ x: 10, y: 10, label: 1 }],
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   // La ruta autorizada del piloto, no la genérica de vision-lab.
   assert.equal(calls[0].url, "/api/vision/region-suggestions/prepare");
   assert.equal(calls[0].contentType, "application/json");

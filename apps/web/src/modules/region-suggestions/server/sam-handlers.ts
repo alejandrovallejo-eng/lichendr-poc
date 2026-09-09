@@ -2,7 +2,11 @@
 //
 // These are separated from the Next.js route files so a test can drive the
 // whole route (flag, authentication, ownership, series readiness, serial
-// coordination, session ownership) with injected dependencies.
+// coordination, session authorisation) with injected dependencies.
+//
+// Authorisation of a prepared MobileSAM session travels in a short SIGNED
+// TICKET (`session-ticket.ts`), not in a module-level Map: on Vercel there is no
+// affinity between the instance that prepares and the instance that segments.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -88,6 +92,9 @@ export async function handleSamPrepare(
     status: 200,
     body: {
       sessionId: prepared.sessionId,
+      // Signed by the server, bound to this owner, session, photograph, view and
+      // proxy dimensions, and short-lived. It carries no URL, path or credential.
+      ticket: prepared.ticket,
       width: prepared.width,
       height: prepared.height,
       space: "analysis_proxy",
@@ -120,7 +127,13 @@ export async function handleSamSegment(
   const points = parsePoints(input.points);
   if ("error" in points) return { status: 400, body: { error: points.error } };
 
-  const result = await segmentWithOwnedSession(deps, owner, input.sessionId, points.points);
+  const result = await segmentWithOwnedSession(
+    deps,
+    owner,
+    input.sessionId,
+    input.ticket,
+    points.points,
+  );
   if ("error" in result) return { status: result.status, body: { error: result.error } };
   return {
     status: 200,
@@ -138,6 +151,7 @@ export async function handleSamSegment(
 export async function handleSamRelease(
   deps: SamRouteDeps,
   sessionId: string,
+  ticket: unknown,
 ): Promise<HandlerResult> {
   if (!deps.enabled) return { ...DISABLED, body: { ...DISABLED.body } };
   const owner = await requireOwner(deps);
@@ -145,8 +159,9 @@ export async function handleSamRelease(
   if (!SESSION_ID.test(sessionId)) {
     return { status: 400, body: { error: "La sesión de segmentación no es válida." } };
   }
-  const result = await releaseOwnedSession(deps, owner, sessionId);
-  return { status: result.released ? 200 : 404, body: { released: result.released } };
+  const result = await releaseOwnedSession(deps, owner, sessionId, ticket);
+  if ("error" in result) return { status: result.status, body: { error: result.error } };
+  return { status: 200, body: { released: result.released } };
 }
 
 function parseReference(

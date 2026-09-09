@@ -39,6 +39,7 @@ import {
 import {
   MAX_WORKING_SIDE,
   SegmentationServiceError,
+  type SegmentationSession,
   decodeMaskToWorkingGrid,
   pickBestCandidate,
   prepareSegmentationSession,
@@ -335,7 +336,7 @@ export function RegionSuggestionsPanel({
 
     let proposed: ProposedRegion[] = [];
     let workingGrid: GridState;
-    let sessionId = "";
+    let samSession: SegmentationSession | null = null;
     try {
       // Only a small reference travels: the server reads the private analysis
       // proxy after checking the owner, the image-view-tree association and the
@@ -345,7 +346,7 @@ export function RegionSuggestionsPanel({
         controller.signal,
       );
       if (generationRef.current !== generation) return;
-      sessionId = session.sessionId;
+      samSession = session;
       const size = workingSize(session.width, session.height, MAX_WORKING_SIDE);
       workingGrid = {
         width: size.width,
@@ -356,7 +357,7 @@ export function RegionSuggestionsPanel({
       const masks: Array<{ regionId: string; mask: Uint8Array; samScore: number }> = [];
       for (const [index, point] of gridPromptPoints().entries()) {
         const { candidates, recommendedIndex } = await segmentAtPoint(
-          sessionId,
+          session,
           point,
           controller.signal,
         );
@@ -394,7 +395,7 @@ export function RegionSuggestionsPanel({
       setPhase((current) => nextPhase(current, { type: "worker_failed" }));
       return;
     } finally {
-      if (sessionId) void releaseSegmentationSession(sessionId);
+      if (samSession) void releaseSegmentationSession(samSession);
     }
 
     if (generationRef.current !== generation) return;

@@ -24,11 +24,10 @@ import {
 } from "./context";
 import { runSerially } from "./serial";
 import {
-  forgetSamSession,
-  registerSamSession,
-  resolveSamSession,
-  type SamSessionRecord,
-} from "./sessions";
+  issueSessionTicket,
+  verifySessionTicket,
+  type SessionTicketClaims,
+} from "./session-ticket";
 
 export interface SamServiceDeps {
   supabase: SupabaseClient;
@@ -39,6 +38,10 @@ export interface SamServiceDeps {
 
 export interface PreparedSamSession {
   sessionId: string;
+  // Signed authorisation of this session. It replaces the module-level Map that
+  // could not survive a different serverless instance; it does NOT replace the
+  // ownership check, which is applied to it on every use.
+  ticket: string;
   width: number;
   height: number;
 }
@@ -125,7 +128,7 @@ export async function prepareSamSessionFromProxy(
       return { error: "MobileSAM devolvió una sesión inválida.", status: 502 };
     }
 
-    registerSamSession({
+    const ticket = issueSessionTicket({
       sessionId: payload.sessionId,
       ownerId,
       imageId: reference.imageId,
@@ -134,28 +137,64 @@ export async function prepareSamSessionFromProxy(
       width,
       height,
     });
-    return { sessionId: payload.sessionId, width, height };
+    return { sessionId: payload.sessionId, ticket, width, height };
   });
 }
 
 export interface SegmentationCandidates {
   candidates: unknown[];
   recommendedIndex: number;
-  session: SamSessionRecord;
+  session: SessionTicketClaims;
+}
+
+// Authorises a ticket for a given owner and, when it is valid, verifies AGAIN
+// that the photograph it names is still that view of that tree sample. The
+// ticket says what the server checked when it prepared the session; it is not
+// taken as a substitute for the current state of the database.
+async function authorizeTicket(
+  deps: SamServiceDeps,
+  ownerId: string,
+  sessionId: string,
+  ticket: unknown,
+): Promise<SessionTicketClaims | ContextFailure> {
+  const verified = verifySessionTicket(ticket, ownerId);
+  if ("failure" in verified) {
+    if (verified.failure === "not_configured") {
+      return {
+        error: "La asistencia no está configurada para firmar sesiones en este entorno.",
+        status: 503,
+      };
+    }
+    // Forged, tampered, expired and foreign tickets are indistinguishable from
+    // a session that never existed.
+    return { error: "La sesión de segmentación no existe o ha caducado.", status: 404 };
+  }
+  if (verified.claims.sessionId !== sessionId) {
+    return { error: "La sesión de segmentación no existe o ha caducado.", status: 404 };
+  }
+  const { data: view, error } = await deps.supabase
+    .from("capture_views")
+    .select("id, direction, image_id, capture_series_id, capture_series!inner(id, tree_sample_id)")
+    .eq("image_id", verified.claims.imageId)
+    .eq("direction", verified.claims.direction)
+    .eq("active", true)
+    .maybeSingle();
+  const series = (view as { capture_series?: { tree_sample_id?: string } } | null)?.capture_series;
+  if (error || !view || series?.tree_sample_id !== verified.claims.treeSampleId) {
+    return { error: "Esa fotografía ya no corresponde a esta vista de este árbol.", status: 404 };
+  }
+  return verified.claims;
 }
 
 export async function segmentWithOwnedSession(
   deps: SamServiceDeps,
   ownerId: string,
   sessionId: string,
+  ticket: unknown,
   points: readonly SamPoint[],
 ): Promise<SegmentationCandidates | ContextFailure> {
-  const session = resolveSamSession(sessionId, ownerId);
-  if (!session) {
-    // A session belonging to somebody else is indistinguishable from one that
-    // never existed.
-    return { error: "La sesión de segmentación no existe o ha caducado.", status: 404 };
-  }
+  const session = await authorizeTicket(deps, ownerId, sessionId, ticket);
+  if ("error" in session) return session;
   const fetchImpl = deps.fetchImpl ?? fetch;
   return runSerially(async () => {
     let payload: Record<string, unknown>;
@@ -185,12 +224,17 @@ export async function segmentWithOwnedSession(
   });
 }
 
+// Releasing a session is asking the vision service to forget it, which is the
+// only place where the session really exists. There is no local state to clear,
+// so a release works from any instance.
 export async function releaseOwnedSession(
   deps: SamServiceDeps,
   ownerId: string,
   sessionId: string,
-): Promise<{ released: boolean }> {
-  if (!forgetSamSession(sessionId, ownerId)) return { released: false };
+  ticket: unknown,
+): Promise<{ released: boolean } | ContextFailure> {
+  const session = await authorizeTicket(deps, ownerId, sessionId, ticket);
+  if ("error" in session) return session;
   const fetchImpl = deps.fetchImpl ?? fetch;
   try {
     await fetchImpl(

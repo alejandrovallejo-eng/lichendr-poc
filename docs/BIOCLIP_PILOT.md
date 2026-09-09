@@ -41,8 +41,9 @@ La primera versión del panel usaba **SlimSAM en el navegador**
 máscara" cambiaba únicamente un booleano. Ya no:
 
 - las regiones vienen del **MobileSAM `vit_t` del servicio** `services/vision`,
-  a través de las rutas existentes `/api/vision/prepare`, `/api/vision/segment` y
-  `/api/vision/sessions/:id`;
+  a través de las rutas autorizadas del piloto
+  `/api/vision/region-suggestions/{prepare,segment,sessions/:id}` (ver la
+  corrección `e884fed` más abajo);
 - las **máscaras reales** se conservan (RLE binario validado), se dibujan píxel a
   píxel en el overlay y son las que se miden;
 - el **editor cambia píxeles** (pincel añadir/borrar); `maskEdited` se deriva de
@@ -110,6 +111,63 @@ el proxy.
   **cuatro** vistas N/E/S/O tengan original y proxy listos antes de inferir;
 - las peticiones se atienden con un **coordinador serial** compartido, no con
   cuatro trabajos en paralelo.
+
+## Corrección de la revisión `e884fed`: la integración web
+
+El piloto funcionaba en local pero no desde la web. Cuatro recorridos concretos
+estaban mal y se han corregido:
+
+### 1. MobileSAM se prepara desde el proxy privado, no desde el original
+
+El panel subía el **original** por Vercel a `/api/vision/prepare`. Con una
+fotografía de 5712x4284 (24 470 208 px) el servicio responde
+`Decoded image is too large`: `services/vision/model.py` comprueba
+`MAX_DECODED_PIXELS = 20_000_000` **antes** de reducir. Ese límite **no** se ha
+subido.
+
+Ahora el navegador envía solo una **referencia** (`imageId`, `treeSampleId`,
+`direction`) a `/api/vision/region-suggestions/prepare`. El servidor:
+
+1. comprueba el *flag*, la sesión y el propietario;
+2. valida que la imagen es **esa** vista de **ese** árbol;
+3. exige las **cuatro** vistas N/E/S/O con original y proxy listos;
+4. lee el **proxy JPEG privado** (2048 px, ~3,1 MP) con una URL firmada de vida
+   corta que nunca sale en la respuesta, la UI ni los registros, y reenvía esos
+   bytes a MobileSAM.
+
+Las sesiones quedan **registradas por propietario** con TTL: una sesión ajena es
+indistinguible de una inexistente. Las rutas genéricas `/api/vision/*` que usa
+`vision-lab` no se han tocado. Ventaja lateral: las máscaras vuelven en el
+**espacio del proxy**, que es el mismo en el que se recortan los *crops* para
+BioCLIP, así que la geometría es una sola.
+
+### 2. ROI delimitable y máscaras omitidas
+
+El panel solo ofrecía «vista completa», y toda la fotografía no es un tronco.
+Ahora el ROI se **pinta con el pincel** sobre la fotografía; la vista completa
+sigue disponible como atajo, rotulada como exploratoria, y el porcentaje declara
+de dónde salió el ROI. Además hay un botón **«Añadir máscara omitida»** que crea
+una región vacía y pendiente, editable píxel a píxel, **incluso con cero
+propuestas**: que MobileSAM no proponga nada no demuestra ausencia de líquenes.
+Sin marco calibrado no hay cm² ni calidad del aire.
+
+### 3. Reintentar etiquetas ≠ regenerar regiones
+
+`run()` resegmentaba y hacía `setRegions(proposed)` antes de pedir BioCLIP, así
+que reintentar una clasificación fallida podía **borrar máscaras editadas**. Son
+dos acciones separadas: «Proponer regiones (MobileSAM)» regenera de forma
+explícita, y «Reintentar etiquetas (BioCLIP)» reutiliza las regiones actuales sin
+segmentar, conservando píxeles editados, ROI, geometría y decisiones.
+
+### 4. La caché nombra el modelo que la produjo
+
+La ruta leía y escribía con una clave **provisional** (`encoder`/`backend`
+`pending`, `head` `null`), de modo que una tanda *zero-shot* podía responder a una
+petición servida por la cabeza entrenada. Ahora se consulta `/health` del worker
+**antes** de decidir: la clave lleva la identidad real de encoder, *backend* y
+cabeza, solo se escribe si el modelo que respondió coincide con el que nombra la
+clave, y si la identidad **no se puede verificar** la reutilización se
+**desactiva** en vez de adivinarse.
 
 ### Caché real, no una clave devuelta
 
@@ -260,6 +318,18 @@ cd services/bioclip && python -m pytest tests -q
   solo suma la **unión** de máscaras aceptadas como liquen intersectada con el
   ROI, sin doble conteo, y solo se puede finalizar sin regiones pendientes y con
   la completitud del ROI revisada.
+- **Memoria**: el *smoke* local del revisor consumió un pico conjunto de
+  ~3047 MiB. No se promete 512 MiB para este recorrido ni se habilita ningún
+  worker remoto.
+- **Pruebas de esta corrección**: `npm run test:routes` (10 pruebas de ruta con
+  dependencias inyectadas: *flag* OFF sin una sola llamada a SAM, sin sesión sin
+  llamada, imagen que no es esa vista, serie incompleta, original sintético de
+  24,47 MP servido por su proxy, cuatro paneles serializados a concurrencia 1,
+  sesión ajena rechazada, cambio de cabeza que invalida la caché, identidad no
+  verificable que desactiva la reutilización) y `npm run test:unit` (233). Los
+  *fixtures* son **sintéticos**: en este entorno no hay fotografías ni pesos
+  privados, así que **ninguna** de estas pruebas afirma haber ejecutado la
+  cabeza real.
 - Mocks y datos sintéticos prueban el software, **no** la precisión biológica.
   Sin fotos ni pesos privados en este entorno, la inferencia real la ejecutó el
   revisor en local (ver más arriba); aquí solo se validó el software.

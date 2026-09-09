@@ -11,7 +11,7 @@ evidencia y limitaciones: [`docs/BIOCLIP_PILOT.md`](../../../../docs/BIOCLIP_PIL
 | `mask-codec.ts` | Códec RLE de máscaras binarias con validación estricta. |
 | `mask-edit.ts` | Edición real de píxeles (pincel añadir/borrar) y lectura de la máscara PNG del servicio. |
 | `sam-service.ts` | Cliente del **MobileSAM `vit_t` del servicio**, no del SlimSAM del navegador. Envía una **referencia de imagen**, nunca el original. |
-| `server/` | Recorrido en el servidor: autorización y series listas (`context.ts`), coordinador serial compartido (`serial.ts`), sesiones SAM por propietario (`sessions.ts`), preparación desde el proxy (`sam-sessions.ts`, `sam-handlers.ts`), identidad verificada del worker (`identity.ts`) y sugerencias (`suggest.ts`). Las rutas de `app/api` son adaptadores finos. |
+| `server/` | Recorrido en el servidor: autorización y series listas (`context.ts`), coordinador serial por instancia (`serial.ts`), ticket firmado de sesión SAM (`session-ticket.ts`), preparación desde el proxy (`sam-sessions.ts`, `sam-handlers.ts`), identidad verificada del worker (`identity.ts`) y sugerencias (`suggest.ts`). Las rutas de `app/api` son adaptadores finos. |
 | `review.ts` | Clave de caché/idempotencia, fusión que nunca sobrescribe decisiones humanas, guardas de contexto, fases. |
 | `coverage.ts` | Cobertura revisada por unión ∩ ROI, exploratoria y excluida de agregados científicos. |
 | `client.ts` | Rejilla fija de prompts, conversión de máscaras a regiones y llamada a la ruta. |

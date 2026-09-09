@@ -109,8 +109,13 @@ el proxy.
   revisiones se re-anclan por **hash de píxeles de la máscara**;
 - el servidor valida la asociación **imagen–vista–`tree_sample`** y que las
   **cuatro** vistas N/E/S/O tengan original y proxy listos antes de inferir;
-- las peticiones se atienden con un **coordinador serial** compartido, no con
-  cuatro trabajos en paralelo.
+- las peticiones se atienden con un **coordinador serial** compartido dentro de
+  **cada instancia**, no con cuatro trabajos en paralelo desde el navegador.
+  `server/serial.ts` es estado de módulo: Vercel puede ejecutar cada invocación
+  en una instancia distinta, así que **no** es exclusión global. El límite real
+  vive donde corre el modelo: `_inference_gate = asyncio.Semaphore(1)` en
+  `services/vision/app.py` (una inferencia a la vez) y `MAX_SESSIONS = 3` con TTL
+  de 15 min en `services/vision/model.py`. No se añade infraestructura nueva.
 
 ## Corrección de la revisión `e884fed`: la integración web
 
@@ -333,3 +338,65 @@ cd services/bioclip && python -m pytest tests -q
 - Mocks y datos sintéticos prueban el software, **no** la precisión biológica.
   Sin fotos ni pesos privados en este entorno, la inferencia real la ejecutó el
   revisor en local (ver más arriba); aquí solo se validó el software.
+
+## Corrección de la revisión `1fdfe33`: continuidad sin memoria local
+
+### 1. La autorización de sesión SAM ya no vive en un `Map` de módulo
+
+`server/sessions.ts` guardaba la autorización de la sesión MobileSAM en un `Map`
+a nivel de módulo: `prepare` escribía ahí y `segment`/`release` dependían de esa
+misma instancia. En Vercel no se puede exigir afinidad entre invocaciones
+(<https://vercel.com/docs/functions>), de modo que `segment` podía caer en otra
+instancia y responder 404 «La sesión de segmentación no existe o ha caducado»
+sin llegar nunca al servicio. El revisor lo reprodujo ejecutando `handleSamSegment`
+en un proceso Node nuevo; aquí se reprodujo igual, con instancias frías simuladas
+en la prueba de ruta (sobre `1fdfe33` falla con 404 y cero llamadas al *upstream*).
+
+Ahora `prepare` emite un **ticket corto firmado** (`server/session-ticket.ts`):
+
+- HMAC-SHA256 sobre `base64url(JSON)` con `VISION_SERVICE_TOKEN` (mínimo 32
+  caracteres, sólo servidor, el mismo secreto que ya firma los manifiestos de
+  proxy). Sin ese secreto configurado el ticket no se emite y el recorrido
+  asistido queda inhabilitado; **no se habilita ni se despliega nada aquí**;
+- afirma versión, `sessionId`, propietario, imagen, `tree_sample`, dirección,
+  dimensiones del proxy y expiración (15 min);
+- `segment` y `release` lo exigen. El propietario efectivo se toma **siempre** de
+  la sesión de quien llama, nunca del ticket: un ticket ajeno, caducado,
+  manipulado o inventado recibe el mismo 404 genérico y no llega al servicio;
+- además de verificar la firma, cada uso **revalida** la asociación
+  imagen–vista–`tree_sample` contra la base de datos. No se aceptan identificadores
+  arbitrarios.
+
+Límite honesto: al no haber estado local, `release` no puede *revocar* un ticket;
+pide al servicio de visión que olvide la sesión (allí sí existe, con
+`MAX_SESSIONS = 3` y TTL de 15 min) y el ticket caduca solo. Una revocación
+inmediata exigiría estado compartido, que no se contrata en este PR.
+
+### 2. Una respuesta tardía de BioCLIP no deshace el trabajo humano
+
+`classify` capturaba las regiones, las revisiones, el ROI y la completitud al
+**iniciar** la petición y los reescribía al resolver. Editar durante la espera
+perdía ese trabajo. Reproducido con una prueba de **componente** real en jsdom
+(`npm run test:component`): sobre `1fdfe33` la segunda máscara dibujada mientras
+se esperaba desaparece al llegar la respuesta. Ahora la respuesta se aplica sobre
+el estado **vivo**, la geometría del servidor solo se aplica a las regiones cuyo
+hash de píxeles no cambió, y las sugerencias de una máscara editada se descartan
+en vez de etiquetar píxeles que ya no son los medidos.
+
+### Pruebas ejecutadas en esta corrección
+
+- `npm run test:routes` — 14/14, incluidas: `prepare` en una instancia y
+  `segment` en otra fría, usuario ajeno, ticket manipulado/falsificado/ausente,
+  ticket caducado y `release` desde otra instancia y por usuario ajeno.
+- `npm run test:unit` — 233/233.
+- `npm run test:component` — 1/1, la comprobación de preservación humana descrita
+  arriba. Usa `jsdom`, un `File` sintético y una respuesta de sugerencias
+  simulada.
+- `npm run test:proxy`, `npm run lint` y `npm run build`.
+- Las pruebas «antes» se ejecutaron sobre un *worktree* de `1fdfe33` para
+  comprobar que fallan sin la corrección.
+
+Todo lo anterior son **simulaciones**: siguen sin existir en este entorno las
+fotografías ni los pesos privados, así que ninguna prueba de este PR afirma haber
+ejecutado MobileSAM ni BioCLIP reales.
+

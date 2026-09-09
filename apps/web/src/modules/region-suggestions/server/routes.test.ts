@@ -369,7 +369,7 @@ test("a 24.47 MP original is segmented through its proxy, never itself", async (
   assert.ok(ORIGINAL_WIDTH * ORIGINAL_HEIGHT > 20_000_000);
 });
 
-test("four panels preparing at once are serialised into one worker", async () => {
+test("four panels preparing at once are serialised within one instance", async () => {
   reset();
   const log = emptyLog();
   const deps = await prepareDeps({ log });

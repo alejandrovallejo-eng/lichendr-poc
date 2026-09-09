@@ -113,6 +113,20 @@ export function RegionSuggestionsPanel({
   const previewRef = useRef<HTMLImageElement | null>(null);
   const manualCounterRef = useRef(0);
 
+  // Live mirrors of the state a slow BioCLIP answer must not roll back. They are
+  // committed after every render, so a callback created before the request still
+  // sees what the reviewer has done since.
+  const regionsRef = useRef<ProposedRegion[]>(regions);
+  const reviewsRef = useRef<RegionReview[]>(reviews);
+  const roiRleRef = useRef<string | null>(roiRle);
+  const completenessRef = useRef(completeness);
+  useEffect(() => {
+    regionsRef.current = regions;
+    reviewsRef.current = reviews;
+    roiRleRef.current = roiRle;
+    completenessRef.current = completeness;
+  }, [completeness, regions, reviews, roiRle]);
+
   const previewUrl = useMemo(() => URL.createObjectURL(file), [file]);
   useEffect(() => () => URL.revokeObjectURL(previewUrl), [previewUrl]);
 
@@ -252,6 +266,10 @@ export function RegionSuggestionsPanel({
         suggestionVersion: SUGGESTION_VERSION,
       };
 
+      // What the masks looked like when the request left. Anything the reviewer
+      // edits while waiting is newer than the answer and wins.
+      const shaAtRequest = new Map(candidates.map((region) => [region.regionId, region.maskSha]));
+
       try {
         const response = await requestRegionSuggestions(
           { imageId, treeSampleId, direction, requestToken },
@@ -275,20 +293,32 @@ export function RegionSuggestionsPanel({
           // A superseded or foreign answer is discarded, never applied.
           return;
         }
-        const incoming = response.suggestions.map((suggestion) => ({
-          ...suggestion,
-          backend: (response.backend === "ridge_head" ? "ridge_head" : "zeroshot") as
-            | "zeroshot"
-            | "ridge_head",
-          encoderId: response.provenance.encoderId,
-          headSha256: response.provenance.headSha256,
-          preprocess: response.provenance.preprocessVersion,
-          versions: { schema: response.provenance.suggestionVersion },
-        }));
-        // Only the crop geometry of the classified regions is updated; masks,
-        // ROI and human decisions are untouched.
-        const withGeometry = applyServerGeometry(candidates, response.geometry ?? []);
-        const mergedReviews = mergeReviews(reviews, withGeometry);
+        // The answer is applied over the LIVE state, never over the snapshot
+        // taken when the request started: while BioCLIP was answering the
+        // reviewer may have edited a mask, painted the ROI or decided a region.
+        const liveRegions = regionsRef.current;
+        const stillValid = (regionId: string): boolean => {
+          const live = liveRegions.find((region) => region.regionId === regionId);
+          return live !== undefined && live.maskSha === shaAtRequest.get(regionId);
+        };
+        const incoming = response.suggestions
+          .filter((suggestion) => stillValid(suggestion.regionId))
+          .map((suggestion) => ({
+            ...suggestion,
+            backend: (response.backend === "ridge_head" ? "ridge_head" : "zeroshot") as
+              | "zeroshot"
+              | "ridge_head",
+            encoderId: response.provenance.encoderId,
+            headSha256: response.provenance.headSha256,
+            preprocess: response.provenance.preprocessVersion,
+            versions: { schema: response.provenance.suggestionVersion },
+          }));
+        // Only the crop geometry of regions whose pixels did NOT change is
+        // updated; an edited mask keeps its own geometry, and ROI, completeness
+        // and human decisions are read live too.
+        const geometry = (response.geometry ?? []).filter((entry) => stillValid(entry.regionId));
+        const withGeometry = applyServerGeometry(liveRegions, geometry);
+        const mergedReviews = mergeReviews(reviewsRef.current, withGeometry);
         setRegions(withGeometry);
         setSuggestions(incoming);
         setReviews(mergedReviews);
@@ -301,8 +331,8 @@ export function RegionSuggestionsPanel({
           suggestions: incoming,
           reviews: mergedReviews,
           backend: response.backend,
-          completenessReviewed: completeness,
-          roiRle,
+          completenessReviewed: completenessRef.current,
+          roiRle: roiRleRef.current,
         });
         setPhase((current2) => nextPhase(current2, { type: "labels_ready" }));
       } catch (error) {
@@ -316,7 +346,7 @@ export function RegionSuggestionsPanel({
         setPhase((current2) => nextPhase(current2, { type: "worker_failed" }));
       }
     },
-    [completeness, direction, imageId, ownerId, persist, reviews, roiRle, treeSampleId],
+    [direction, imageId, ownerId, persist, treeSampleId],
   );
 
   // Explicit regeneration: MobileSAM proposes again and the previous proposals

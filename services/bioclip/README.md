@@ -7,8 +7,14 @@ Worker **local** y aislado que sugiere una de tres etiquetas (`lichen`, `moss`,
 - Dependencias fijadas en `requirements.txt`. **No** se añaden PyTorch ni BioCLIP
   al servicio ONNX de 512 MB (`services/vision`): el pico real observado es de
   ~3–3.3 GiB.
-- Modelo cargado una sola vez, concurrencia 1, cola acotada, timeout y límites de
-  bytes, píxeles y regiones por petición.
+- Modelo cargado una sola vez, **concurrencia 1 real** (el semáforo se libera
+  cuando la inferencia termina de verdad, no cuando expira el plazo de quien
+  espera), cola acotada y plazo que incluye la espera en cola.
+- Admisión **antes** de decodificar, tamaño acotado por los bytes realmente
+  recibidos (no solo por `Content-Length`), topes agregados de bytes y píxeles
+  alineados con la ruta web, y microlotes en el encoder.
+- Una cabeza NPZ configurada que no valida devuelve `503 head_invalid`: nunca
+  degrada en silencio a *zero-shot*.
 - No abre túneles ni se publica. **Dónde se alojará es una decisión pendiente**:
   aquí no se contrata ni se despliega nada.
 - Las puntuaciones son crudas, no probabilidades; toda sugerencia queda

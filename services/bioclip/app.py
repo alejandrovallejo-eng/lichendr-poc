@@ -24,6 +24,7 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -37,6 +38,8 @@ from constants import (
     MAX_QUEUE_DEPTH,
     MAX_REGIONS_PER_REQUEST,
     MAX_REQUEST_BYTES,
+    MAX_TOTAL_CROP_BYTES,
+    MAX_TOTAL_CROP_PIXELS,
     REQUEST_TIMEOUT_SECONDS,
 )
 from encoder import PREPROCESS_MODES, EncoderUnavailable, load_encoder
@@ -90,16 +93,73 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
 app = FastAPI(title="LichenDR BioCLIP worker", lifespan=lifespan)
 
 
-@app.middleware("http")
-async def limit_body_size(request: Request, call_next):
-    declared = request.headers.get("content-length")
-    if declared is not None:
-        try:
-            if int(declared) > MAX_REQUEST_BYTES:
-                return JSONResponse({"detail": "request_too_large"}, status_code=413)
-        except ValueError:
-            return JSONResponse({"detail": "invalid_content_length"}, status_code=400)
-    return await call_next(request)
+class BodySizeLimitMiddleware:
+    """Reject oversized bodies by the bytes actually received.
+
+    `Content-Length` is only a declaration and it is absent from a chunked
+    request, so checking that header alone does not bound anything. The real
+    body is counted as it streams and the request is rejected as soon as the
+    limit is passed, before anything is decoded.
+
+    The overflow cannot be signalled by raising: FastAPI wraps body reading in a
+    broad `except Exception` and would turn it into a generic 400. So the
+    receive channel is closed and the response is replaced with an explicit 413.
+    """
+
+    def __init__(self, app, max_bytes: int = MAX_REQUEST_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.decode("latin-1").lower(): value for key, value in scope.get("headers", [])}
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared.decode("latin-1")) > self.max_bytes:
+                    await self._reject(send, 413, "request_too_large")
+                    return
+            except ValueError:
+                await self._reject(send, 400, "invalid_content_length")
+                return
+
+        state = {"received": 0, "exceeded": False, "replaced": False}
+
+        async def counting_receive():
+            message = await receive()
+            if message.get("type") == "http.request":
+                state["received"] += len(message.get("body", b""))
+                if state["received"] > self.max_bytes:
+                    state["exceeded"] = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def limiting_send(message):  # noqa: ANN001
+            if not state["exceeded"]:
+                await send(message)
+                return
+            if state["replaced"]:
+                return
+            if message.get("type") == "http.response.start":
+                state["replaced"] = True
+                await self._reject(send, 413, "request_too_large")
+
+        await self.app(scope, counting_receive, limiting_send)
+
+    @staticmethod
+    async def _reject(send, status: int, detail: str) -> None:  # noqa: ANN001
+        response = JSONResponse({"detail": detail}, status_code=status)
+        await response({"type": "http"}, _empty_receive, send)  # type: ignore[misc]
+
+
+async def _empty_receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 def _require_token(authorization: str | None) -> None:
@@ -143,34 +203,41 @@ async def suggest_regions(
         raise HTTPException(status_code=503, detail="encoder_unavailable")
     if payload.preprocess not in PREPROCESS_MODES:
         raise HTTPException(status_code=400, detail="invalid_preprocess")
+    # A head that was configured but failed validation must NOT silently fall
+    # back to zero-shot: the caller asked for the trained head, so the request
+    # is rejected with an explicit reason that the route forwards to the UI.
+    if HEAD_PATH and _state["head"] is None:
+        raise HTTPException(status_code=503, detail="head_invalid")
 
-    crops = [_decode_crop(region.cropPngBase64) for region in payload.regions]
     region_ids = [region.regionId for region in payload.regions]
     if len(set(region_ids)) != len(region_ids):
         raise HTTPException(status_code=400, detail="duplicate_region_id")
 
+    # --- Admission ----------------------------------------------------------
+    # Everything cheap happens BEFORE decoding: queue depth, aggregate encoded
+    # bytes and aggregate pixels (read from the image headers, which does not
+    # rasterise anything). Decoding first would let a rejected request allocate
+    # hundreds of megabytes.
     if _queue_depth >= MAX_QUEUE_DEPTH:
         raise HTTPException(status_code=429, detail="queue_full")
+
+    admitted = [_admit_crop(region.cropPngBase64) for region in payload.regions]
+    total_bytes = sum(len(item.raw) for item in admitted)
+    if total_bytes > MAX_TOTAL_CROP_BYTES:
+        raise HTTPException(status_code=413, detail="request_too_large")
+    total_pixels = sum(item.width * item.height for item in admitted)
+    if total_pixels > MAX_TOTAL_CROP_PIXELS:
+        raise HTTPException(status_code=413, detail="request_too_many_pixels")
 
     _queue_depth += 1
     started = time.monotonic()
     try:
-        async with _inference_gate:
-            batch = await asyncio.wait_for(
-                asyncio.to_thread(
-                    suggest,
-                    encoder,
-                    crops,
-                    region_ids,
-                    preprocess_mode=payload.preprocess,
-                    trained_head=_state["head"],
-                ),
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="inference_timeout") from None
-    except (ValueError, HeadValidationError):
-        raise HTTPException(status_code=422, detail="inference_rejected") from None
+        batch = await _run_inference(
+            encoder,
+            admitted,
+            region_ids,
+            preprocess_mode=payload.preprocess,
+        )
     finally:
         _queue_depth -= 1
 
@@ -200,7 +267,89 @@ async def suggest_regions(
     }
 
 
-def _decode_crop(encoded: str) -> Image.Image:
+async def _run_inference(
+    encoder,  # noqa: ANN001
+    admitted: list["AdmittedCrop"],
+    region_ids: list[str],
+    *,
+    preprocess_mode: str,
+):
+    """Run exactly one inference at a time, timeouts included.
+
+    The gate is a real gate. `asyncio.wait_for` only cancels the *waiting*: the
+    thread started by `asyncio.to_thread` keeps running to completion. Releasing
+    the semaphore on timeout therefore admitted a second inference while the
+    first one was still using the model and the memory — the concurrency of 1
+    this worker promises was not held.
+
+    So: the deadline covers the queue wait as well as the inference, the task is
+    shielded from the timeout cancellation, and the gate is released only by the
+    done callback, when the thread has really finished.
+    """
+
+    deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+    try:
+        await asyncio.wait_for(
+            _inference_gate.acquire(),
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="inference_timeout") from None
+
+    task = asyncio.ensure_future(
+        asyncio.to_thread(
+            _decode_and_suggest,
+            encoder,
+            admitted,
+            region_ids,
+            preprocess_mode,
+            _state["head"],
+        )
+    )
+    # Released when the work actually ends, never when a caller gives up.
+    task.add_done_callback(lambda _task: _inference_gate.release())
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="inference_timeout") from None
+    except (ValueError, HeadValidationError):
+        raise HTTPException(status_code=422, detail="inference_rejected") from None
+
+
+def _decode_and_suggest(encoder, admitted, region_ids, preprocess_mode, head):  # noqa: ANN001
+    """Decode inside the worker thread and hand the crops to the encoder."""
+
+    crops = [_decode_admitted(item) for item in admitted]
+    return suggest(
+        encoder,
+        crops,
+        region_ids,
+        preprocess_mode=preprocess_mode,
+        trained_head=head,
+    )
+
+
+@dataclass(frozen=True)
+class AdmittedCrop:
+    """A crop that passed admission: real bytes and header-declared size."""
+
+    raw: bytes
+    width: int
+    height: int
+
+
+def _admit_crop(encoded: str) -> AdmittedCrop:
+    """Validate a crop without rasterising it.
+
+    Base64 is decoded (cheap, bounded by the already enforced body limit) and
+    only the image *header* is parsed, so the pixel budget is known before any
+    decoding happens.
+    """
+
     if len(encoded) > MAX_CROP_BYTES * 4 // 3 + 4:
         raise HTTPException(status_code=413, detail="crop_too_large")
     try:
@@ -210,15 +359,27 @@ def _decode_crop(encoded: str) -> Image.Image:
     if not raw or len(raw) > MAX_CROP_BYTES:
         raise HTTPException(status_code=413, detail="crop_too_large")
     try:
-        image = Image.open(io.BytesIO(raw))
-        image.verify()
-        image = Image.open(io.BytesIO(raw))
-        if image.format not in {"PNG", "JPEG", "WEBP"}:
-            raise HTTPException(status_code=415, detail="unsupported_crop_format")
-        if image.width * image.height > MAX_CROP_PIXELS:
-            raise HTTPException(status_code=413, detail="crop_too_many_pixels")
-        return image.convert("RGB")
+        with Image.open(io.BytesIO(raw)) as image:
+            image_format = image.format
+            width, height = image.size
     except HTTPException:
         raise
-    except Exception:  # noqa: BLE001 - any decoding failure is a rejection
+    except Exception:  # noqa: BLE001 - any header failure is a rejection
         raise HTTPException(status_code=400, detail="invalid_crop") from None
+    if image_format not in {"PNG", "JPEG", "WEBP"}:
+        raise HTTPException(status_code=415, detail="unsupported_crop_format")
+    if width <= 0 or height <= 0 or width * height > MAX_CROP_PIXELS:
+        raise HTTPException(status_code=413, detail="crop_too_many_pixels")
+    return AdmittedCrop(raw=raw, width=width, height=height)
+
+
+def _decode_admitted(crop: AdmittedCrop) -> Image.Image:
+    """Rasterise an already admitted crop."""
+
+    try:
+        image = Image.open(io.BytesIO(crop.raw))
+        image.verify()
+        image = Image.open(io.BytesIO(crop.raw))
+        return image.convert("RGB")
+    except Exception:  # noqa: BLE001 - any decoding failure is a rejection
+        raise ValueError("El recorte no se pudo decodificar.") from None

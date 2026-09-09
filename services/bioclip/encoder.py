@@ -31,6 +31,7 @@ from PIL import Image
 
 from constants import (
     ENCODER_ARCHITECTURE,
+    ENCODER_MICROBATCH_SIZE,
     ENCODER_CONFIG_FILENAME,
     ENCODER_EMBED_DIM,
     ENCODER_ID,
@@ -187,15 +188,33 @@ def l2_normalize(matrix: np.ndarray) -> np.ndarray:
     return features / norms
 
 
-def encode_images(encoder: LoadedEncoder, crops: list[Image.Image], mode: str) -> np.ndarray:
-    """Encode crops into L2-normalised embeddings (one row per crop)."""
+def encode_images(
+    encoder: LoadedEncoder,
+    crops: list[Image.Image],
+    mode: str,
+    microbatch_size: int = ENCODER_MICROBATCH_SIZE,
+) -> np.ndarray:
+    """Encode crops into L2-normalised embeddings (one row per crop).
+
+    The crops are fed to the encoder in microbatches instead of as one whole
+    batch: a full request of large regions would otherwise allocate the entire
+    preprocessed tensor and its activations at once, and the measured peak of
+    this pilot is already around 2.2-3.3 GiB of RSS on CPU.
+    """
 
     import torch  # noqa: PLC0415
 
-    batch = np.stack([preprocess_crop(crop, mode, encoder.image_size) for crop in crops])
-    with torch.inference_mode():
-        features = encoder.model.encode_image(torch.from_numpy(batch))
-    return l2_normalize(features.detach().cpu().numpy())
+    if microbatch_size < 1:
+        raise ValueError("El tamaño de microlote debe ser al menos 1.")
+    chunks: list[np.ndarray] = []
+    for start in range(0, len(crops), microbatch_size):
+        window = crops[start : start + microbatch_size]
+        batch = np.stack([preprocess_crop(crop, mode, encoder.image_size) for crop in window])
+        with torch.inference_mode():
+            features = encoder.model.encode_image(torch.from_numpy(batch))
+        chunks.append(np.asarray(features.detach().cpu().numpy(), dtype=np.float32))
+        del batch, features
+    return l2_normalize(np.concatenate(chunks, axis=0))
 
 
 def encode_texts(encoder: LoadedEncoder, prompts: list[str]) -> np.ndarray:

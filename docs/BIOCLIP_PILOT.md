@@ -34,6 +34,35 @@ cuente cobertura.
   **no** se añaden al servicio ONNX de 512 MB (`services/vision`), que queda
   intacto.
 
+## Corrección de la revisión `ce47457`
+
+La primera versión del panel usaba **SlimSAM en el navegador**
+(`modules/vision-lab`), descartaba las máscaras dibujando solo cajas y "editar
+máscara" cambiaba únicamente un booleano. Ya no:
+
+- las regiones vienen del **MobileSAM `vit_t` del servicio** `services/vision`,
+  a través de las rutas existentes `/api/vision/prepare`, `/api/vision/segment` y
+  `/api/vision/sessions/:id`;
+- las **máscaras reales** se conservan (RLE binario validado), se dibujan píxel a
+  píxel en el overlay y son las que se miden;
+- el **editor cambia píxeles** (pincel añadir/borrar); `maskEdited` se deriva de
+  una diferencia real de píxeles y el hash de la máscara se recalcula, de modo
+  que una decisión humana no se conserva solo por `regionId` si la máscara cambió.
+
+### Smoke real ejecutado por el revisor (local, fotos privadas no publicadas)
+
+MobileSAM `vit_t` + BioCLIP 2 + cabeza Ridge, con Python 3.12 / torch 2.14 /
+open_clip 3.3 (runtime local del revisor, **distinto** del *lock* de este PR):
+
+| ensayo | propuestas | ranking | tiempo | RSS pico |
+| --- | --- | --- | --- | --- |
+| fotografía positiva | 5 regiones | 4 liquen, 1 musgo | 3,7 s | ~2213 MiB (2 hilos CPU) |
+| control negativo | 2 regiones | corteza | 3,4 s | — |
+
+Limitación honesta: **el overlay positivo incluye fondo y ramas**, así que ese
+ensayo *no* valida la cobertura. No se ha reentrenado ni se han ajustado umbrales
+con esas fotografías, que no son accesibles en este entorno.
+
 ## Arquitectura del piloto
 
 - `services/bioclip/`: worker **local** aislado (FastAPI). Desactivado salvo
@@ -46,8 +75,50 @@ cuente cobertura.
   `vision-analysis-proxy`, corta los recortes en el servidor desde el proxy
   privado y llama al worker local. Nunca acepta una URL arbitraria (sin SSRF) y
   ni las credenciales ni las URLs firmadas salen en UI, resultados o logs.
-- `apps/web/src/modules/region-suggestions/`: lógica pura (geometría de recortes,
-  revisión, cobertura, flag, caché) y panel de revisión en español.
+- `apps/web/src/modules/region-suggestions/`: lógica pura (códec y edición de
+  máscaras, geometría de recortes, revisión, cobertura, flag) y panel de revisión
+  en español.
+
+### Contrato único de geometría y EXIF
+
+La orientación EXIF se aplica **una sola vez, aguas arriba**: el proxy se genera
+con `sharp .rotate()` y el servicio de visión decodifica con `exif_transpose`.
+Máscaras y proxy comparten por tanto el mismo espacio canónico y solo difieren en
+escala, así que el piloto **nunca vuelve a rotar coordenadas**.
+
+- el cliente mide la caja **ajustada** de la máscara sobre la rejilla de trabajo
+  y envía esa caja más las dimensiones de la rejilla;
+- el servidor la escala a píxeles del proxy y aplica el margen de contexto
+  **exactamente una vez**, al cortar el recorte;
+- el servidor devuelve `cropBoxNormalized` y el overlay dibuja ese recorte, de
+  modo que lo que se ve es lo que vio BioCLIP.
+
+Antes la caja se expandía en el cliente **y** otra vez en `cutCrops`, y el panel
+fijaba `orientation=1`/`proxyScale=1` sobre el original mientras la ruta recortaba
+el proxy.
+
+### Guardas de contexto y validación de la serie
+
+- cada ejecución incrementa una **generación** guardada en una `ref`; al volver de
+  cada `await` se compara contra la generación **viva** y se usa un
+  `AbortController`. Comparar el contexto capturado con su propio eco siempre
+  coincidiría y dejaría que una respuesta vieja pisara la serie activa;
+- al cambiar de propietario/árbol/vista/imagen el panel **limpia** su estado;
+- la persistencia se indexa por propietario + árbol + vista + imagen y las
+  revisiones se re-anclan por **hash de píxeles de la máscara**;
+- el servidor valida la asociación **imagen–vista–`tree_sample`** y que las
+  **cuatro** vistas N/E/S/O tengan original y proxy listos antes de inferir;
+- las peticiones se atienden con un **coordinador serial** compartido, no con
+  cuatro trabajos en paralelo.
+
+### Caché real, no una clave devuelta
+
+Devolver una `cacheKey` después de inferir no es caché. Ahora hay **reutilización
+acotada de verdad**: la entrada se consulta antes de inferir y se escribe después,
+en un LRU en memoria acotado por propietario. La clave incluye propietario, hash
+de los **bytes del proxy**, hash de los **píxeles de las máscaras**, encoder,
+cabeza, preprocesado y versiones. La firma del manifiesto es un HMAC de metadatos,
+**no** un SHA de la imagen, y ya no se usa como tal.
 
 ## Modelo: descarga explícita y verificada
 
@@ -103,8 +174,10 @@ BIOCLIP_HEAD_SHA256=1fbef280fbc574488996c50cdecf83fc05636366c4b4520581f6da3707e4
 BIOCLIP_WORKER_ENABLED=1 python -m uvicorn app:app --port 8500
 ```
 
-Si falta la cabeza, el *zero-shot* funciona igual y el backend queda registrado
-como `zeroshot`.
+Si **no** se configura cabeza, el *zero-shot* funciona igual y el backend queda
+registrado como `zeroshot`. Si se configura una cabeza y **no** valida, el worker
+responde `503 head_invalid` y la ruta lo traduce a un aviso explícito en la UI:
+nunca degrada en silencio a *zero-shot* cuando se pidió la cabeza entrenada.
 
 ## Comandos exactos
 
@@ -158,6 +231,21 @@ cd apps/web && npm run test:unit && npm run lint && npm run build
 cd services/bioclip && python -m pytest tests -q
 ```
 
+### Límites y concurrencia del worker
+
+- el tamaño del cuerpo se acota por los **bytes realmente recibidos** (una
+  petición *chunked* no declara `Content-Length`, así que ese encabezado por sí
+  solo no acota nada);
+- la **admisión ocurre antes de decodificar**: cola, bytes agregados y píxeles
+  agregados se comprueban leyendo solo la cabecera de cada imagen;
+- el encoder procesa **microlotes** en vez del lote entero;
+- los topes agregados de la ruta y del worker están alineados (8 MiB y 24 MPx);
+- **bug corregido**: `asyncio.wait_for` solo cancela la espera; el hilo de
+  `asyncio.to_thread` seguía corriendo, así que liberar el semáforo al expirar el
+  plazo admitía una segunda inferencia (pico de 2 con concurrencia prometida de
+  1). Ahora el plazo incluye la espera en cola y el semáforo se libera solo
+  cuando el trabajo termina de verdad. Hay test de regresión de "máximo 1".
+
 ## Limitaciones y decisiones pendientes
 
 - **Hosting sin decidir**: dónde vivirá el worker (Mac del revisor, máquina
@@ -167,4 +255,11 @@ cd services/bioclip && python -m pytest tests -q
 - **Persistencia**: la restauración tras recarga usa almacenamiento local
   acotado al propietario. No se añade migración ni se toca RLS; la persistencia
   duradera queda como decisión abierta.
+- **Cobertura**: el ROI es el tronco que confirma la persona revisora. Las
+  propuestas de MobileSAM no demuestran liquen píxel a píxel, así que la cobertura
+  solo suma la **unión** de máscaras aceptadas como liquen intersectada con el
+  ROI, sin doble conteo, y solo se puede finalizar sin regiones pendientes y con
+  la completitud del ROI revisada.
 - Mocks y datos sintéticos prueban el software, **no** la precisión biológica.
+  Sin fotos ni pesos privados en este entorno, la inferencia real la ejecutó el
+  revisor en local (ver más arriba); aquí solo se validó el software.

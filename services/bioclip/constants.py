@@ -79,5 +79,16 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_CROP_BYTES = 2 * 1024 * 1024
 MAX_CROP_PIXELS = 4096 * 4096
 MAX_REGIONS_PER_REQUEST = 24
+
+# Aggregate caps. They are the ones the web route must respect: 24 regions of
+# 1 MiB each would be 24 MiB, far above `MAX_REQUEST_BYTES`, so the route caps
+# the total payload at the same 8 MiB and the same aggregate pixel budget.
+MAX_TOTAL_CROP_BYTES = MAX_REQUEST_BYTES
+MAX_TOTAL_CROP_PIXELS = 24 * 1024 * 1024
+
+# The encoder runs in microbatches so peak memory does not grow with the number
+# of regions in a single request.
+ENCODER_MICROBATCH_SIZE = 4
+
 MAX_QUEUE_DEPTH = 4
 REQUEST_TIMEOUT_SECONDS = 120.0

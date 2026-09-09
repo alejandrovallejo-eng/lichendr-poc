@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   MAX_WORKING_SIDE,
   pickBestCandidate,
+  prepareSegmentationSession,
   workingSize,
   type ServiceCandidate,
 } from "./sam-service.ts";
@@ -35,4 +36,41 @@ test("se elige la candidata recomendada de MobileSAM salvo que esté vacía", ()
   assert.equal(pickBestCandidate([candidate("a", 0.4, 0), candidate("b", 0.9, 50)], 0)?.id, "b");
   assert.equal(pickBestCandidate([candidate("a", 0.4, 0)], 0), null);
   assert.equal(pickBestCandidate([], 0), null);
+});
+
+test("preparar una sesión envía una referencia, nunca la fotografía original", async () => {
+  const calls: Array<{ url: string; body: unknown; contentType: string | null }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push({
+      url,
+      body: init?.body,
+      contentType: (init?.headers as Record<string, string> | undefined)?.["Content-Type"] ?? null,
+    });
+    return Response.json({ sessionId: "abcdefgh", width: 2048, height: 1536 });
+  }) as typeof fetch;
+  try {
+    const session = await prepareSegmentationSession({
+      imageId: "44444444-4444-4444-8444-444444444441",
+      treeSampleId: "33333333-3333-4333-8333-333333333333",
+      direction: "N",
+    });
+    assert.equal(session.sessionId, "abcdefgh");
+    assert.equal(session.width, 2048);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 1);
+  // La ruta autorizada del piloto, no la genérica de vision-lab.
+  assert.equal(calls[0].url, "/api/vision/region-suggestions/prepare");
+  assert.equal(calls[0].contentType, "application/json");
+  assert.equal(typeof calls[0].body, "string");
+  // Sólo identificadores: ni bytes ni multipart.
+  assert.ok(!(calls[0].body instanceof FormData));
+  assert.deepEqual(JSON.parse(calls[0].body as string), {
+    imageId: "44444444-4444-4444-8444-444444444441",
+    treeSampleId: "33333333-3333-4333-8333-333333333333",
+    direction: "N",
+  });
 });

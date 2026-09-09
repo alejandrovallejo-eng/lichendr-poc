@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyEditedMask,
   applyServerGeometry,
   buildSuggestionPayload,
   gridPromptPoints,
+  manualRegion,
   maskPixelHash,
   regionsFromMasks,
 } from "./client.ts";
-import { decodeMaskRle } from "./mask-codec.ts";
+import { applyBrush } from "./mask-edit.ts";
+import { decodeMaskRle, maskArea } from "./mask-codec.ts";
+import { reviewedCoverage } from "./coverage.ts";
+import { applyDecision, applyMaskEdit, mergeReviews } from "./review.ts";
 import type { WorkingGrid } from "./client.ts";
 
 const GRID: WorkingGrid = {
@@ -138,4 +143,91 @@ test("la geometría del servidor se aplica al overlay una sola vez", () => {
   assert.equal(steps.length, 1);
   const again = applyServerGeometry(withGeometry, [{ regionId: "a", cropBoxNormalized }]);
   assert.equal(again[0].transformChain.filter((step) => step.step === "server_crop").length, 1);
+});
+
+test("una máscara omitida se puede crear sin ninguna propuesta y se dibuja con píxeles", () => {
+  // Que MobileSAM no proponga nada no demuestra ausencia: el revisor añade la
+  // región y la pinta.
+  const region = manualRegion("manual-1", GRID);
+  assert.equal(region.maskAreaPixels, 0);
+  assert.equal(region.samScore, 0);
+  assert.deepEqual(region.box, { x: 0, y: 0, width: 0, height: 0 });
+
+  const decoded = decodeMaskRle(region.maskRle);
+  const painted = applyBrush(decoded.mask, decoded.width, decoded.height, {
+    x: 3,
+    y: 2,
+    radius: 1,
+    mode: "add",
+  });
+  const edited = applyEditedMask(region, painted, decoded.width, decoded.height);
+  assert.ok(edited.maskAreaPixels > 0);
+  assert.equal(edited.maskAreaPixels, maskArea(painted));
+  // El recuadro sigue a los píxeles pintados: no es un booleano.
+  assert.ok(edited.box.width > 0 && edited.box.height > 0);
+  assert.notEqual(edited.maskSha, region.maskSha);
+  // El recorte del servidor anterior ya no describe esta máscara.
+  assert.equal(edited.cropBoxNormalized, null);
+});
+
+test("la cobertura sólo cuenta el liquen aceptado dentro del ROI delimitado", () => {
+  const region = manualRegion("manual-1", GRID);
+  const decoded = decodeMaskRle(region.maskRle);
+  const mask = new Uint8Array(decoded.mask);
+  mask[0] = 1;
+  mask[1] = 1;
+  const edited = applyEditedMask(region, mask, decoded.width, decoded.height);
+
+  // ROI de tronco delimitado a mano: sólo la primera fila.
+  const roi = new Uint8Array(GRID.width * GRID.height);
+  for (let index = 0; index < GRID.width; index += 1) roi[index] = 1;
+
+  const reviews = applyDecision(mergeReviews([], [edited]), {
+    regionId: "manual-1",
+    decision: "accepted",
+    label: "lichen",
+    reviewedBy: "revisor",
+    reviewedAt: new Date().toISOString(),
+  });
+  assert.equal(reviews[0].decision, "accepted");
+
+  const coverage = reviewedCoverage({
+    acceptedLichenMasks: [decodeMaskRle(edited.maskRle).mask],
+    roiMask: roi,
+    width: GRID.width,
+    height: GRID.height,
+    completenessReviewed: true,
+    roiSource: "tronco delimitado a mano por el revisor sobre la fotografía",
+  });
+  assert.equal(coverage.available, true);
+  assert.equal(coverage.roiPixels, GRID.width);
+  assert.equal(coverage.intersectionPixels, 2);
+  assert.equal(coverage.coveragePercent, (2 / GRID.width) * 100);
+});
+
+test("reintentar la clasificación no puede perder los píxeles editados", () => {
+  // El reintento sólo vuelve a pedir etiquetas: recibe las MISMAS regiones y
+  // únicamente les aplica la geometría del recorte.
+  const proposed = regionsFromMasks([{ regionId: "a", mask: BLOB, samScore: 0.9 }], GRID, 24);
+  const decoded = decodeMaskRle(proposed[0].maskRle);
+  const painted = applyBrush(decoded.mask, decoded.width, decoded.height, {
+    x: 6,
+    y: 3,
+    radius: 1,
+    mode: "add",
+  });
+  const edited = applyEditedMask(proposed[0], painted, decoded.width, decoded.height);
+  const reviews = applyMaskEdit(mergeReviews([], proposed), "a", edited.maskSha, proposed[0].maskSha);
+
+  const afterRetry = applyServerGeometry(
+    [edited],
+    [{ regionId: "a", cropBoxNormalized: { x: 0.1, y: 0.1, width: 0.5, height: 0.5 } }],
+  );
+  assert.equal(afterRetry[0].maskRle, edited.maskRle);
+  assert.equal(afterRetry[0].maskSha, edited.maskSha);
+  assert.equal(afterRetry[0].maskAreaPixels, edited.maskAreaPixels);
+  // Y la revisión sigue clavada sobre los píxeles editados.
+  const merged = mergeReviews(reviews, afterRetry);
+  assert.equal(merged[0].maskSha, edited.maskSha);
+  assert.equal(merged[0].maskEdited, true);
 });

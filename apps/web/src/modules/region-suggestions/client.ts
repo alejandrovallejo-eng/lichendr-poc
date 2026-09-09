@@ -129,6 +129,65 @@ export function regionsFromMasks(
   return regions;
 }
 
+// A region the reviewer adds because MobileSAM missed it. It starts EMPTY and
+// pending: "no proposal" is not proof of absence, so the reviewer must be able
+// to draw a mask even when nothing was proposed at all.
+export function manualRegion(regionId: string, grid: WorkingGrid): ProposedRegion {
+  const empty = new Uint8Array(grid.width * grid.height);
+  const maskRle = encodeMaskRle(empty, grid.width, grid.height);
+  return {
+    regionId,
+    maskWidth: grid.width,
+    maskHeight: grid.height,
+    maskRle,
+    maskSha: maskPixelHash(maskRle),
+    maskAreaPixels: 0,
+    box: { x: 0, y: 0, width: 0, height: 0 },
+    cropBoxNormalized: null,
+    // No MobileSAM involved: the score is not a measurement of anything.
+    samScore: 0,
+    transformChain: [
+      { step: "exif_orientation", appliedUpstream: grid.orientationAppliedUpstream },
+      {
+        step: "working_grid",
+        width: grid.width,
+        height: grid.height,
+        originalWidth: grid.originalWidth,
+        originalHeight: grid.originalHeight,
+      },
+      { step: "rectification", applied: grid.rectified },
+      { step: "mask_bounding_box", box: { x: 0, y: 0, width: 0, height: 0 } },
+    ],
+  };
+}
+
+// Re-anchors a region on the pixels the reviewer just painted: new hash, new
+// area and, crucially, a new bounding box, so a later crop follows the edited
+// mask instead of the proposal it came from.
+export function applyEditedMask(
+  region: ProposedRegion,
+  mask: Uint8Array,
+  width: number,
+  height: number,
+): ProposedRegion {
+  const maskRle = encodeMaskRle(mask, width, height);
+  const box = maskBoundingBox(mask, width, height) ?? { x: 0, y: 0, width: 0, height: 0 };
+  return {
+    ...region,
+    maskWidth: width,
+    maskHeight: height,
+    maskRle,
+    maskSha: maskPixelHash(maskRle),
+    maskAreaPixels: maskArea(mask),
+    box,
+    // The server crop of the previous pixels no longer describes this mask.
+    cropBoxNormalized: null,
+    transformChain: region.transformChain.map((step) =>
+      step.step === "mask_bounding_box" ? { step: "mask_bounding_box", box } : step,
+    ),
+  };
+}
+
 export class SuggestionRequestError extends Error {
   readonly status: number;
 

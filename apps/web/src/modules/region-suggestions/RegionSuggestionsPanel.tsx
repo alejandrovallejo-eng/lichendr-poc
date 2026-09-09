@@ -12,8 +12,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import {
   SuggestionRequestError,
+  applyEditedMask,
   applyServerGeometry,
   gridPromptPoints,
+  manualRegion,
   maskPixelHash,
   regionsFromMasks,
   requestRegionSuggestions,
@@ -68,6 +70,10 @@ export interface RegionSuggestionsPanelProps {
 interface GridState {
   width: number;
   height: number;
+  // Dimensions of the space the grid was derived from (the analysis proxy when
+  // MobileSAM prepared the view, the preview otherwise), kept for traceability.
+  originalWidth: number;
+  originalHeight: number;
 }
 
 export function RegionSuggestionsPanel({
@@ -87,6 +93,9 @@ export function RegionSuggestionsPanel({
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [brushMode, setBrushMode] = useState<"add" | "erase">("add");
+  // The ROI is painted with the same brush as a mask: the trunk is delimited by
+  // the reviewer, because a whole photograph is not a trunk.
+  const [roiEditing, setRoiEditing] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [backend, setBackend] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -100,6 +109,8 @@ export function RegionSuggestionsPanel({
   const abortRef = useRef<AbortController | null>(null);
   const identityRef = useRef({ ownerId: "", treeSampleId, direction, imageId });
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
+  const previewRef = useRef<HTMLImageElement | null>(null);
+  const manualCounterRef = useRef(0);
 
   const previewUrl = useMemo(() => URL.createObjectURL(file), [file]);
   useEffect(() => () => URL.revokeObjectURL(previewUrl), [previewUrl]);
@@ -123,6 +134,7 @@ export function RegionSuggestionsPanel({
     setRoiRle(null);
     setSelected(null);
     setEditing(null);
+    setRoiEditing(false);
     setFailure(null);
     setBackend(null);
     setNotice(null);
@@ -154,7 +166,18 @@ export function RegionSuggestionsPanel({
       setCompleteness(saved.completenessReviewed ?? false);
       setRoiRle(saved.roiRle ?? null);
       const first = restored.regions[0];
-      if (first) setGrid({ width: first.maskWidth, height: first.maskHeight });
+      if (first) {
+        const step = first.transformChain.find((item) => item.step === "working_grid");
+        setGrid({
+          width: first.maskWidth,
+          height: first.maskHeight,
+          originalWidth: step && "originalWidth" in step ? step.originalWidth : first.maskWidth,
+          originalHeight: step && "originalHeight" in step ? step.originalHeight : first.maskHeight,
+        });
+      }
+      manualCounterRef.current = restored.regions.filter((region) =>
+        region.regionId.startsWith("manual-"),
+      ).length;
     });
     return () => {
       active = false;
@@ -178,14 +201,133 @@ export function RegionSuggestionsPanel({
     [ownerId, storageIdentity],
   );
 
-  const run = useCallback(async () => {
+  // Working grid used for ROI and manual masks before (or without) any
+  // MobileSAM proposal. When the service has not prepared the view yet, the
+  // preview's own dimensions define the grid; the geometry contract is applied
+  // once, here.
+  const ensureGrid = useCallback((): GridState | null => {
+    if (grid) return grid;
+    const image = previewRef.current;
+    if (!image || !image.naturalWidth || !image.naturalHeight) return null;
+    const size = workingSize(image.naturalWidth, image.naturalHeight, MAX_WORKING_SIDE);
+    const next: GridState = {
+      width: size.width,
+      height: size.height,
+      originalWidth: image.naturalWidth,
+      originalHeight: image.naturalHeight,
+    };
+    setGrid(next);
+    return next;
+  }, [grid]);
+
+  // Asks BioCLIP for labels for the regions given, WITHOUT touching their
+  // pixels: this is what "retry labels" does, so a failed classification can
+  // never overwrite masks the reviewer edited.
+  const classify = useCallback(
+    async (
+      candidates: ProposedRegion[],
+      workingGrid: GridState,
+      generation: number,
+      controller: AbortController,
+    ) => {
+      const usable = candidates.filter((region) => region.maskAreaPixels > 0);
+      if (usable.length === 0) {
+        setFailure(
+          "No hay máscaras con píxeles que clasificar. Dibuja o amplía una máscara y reinténtalo.",
+        );
+        setPhase((current) => nextPhase(current, { type: "worker_failed" }));
+        return;
+      }
+      const requestToken = crypto.randomUUID().replace(/-/g, "");
+      const maskSetSha = maskPixelHash(usable.map((region) => region.maskSha).join("|"));
+      const expected: SuggestionContext = {
+        generation,
+        ownerId,
+        treeSampleId,
+        direction,
+        imageId,
+        requestToken,
+        maskSetSha,
+        suggestionVersion: SUGGESTION_VERSION,
+      };
+
+      try {
+        const response = await requestRegionSuggestions(
+          { imageId, treeSampleId, direction, requestToken },
+          usable,
+          { width: workingGrid.width, height: workingGrid.height },
+          controller.signal,
+        );
+        // Guard AFTER the await, against the generation live at this moment.
+        const received: SuggestionContext = {
+          generation,
+          ownerId: response.provenance.ownerId,
+          treeSampleId: response.provenance.treeSampleId,
+          direction: response.provenance.direction,
+          imageId: response.provenance.imageId,
+          requestToken: response.context.requestToken,
+          maskSetSha,
+          suggestionVersion: response.provenance.suggestionVersion,
+        };
+        const current: SuggestionContext = { ...expected, generation: generationRef.current };
+        if (!resultBelongsToContext(current, received)) {
+          // A superseded or foreign answer is discarded, never applied.
+          return;
+        }
+        const incoming = response.suggestions.map((suggestion) => ({
+          ...suggestion,
+          backend: (response.backend === "ridge_head" ? "ridge_head" : "zeroshot") as
+            | "zeroshot"
+            | "ridge_head",
+          encoderId: response.provenance.encoderId,
+          headSha256: response.provenance.headSha256,
+          preprocess: response.provenance.preprocessVersion,
+          versions: { schema: response.provenance.suggestionVersion },
+        }));
+        // Only the crop geometry of the classified regions is updated; masks,
+        // ROI and human decisions are untouched.
+        const withGeometry = applyServerGeometry(candidates, response.geometry ?? []);
+        const mergedReviews = mergeReviews(reviews, withGeometry);
+        setRegions(withGeometry);
+        setSuggestions(incoming);
+        setReviews(mergedReviews);
+        setBackend(response.backend);
+        setCached(response.cached === true);
+        setNotice(response.notice);
+        setHeadWarning(response.headWarning ?? null);
+        persist({
+          regions: withGeometry,
+          suggestions: incoming,
+          reviews: mergedReviews,
+          backend: response.backend,
+          completenessReviewed: completeness,
+          roiRle,
+        });
+        setPhase((current2) => nextPhase(current2, { type: "labels_ready" }));
+      } catch (error) {
+        if (generationRef.current !== generation) return;
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setFailure(
+          error instanceof SuggestionRequestError
+            ? error.message
+            : "No se pudieron obtener sugerencias de etiqueta.",
+        );
+        setPhase((current2) => nextPhase(current2, { type: "worker_failed" }));
+      }
+    },
+    [completeness, direction, imageId, ownerId, persist, reviews, roiRle, treeSampleId],
+  );
+
+  // Explicit regeneration: MobileSAM proposes again and the previous proposals
+  // are REPLACED. This is destructive by definition, so it is a separate action
+  // from retrying a failed classification.
+  const regenerate = useCallback(async () => {
     if (!ownerId) return;
     generationRef.current += 1;
     const generation = generationRef.current;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-    const requestToken = crypto.randomUUID().replace(/-/g, "");
 
     setFailure(null);
     setCached(false);
@@ -195,11 +337,22 @@ export function RegionSuggestionsPanel({
     let workingGrid: GridState;
     let sessionId = "";
     try {
-      const session = await prepareSegmentationSession(file, controller.signal);
+      // Only a small reference travels: the server reads the private analysis
+      // proxy after checking the owner, the image-view-tree association and the
+      // four originals/proxies of the series.
+      const session = await prepareSegmentationSession(
+        { imageId, treeSampleId, direction },
+        controller.signal,
+      );
       if (generationRef.current !== generation) return;
       sessionId = session.sessionId;
       const size = workingSize(session.width, session.height, MAX_WORKING_SIDE);
-      workingGrid = { width: size.width, height: size.height };
+      workingGrid = {
+        width: size.width,
+        height: size.height,
+        originalWidth: session.width,
+        originalHeight: session.height,
+      };
       const masks: Array<{ regionId: string; mask: Uint8Array; samScore: number }> = [];
       for (const [index, point] of gridPromptPoints().entries()) {
         const { candidates, recommendedIndex } = await segmentAtPoint(
@@ -220,6 +373,8 @@ export function RegionSuggestionsPanel({
         {
           width: size.width,
           height: size.height,
+          // The session was prepared from the analysis proxy, so these are the
+          // proxy's dimensions and the masks live in the proxy space.
           originalWidth: session.width,
           originalHeight: session.height,
           // EXIF orientation is applied once upstream, by the vision service
@@ -245,94 +400,29 @@ export function RegionSuggestionsPanel({
     if (generationRef.current !== generation) return;
     setGrid(workingGrid);
     setRegions(proposed);
+    setEditing(null);
     setReviews((current) => mergeReviews(current, proposed));
     setPhase((current) => nextPhase(current, { type: "regions_found", count: proposed.length }));
     if (proposed.length === 0) return;
+    await classify(proposed, workingGrid, generation, controller);
+  }, [classify, direction, imageId, ownerId, treeSampleId]);
 
-    const maskSetSha = maskPixelHash(proposed.map((region) => region.maskSha).join("|"));
-    const expected: SuggestionContext = {
-      generation,
-      ownerId,
-      treeSampleId,
-      direction,
-      imageId,
-      requestToken,
-      maskSetSha,
-      suggestionVersion: SUGGESTION_VERSION,
-    };
-
-    try {
-      const response = await requestRegionSuggestions(
-        { imageId, treeSampleId, direction, requestToken },
-        proposed,
-        workingGrid,
-        controller.signal,
-      );
-      // Guard AFTER the await, against the generation live at this moment.
-      const received: SuggestionContext = {
-        generation,
-        ownerId: response.provenance.ownerId,
-        treeSampleId: response.provenance.treeSampleId,
-        direction: response.provenance.direction,
-        imageId: response.provenance.imageId,
-        requestToken: response.context.requestToken,
-        maskSetSha,
-        suggestionVersion: response.provenance.suggestionVersion,
-      };
-      const current: SuggestionContext = { ...expected, generation: generationRef.current };
-      if (!resultBelongsToContext(current, received)) {
-        // A superseded or foreign answer is discarded, never applied.
-        return;
-      }
-      const incoming = response.suggestions.map((suggestion) => ({
-        ...suggestion,
-        backend: (response.backend === "ridge_head" ? "ridge_head" : "zeroshot") as
-          | "zeroshot"
-          | "ridge_head",
-        encoderId: response.provenance.encoderId,
-        headSha256: response.provenance.headSha256,
-        preprocess: response.provenance.preprocessVersion,
-        versions: { schema: response.provenance.suggestionVersion },
-      }));
-      const withGeometry = applyServerGeometry(proposed, response.geometry ?? []);
-      const mergedReviews = mergeReviews(reviews, withGeometry);
-      setRegions(withGeometry);
-      setSuggestions(incoming);
-      setReviews(mergedReviews);
-      setBackend(response.backend);
-      setCached(response.cached === true);
-      setNotice(response.notice);
-      setHeadWarning(response.headWarning ?? null);
-      persist({
-        regions: withGeometry,
-        suggestions: incoming,
-        reviews: mergedReviews,
-        backend: response.backend,
-        completenessReviewed: completeness,
-        roiRle,
-      });
-      setPhase((current2) => nextPhase(current2, { type: "labels_ready" }));
-    } catch (error) {
-      if (generationRef.current !== generation) return;
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setFailure(
-        error instanceof SuggestionRequestError
-          ? error.message
-          : "No se pudieron obtener sugerencias de etiqueta.",
-      );
-      setPhase((current2) => nextPhase(current2, { type: "worker_failed" }));
-    }
-  }, [
-    completeness,
-    direction,
-    file,
-    imageId,
-    ownerId,
-    persist,
-    reviews,
-    roiRle,
-    treeSampleId,
-  ]);
+  // Retry of the labelling step only. Nothing is resegmented, so edited masks,
+  // the ROI and the decisions already taken survive untouched.
+  const retryClassification = useCallback(async () => {
+    if (!ownerId || regions.length === 0) return;
+    const workingGrid = ensureGrid();
+    if (!workingGrid) return;
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setFailure(null);
+    setCached(false);
+    setPhase((current) => nextPhase(current, { type: "regions_found", count: regions.length }));
+    await classify(regions, workingGrid, generation, controller);
+  }, [classify, ensureGrid, ownerId, regions]);
 
   const decide = useCallback(
     (regionId: string, decision: RegionReview["decision"], label?: SuggestionLabel | null) => {
@@ -376,14 +466,8 @@ export function RegionSuggestionsPanel({
         mode: brushMode,
       });
       if (masksEqual(decoded.mask, painted)) return;
-      const maskRle = encodeMaskRle(painted, decoded.width, decoded.height);
       const nextRegions = regions.slice();
-      nextRegions[index] = {
-        ...region,
-        maskRle,
-        maskSha: maskPixelHash(maskRle),
-        maskAreaPixels: maskArea(painted),
-      };
+      nextRegions[index] = applyEditedMask(region, painted, decoded.width, decoded.height);
       const nextReviews = applyMaskEdit(
         reviews,
         regionId,
@@ -404,12 +488,109 @@ export function RegionSuggestionsPanel({
     [backend, brushMode, completeness, grid, persist, regions, reviews, roiRle, suggestions],
   );
 
-  // ROI: the trunk area the reviewer confirms. Without a calibrated frame it is
-  // the whole view, and the resulting percentage is exploratory only.
+  // The ROI is painted with the same brush: the trunk is delimited by the
+  // reviewer on the photograph, not assumed to be the whole frame.
+  const paintRoi = useCallback(
+    (xNormalized: number, yNormalized: number) => {
+      const workingGrid = ensureGrid();
+      if (!workingGrid) return;
+      const current =
+        roiRle !== null
+          ? decodeMaskRle(roiRle)
+          : {
+              mask: new Uint8Array(workingGrid.width * workingGrid.height),
+              width: workingGrid.width,
+              height: workingGrid.height,
+            };
+      if (current.width !== workingGrid.width || current.height !== workingGrid.height) return;
+      const painted = applyBrush(current.mask, current.width, current.height, {
+        x: xNormalized * current.width,
+        y: yNormalized * current.height,
+        radius: BRUSH_RADIUS * 2,
+        mode: brushMode,
+      });
+      if (masksEqual(current.mask, painted)) return;
+      const encoded = encodeMaskRle(painted, current.width, current.height);
+      setRoiRle(encoded);
+      persist({
+        regions,
+        suggestions,
+        reviews,
+        backend,
+        completenessReviewed: completeness,
+        roiRle: encoded,
+      });
+    },
+    [
+      backend,
+      brushMode,
+      completeness,
+      ensureGrid,
+      persist,
+      regions,
+      reviews,
+      roiRle,
+      suggestions,
+    ],
+  );
+
+  // A mask the reviewer adds because MobileSAM missed the region — available
+  // even when there is not a single proposal, since "no proposal" is not proof
+  // of absence.
+  const addOmittedRegion = useCallback(() => {
+    const workingGrid = ensureGrid();
+    if (!workingGrid) {
+      setFailure("Aún no se puede dibujar: espera a que cargue la fotografía.");
+      return;
+    }
+    if (regions.length >= MAX_REGIONS_PER_VIEW) {
+      setFailure("Se alcanzó el máximo de regiones para esta vista.");
+      return;
+    }
+    manualCounterRef.current += 1;
+    const region = manualRegion(`manual-${manualCounterRef.current}`, {
+      width: workingGrid.width,
+      height: workingGrid.height,
+      originalWidth: workingGrid.originalWidth,
+      originalHeight: workingGrid.originalHeight,
+      orientationAppliedUpstream: true,
+      rectified: false,
+    });
+    const nextRegions = [...regions, region];
+    const nextReviews = mergeReviews(reviews, nextRegions);
+    setRegions(nextRegions);
+    setReviews(nextReviews);
+    setSelected(region.regionId);
+    setRoiEditing(false);
+    setEditing(region.regionId);
+    setBrushMode("add");
+    persist({
+      regions: nextRegions,
+      suggestions,
+      reviews: nextReviews,
+      backend,
+      completenessReviewed: completeness,
+      roiRle,
+    });
+  }, [
+    backend,
+    completeness,
+    ensureGrid,
+    persist,
+    regions,
+    reviews,
+    roiRle,
+    suggestions,
+  ]);
+
+  // Fallback ROI: the whole view. It is offered explicitly and labelled as such
+  // because a whole photograph is NOT a trunk; the resulting percentage is
+  // exploratory only.
   const setFullViewRoi = useCallback(() => {
-    if (!grid) return;
-    const roi = new Uint8Array(grid.width * grid.height).fill(1);
-    const encoded = encodeMaskRle(roi, grid.width, grid.height);
+    const workingGrid = ensureGrid();
+    if (!workingGrid) return;
+    const roi = new Uint8Array(workingGrid.width * workingGrid.height).fill(1);
+    const encoded = encodeMaskRle(roi, workingGrid.width, workingGrid.height);
     setRoiRle(encoded);
     persist({
       regions,
@@ -419,7 +600,19 @@ export function RegionSuggestionsPanel({
       completenessReviewed: completeness,
       roiRle: encoded,
     });
-  }, [backend, completeness, grid, persist, regions, reviews, suggestions]);
+  }, [backend, completeness, ensureGrid, persist, regions, reviews, suggestions]);
+
+  const clearRoi = useCallback(() => {
+    setRoiRle(null);
+    persist({
+      regions,
+      suggestions,
+      reviews,
+      backend,
+      completenessReviewed: completeness,
+      roiRle: null,
+    });
+  }, [backend, completeness, persist, regions, reviews, suggestions]);
 
   // Overlay: the REAL masks are painted, not their bounding boxes.
   useEffect(() => {
@@ -431,6 +624,20 @@ export function RegionSuggestionsPanel({
     if (!context) return;
     context.clearRect(0, 0, grid.width, grid.height);
     const image = context.createImageData(grid.width, grid.height);
+    // The reviewed ROI is drawn faithfully underneath, so what is measured is
+    // what is seen.
+    if (roiRle) {
+      const roi = decodeMaskRle(roiRle);
+      if (roi.width === grid.width && roi.height === grid.height) {
+        for (let index = 0; index < roi.mask.length; index += 1) {
+          if (roi.mask[index] === 0) continue;
+          image.data[index * 4] = 56;
+          image.data[index * 4 + 1] = 108;
+          image.data[index * 4 + 2] = 189;
+          image.data[index * 4 + 3] = 70;
+        }
+      }
+    }
     for (const region of regions) {
       const review = reviews.find((item) => item.regionId === region.regionId);
       const colour =
@@ -453,7 +660,7 @@ export function RegionSuggestionsPanel({
       }
     }
     context.putImageData(image, 0, 0);
-  }, [grid, regions, reviews, selected]);
+  }, [grid, regions, reviews, roiRle, selected]);
 
   const counts = reviewCounts(reviews);
   const info = phaseNotice(phase, regions.length, failure ?? undefined);
@@ -474,7 +681,10 @@ export function RegionSuggestionsPanel({
       width: grid.width,
       height: grid.height,
       completenessReviewed: completeness,
-      roiSource: "tronco confirmado por el revisor (vista completa sin marco calibrado)",
+      roiSource:
+        maskArea(roi.mask) === roi.width * roi.height
+          ? "vista completa aceptada como ROI (atajo exploratorio: la fotografía no es el tronco)"
+          : "tronco delimitado a mano por el revisor sobre la fotografía",
     });
   }, [completeness, grid, regions, reviews, roiRle]);
 
@@ -494,14 +704,25 @@ export function RegionSuggestionsPanel({
             {info.title}: {info.detail}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void run()}
-          disabled={busy || !ownerId}
-          className="rounded border border-emerald-500 px-3 py-1 text-emerald-200 disabled:opacity-50"
-        >
-          {busy ? "Procesando…" : "Proponer regiones (MobileSAM)"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void regenerate()}
+            disabled={busy || !ownerId}
+            className="rounded border border-emerald-500 px-3 py-1 text-emerald-200 disabled:opacity-50"
+          >
+            {busy ? "Procesando…" : "Proponer regiones (MobileSAM)"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void retryClassification()}
+            disabled={busy || !ownerId || regions.length === 0}
+            className="rounded border border-sky-500 px-3 py-1 text-sky-200 disabled:opacity-50"
+            title="Vuelve a pedir etiquetas a BioCLIP sin volver a segmentar: conserva las máscaras editadas, el ROI y tus decisiones."
+          >
+            Reintentar etiquetas (BioCLIP)
+          </button>
+        </div>
       </header>
 
       {notice ? <p className="mt-2 text-xs text-amber-200">{notice}</p> : null}
@@ -518,25 +739,30 @@ export function RegionSuggestionsPanel({
         <div
           className="relative"
           onClick={(event) => {
-            if (!editing) return;
+            if (!editing && !roiEditing) return;
             const bounds = event.currentTarget.getBoundingClientRect();
-            paint(
-              editing,
-              (event.clientX - bounds.left) / bounds.width,
-              (event.clientY - bounds.top) / bounds.height,
-            );
+            const x = (event.clientX - bounds.left) / bounds.width;
+            const y = (event.clientY - bounds.top) / bounds.height;
+            if (roiEditing) paintRoi(x, y);
+            else if (editing) paint(editing, x, y);
           }}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={previewUrl} alt={`Vista ${direction}`} className="w-full rounded" />
+          <img
+            ref={previewRef}
+            src={previewUrl}
+            alt={`Vista ${direction}`}
+            className="w-full rounded"
+          />
           <canvas
             ref={overlayRef}
             className="pointer-events-none absolute inset-0 h-full w-full"
             aria-hidden
           />
-          {editing ? (
+          {roiEditing || editing ? (
             <p className="absolute bottom-1 left-1 rounded bg-slate-900/80 px-2 py-0.5 text-[11px] text-emerald-200">
-              Editando píxeles: {brushMode === "add" ? "añadir" : "borrar"}
+              {roiEditing ? "Delimitando ROI de tronco" : "Editando píxeles de la máscara"}:{" "}
+              {brushMode === "add" ? "añadir" : "borrar"}
             </p>
           ) : null}
         </div>
@@ -545,7 +771,8 @@ export function RegionSuggestionsPanel({
           {regions.length === 0 ? (
             <li className="text-xs text-slate-300">
               Sin regiones propuestas. Que no haya propuestas no demuestra ausencia de líquenes:
-              revisa la vista completa y añade o amplía máscaras antes de finalizar.
+              revisa todo el ROI y usa «Añadir máscara omitida» para dibujar a mano las que falten
+              antes de finalizar.
             </li>
           ) : null}
           {regions.map((region) => {
@@ -604,6 +831,7 @@ export function RegionSuggestionsPanel({
                     type="button"
                     onClick={() => {
                       setSelected(region.regionId);
+                      setRoiEditing(false);
                       setEditing((current) =>
                         current === region.regionId ? null : region.regionId,
                       );
@@ -631,11 +859,48 @@ export function RegionSuggestionsPanel({
       <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-200">
         <button
           type="button"
+          onClick={() => {
+            setRoiEditing((current) => !current);
+            setEditing(null);
+            setBrushMode("add");
+          }}
+          className={`rounded border px-2 py-0.5 text-[11px] ${
+            roiEditing ? "border-sky-400 text-sky-200" : "border-slate-600"
+          }`}
+        >
+          {roiEditing ? "Terminar ROI de tronco" : "Delimitar ROI de tronco"}
+        </button>
+        {roiEditing ? (
+          <button
+            type="button"
+            onClick={() => setBrushMode((mode) => (mode === "add" ? "erase" : "add"))}
+            className="rounded border border-sky-600 px-2 py-0.5 text-[11px] text-sky-200"
+          >
+            Pincel ROI: {brushMode === "add" ? "añadir" : "borrar"}
+          </button>
+        ) : null}
+        <button
+          type="button"
           onClick={setFullViewRoi}
-          disabled={!grid}
+          className="rounded border border-slate-600 px-2 py-0.5 text-[11px]"
+          title="Atajo exploratorio: toda la fotografía no es el tronco."
+        >
+          Usar vista completa como ROI (exploratorio)
+        </button>
+        <button
+          type="button"
+          onClick={clearRoi}
+          disabled={!roiRle}
           className="rounded border border-slate-600 px-2 py-0.5 text-[11px] disabled:opacity-50"
         >
-          Confirmar ROI de tronco (vista completa)
+          Borrar ROI
+        </button>
+        <button
+          type="button"
+          onClick={addOmittedRegion}
+          className="rounded border border-emerald-600 px-2 py-0.5 text-[11px] text-emerald-200"
+        >
+          Añadir máscara omitida
         </button>
         <label className="flex items-center gap-2">
           <input

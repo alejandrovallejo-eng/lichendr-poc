@@ -1,10 +1,19 @@
 // MobileSAM region proposals through the existing vision service.
 //
 // The pilot uses the SAME MobileSAM (`vit_t`) that already segments in this
-// project, via the existing `/api/vision/prepare`, `/api/vision/segment` and
-// `/api/vision/sessions/:id` routes. It deliberately does NOT use the in-browser
-// SlimSAM of `modules/vision-lab`, which is a different, smaller model: the
-// pilot must propose regions with MobileSAM as documented.
+// project. It deliberately does NOT use the in-browser SlimSAM of
+// `modules/vision-lab`, which is a different, smaller model.
+//
+// The browser never uploads the photograph for this. It sends a small image
+// REFERENCE to the authorised routes under `/api/vision/region-suggestions`,
+// which verify the owner, the image-view-tree association and the four
+// originals/proxies of the series before reading the PRIVATE ANALYSIS PROXY and
+// forwarding those bytes to MobileSAM. Two reasons, both real:
+//
+// * the vision service rejects an image over 20 MP before reducing it, so a
+//   5712x4284 original is answered with "Decoded image is too large";
+// * the deterministic 2048 px proxy is the same space in which the crops for
+//   BioCLIP are cut, so masks and crops share one geometry.
 //
 // The masks returned by the service are real pixels and are kept as such; only
 // their resolution is reduced to a bounded working grid so a whole series can be
@@ -16,8 +25,17 @@ export const MAX_WORKING_SIDE = 1024;
 
 export interface SegmentationSession {
   sessionId: string;
+  // Dimensions of the ANALYSIS PROXY the session was prepared from, which is
+  // the space every mask returned by the service lives in.
   width: number;
   height: number;
+}
+
+/** Small reference identifying an authorised view. No pixels travel with it. */
+export interface ViewReference {
+  imageId: string;
+  treeSampleId: string;
+  direction: string;
 }
 
 export interface ServiceCandidate {
@@ -82,16 +100,21 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 }
 
 export async function prepareSegmentationSession(
-  file: File,
+  reference: ViewReference,
   signal?: AbortSignal,
 ): Promise<SegmentationSession> {
-  const body = new FormData();
-  body.append("image", file);
-  const response = await fetch("/api/vision/prepare", { method: "POST", body, signal });
+  const response = await fetch("/api/vision/region-suggestions/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(reference),
+    signal,
+  });
   const payload = await readJson(response);
   if (!response.ok || typeof payload.sessionId !== "string") {
     throw new SegmentationServiceError(
-      "MobileSAM no pudo preparar la fotografía. Tus fotografías y revisiones se conservan.",
+      typeof payload.error === "string"
+        ? payload.error
+        : "MobileSAM no pudo preparar la fotografía. Tus fotografías y revisiones se conservan.",
       response.status,
     );
   }
@@ -108,7 +131,7 @@ export async function segmentAtPoint(
   point: { x: number; y: number },
   signal?: AbortSignal,
 ): Promise<{ candidates: ServiceCandidate[]; recommendedIndex: number }> {
-  const response = await fetch("/api/vision/segment", {
+  const response = await fetch("/api/vision/region-suggestions/segment", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sessionId, points: [{ x: point.x, y: point.y, label: 1 }] }),
@@ -117,7 +140,9 @@ export async function segmentAtPoint(
   const payload = await readJson(response);
   if (!response.ok || !Array.isArray(payload.candidates)) {
     throw new SegmentationServiceError(
-      "MobileSAM no pudo proponer regiones en esta vista.",
+      typeof payload.error === "string"
+        ? payload.error
+        : "MobileSAM no pudo proponer regiones en esta vista.",
       response.status,
     );
   }
@@ -130,7 +155,9 @@ export async function segmentAtPoint(
 
 export async function releaseSegmentationSession(sessionId: string): Promise<void> {
   try {
-    await fetch(`/api/vision/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    await fetch(`/api/vision/region-suggestions/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    });
   } catch {
     // The service expires its own sessions; a failure here is not a review error.
   }

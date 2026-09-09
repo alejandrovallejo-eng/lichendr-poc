@@ -241,6 +241,10 @@ export function sameViewIdentity(left: ViewIdentity, right: ViewIdentity): boole
 export type SuggestionEvent =
   | { type: "start" }
   | { type: "regions_found"; count: number }
+  // Retrying ONLY the labelling step of regions that already exist. It must be
+  // able to leave `unavailable`, which is where a failed classification lands,
+  // without regenerating anything with MobileSAM.
+  | { type: "retry_labels" }
   | { type: "labels_ready" }
   | { type: "worker_failed" }
   | { type: "reset" };
@@ -250,6 +254,11 @@ export type SuggestionEvent =
 export function nextPhase(current: SuggestionPhase, event: SuggestionEvent): SuggestionPhase {
   if (event.type === "reset") return "idle";
   if (event.type === "worker_failed") return "unavailable";
+  // A retry of the labels is valid from any state that already has regions, and
+  // it is the only way out of `unavailable` that does not resegment.
+  if (event.type === "retry_labels") {
+    return current === "searching_regions" ? current : "suggesting_labels";
+  }
   switch (current) {
     case "idle":
     case "unavailable":

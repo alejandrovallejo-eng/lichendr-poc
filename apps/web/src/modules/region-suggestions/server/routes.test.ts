@@ -190,6 +190,8 @@ interface FetchLog {
   forwardedImages: Buffer[];
   concurrent: number;
   maxConcurrent: number;
+  suggestBodyBytes: number[];
+  suggestCrops: Array<Array<{ regionId: string; pngBytes: number }>>;
 }
 
 function fakeFetch(
@@ -242,16 +244,27 @@ function fakeFetch(
       if (overrides.suggestDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, overrides.suggestDelayMs));
       }
+      // The stand-in worker behaves like the real one: it answers exactly the
+      // crops it received, so a crop dropped by the route shows up as a missing
+      // label instead of being invisible.
+      const body = JSON.parse(String(init?.body)) as {
+        regions: { regionId: string; cropPngBase64: string }[];
+      };
+      log.suggestBodyBytes.push(Buffer.byteLength(String(init?.body), "utf8"));
+      log.suggestCrops.push(
+        body.regions.map((region) => ({
+          regionId: region.regionId,
+          pngBytes: Buffer.from(region.cropPngBase64, "base64").byteLength,
+        })),
+      );
       return Response.json({
         backend: "zeroshot",
         encoderId: "imageomics/bioclip-2@2957b322",
         headSha256: null,
-        suggestions: [
-          {
-            regionId: "sam-0",
-            ranking: [{ label: "lichen", labelEs: "liquen", rawScore: 0.4 }],
-          },
-        ],
+        suggestions: body.regions.map((region) => ({
+          regionId: region.regionId,
+          ranking: [{ label: "lichen", labelEs: "liquen", rawScore: 0.4 }],
+        })),
       });
     }
     return new Response("{}", { status: 200 });
@@ -259,7 +272,14 @@ function fakeFetch(
 }
 
 function emptyLog(): FetchLog {
-  return { urls: [], forwardedImages: [], concurrent: 0, maxConcurrent: 0 };
+  return {
+    urls: [],
+    forwardedImages: [],
+    concurrent: 0,
+    maxConcurrent: 0,
+    suggestBodyBytes: [],
+    suggestCrops: [],
+  };
 }
 
 function jsonRequest(body: unknown): Request {
@@ -571,8 +591,12 @@ function suggestRequest() {
   });
 }
 
-async function suggestDeps(log: FetchLog, health?: Record<string, unknown> | null) {
-  const bytes = await proxyBytes();
+async function suggestDeps(
+  log: FetchLog,
+  health?: Record<string, unknown> | null,
+  overrides: { bytes?: Buffer; workerBodyLimitBytes?: number } = {},
+) {
+  const bytes = overrides.bytes ?? (await proxyBytes());
   return {
     supabase: fakeSupabase({ signedPaths: [] }, bytes.byteLength),
     enabled: true,
@@ -580,9 +604,144 @@ async function suggestDeps(log: FetchLog, health?: Record<string, unknown> | nul
     authHeaders: {},
     preprocessMode: "whole_crop_pad",
     timeoutMs: 5_000,
+    workerBodyLimitBytes: overrides.workerBodyLimitBytes,
     fetchImpl: fakeFetch(log, bytes, { health }),
   };
 }
+
+// A FLAT proxy compresses to almost nothing, so it can never show the byte
+// budget failing. This one is real noise, like the bark the reviewer photographs:
+// its crops are megabytes of incompressible PNG.
+let texturedBytesCache: Buffer | null = null;
+
+async function texturedProxyBytes(): Promise<Buffer> {
+  if (!texturedBytesCache) {
+    const raw = Buffer.alloc(PROXY_WIDTH * PROXY_HEIGHT * 3);
+    let seed = 12345;
+    for (let index = 0; index < raw.length; index += 1) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      raw[index] = (seed >>> 16) & 0xff;
+    }
+    texturedBytesCache = await sharp(raw, {
+      raw: { width: PROXY_WIDTH, height: PROXY_HEIGHT, channels: 3 },
+    })
+      .jpeg({ quality: 95 })
+      .toBuffer();
+  }
+  return texturedBytesCache;
+}
+
+function texturedRegions(count: number) {
+  // Boxes spread over the proxy, all different, each large enough that its crop
+  // is far over the 1 MiB per-crop cap before being reduced.
+  return Array.from({ length: count }, (_, index) => ({
+    regionId: `sam-${index}`,
+    box: {
+      x: 20 + (index % 4) * 230,
+      y: 20 + Math.floor(index / 4) * 170,
+      width: 220,
+      height: 160,
+    },
+    maskAreaPixels: 10_000 + index,
+    maskSha: `mask${index}`,
+    samScore: 0.5,
+  }));
+}
+
+test("a textured batch classifies every region instead of dropping crops silently", async () => {
+  reset();
+  const log = emptyLog();
+  const deps = await suggestDeps(log, undefined, { bytes: await texturedProxyBytes() });
+  const regions = texturedRegions(12);
+  const result = await handleRegionSuggestions(
+    deps,
+    jsonRequest({
+      imageId: IMAGE_IDS.N,
+      treeSampleId: TREE,
+      direction: "N",
+      requestToken: "textured",
+      sourceWidth: 1024,
+      sourceHeight: 768,
+      regions,
+    }),
+  );
+  assert.equal(result.status, 200);
+  // Twelve masks in, twelve labels out. Before the budget fix the crops of a
+  // textured photograph were over 1 MiB and were skipped without saying so.
+  const suggestions = result.body.suggestions as { regionId: string }[];
+  assert.equal(suggestions.length, 12);
+  assert.deepEqual(
+    suggestions.map((suggestion) => suggestion.regionId).sort(),
+    regions.map((region) => region.regionId).sort(),
+  );
+  assert.equal((result.body.geometry as unknown[]).length, 12);
+  // The base64 body really fits what the worker accepts.
+  assert.equal(log.suggestBodyBytes.length, 1);
+  assert.ok(log.suggestBodyBytes[0] <= 8 * 1024 * 1024, `body ${log.suggestBodyBytes[0]}`);
+  assert.equal(log.suggestCrops[0].length, 12);
+  for (const crop of log.suggestCrops[0]) {
+    assert.ok(crop.pngBytes <= 1024 * 1024, `crop ${crop.regionId} = ${crop.pngBytes}`);
+  }
+});
+
+test("two different masks with the same box keep both identities", async () => {
+  reset();
+  const log = emptyLog();
+  const deps = await suggestDeps(log);
+  const box = { x: 100, y: 100, width: 200, height: 150 };
+  const result = await handleRegionSuggestions(
+    deps,
+    jsonRequest({
+      imageId: IMAGE_IDS.N,
+      treeSampleId: TREE,
+      direction: "N",
+      requestToken: "aliases",
+      sourceWidth: 1024,
+      sourceHeight: 768,
+      regions: [
+        { regionId: "sam-0", box, maskAreaPixels: 12_000, maskSha: "aaaa", samScore: 0.7 },
+        // Same bounding box, DIFFERENT pixels: a hole, a branch crossing it, a
+        // mask the reviewer edited. Its identifier must survive.
+        { regionId: "sam-1", box, maskAreaPixels: 4_000, maskSha: "bbbb", samScore: 0.6 },
+      ],
+    }),
+  );
+  assert.equal(result.status, 200);
+  // The identical crop is cut and classified once...
+  assert.equal(log.suggestCrops[0].length, 1);
+  // ...and its classification belongs to both regions.
+  const suggestions = result.body.suggestions as { regionId: string }[];
+  assert.deepEqual(suggestions.map((suggestion) => suggestion.regionId).sort(), ["sam-0", "sam-1"]);
+  const geometry = result.body.geometry as { regionId: string }[];
+  assert.deepEqual(geometry.map((entry) => entry.regionId).sort(), ["sam-0", "sam-1"]);
+});
+
+test("a batch that does not fit fails explicitly instead of classifying part of it", async () => {
+  reset();
+  const log = emptyLog();
+  const deps = await suggestDeps(log, undefined, {
+    bytes: await texturedProxyBytes(),
+    // A worker configured with a much smaller body limit: not even reducing the
+    // crops six times fits 12 textured regions in it.
+    workerBodyLimitBytes: 96 * 1024,
+  });
+  const result = await handleRegionSuggestions(
+    deps,
+    jsonRequest({
+      imageId: IMAGE_IDS.N,
+      treeSampleId: TREE,
+      direction: "N",
+      requestToken: "too-big",
+      sourceWidth: 1024,
+      sourceHeight: 768,
+      regions: texturedRegions(12),
+    }),
+  );
+  assert.equal(result.status, 413);
+  assert.match(String(result.body.error), /se conservan/);
+  // Nothing was classified partially: the worker was never called.
+  assert.equal(log.suggestCrops.length, 0);
+});
 
 test("a verified identity enables reuse and a changed head invalidates it", async () => {
   reset();

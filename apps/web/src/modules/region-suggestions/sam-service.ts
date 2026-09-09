@@ -19,7 +19,7 @@
 // their resolution is reduced to a bounded working grid so a whole series can be
 // reviewed, edited and measured in the browser.
 
-import { maskFromRgba } from "./mask-edit";
+import { maskFromRgba, type MaskEncoding } from "./mask-edit";
 
 export const MAX_WORKING_SIDE = 1024;
 
@@ -174,10 +174,14 @@ export async function releaseSegmentationSession(session: SegmentationSession): 
 
 // Decodes the mask PNG the service returns and rasterises it onto the working
 // grid, preserving the real region instead of its bounding box.
+// The vision service encodes the mask as an OPAQUE grayscale PNG (white = region),
+// so the alpha channel says nothing. The encoding is passed explicitly instead of
+// being inferred from the `image/png` media type.
 export async function decodeMaskToWorkingGrid(
   maskDataUrl: string,
   workingWidth: number,
   workingHeight: number,
+  encoding: MaskEncoding = "grayscale",
 ): Promise<Uint8Array> {
   if (!maskDataUrl.startsWith("data:image/")) {
     throw new Error("La máscara recibida no es una imagen embebida.");
@@ -191,7 +195,7 @@ export async function decodeMaskToWorkingGrid(
     context.clearRect(0, 0, workingWidth, workingHeight);
     context.drawImage(bitmap, 0, 0, workingWidth, workingHeight);
     const image = context.getImageData(0, 0, workingWidth, workingHeight);
-    return maskFromRgba(image.data, workingWidth, workingHeight);
+    return maskFromRgba(image.data, workingWidth, workingHeight, { encoding });
   } finally {
     bitmap.close();
   }

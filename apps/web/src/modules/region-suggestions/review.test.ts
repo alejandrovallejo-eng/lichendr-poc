@@ -267,6 +267,24 @@ test("las fases avanzan Buscando regiones → Sugiriendo etiquetas → Revisar",
   assert.equal(nextPhase("searching_regions", { type: "regions_found", count: 0 }), "review");
 });
 
+test("reintentar etiquetas saca de «Asistencia no disponible» sin resegmentar", () => {
+  // A failed classification lands in `unavailable`. `regions_found` is ignored
+  // there, so a successful retry kept showing the failure notice even with the
+  // labels already applied.
+  assert.equal(nextPhase("unavailable", { type: "regions_found", count: 10 }), "unavailable");
+
+  let phase = nextPhase("unavailable", { type: "retry_labels" });
+  assert.equal(phase, "suggesting_labels");
+  phase = nextPhase(phase, { type: "labels_ready" });
+  assert.equal(phase, "review");
+
+  // From `review` it is valid too, and a new failure returns to `unavailable`.
+  assert.equal(nextPhase("review", { type: "retry_labels" }), "suggesting_labels");
+  assert.equal(nextPhase("suggesting_labels", { type: "worker_failed" }), "unavailable");
+  // While MobileSAM is still proposing, a label retry changes nothing.
+  assert.equal(nextPhase("searching_regions", { type: "retry_labels" }), "searching_regions");
+});
+
 test("un fallo del worker nunca simula éxito y conserva la anotación manual", () => {
   const phase = nextPhase("suggesting_labels", { type: "worker_failed" });
   assert.equal(phase, "unavailable");

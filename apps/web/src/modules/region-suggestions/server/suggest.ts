@@ -35,6 +35,10 @@ export interface SuggestDeps {
   preprocessMode: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  // Body limit the BioCLIP worker enforces. Defaults to the 8 MiB it ships with;
+  // it is injectable so a deployment with a stricter proxy, and the tests, can
+  // exercise the same budget without raising any limit.
+  workerBodyLimitBytes?: number;
 }
 
 export interface HandlerResult {
@@ -50,12 +54,25 @@ const MAX_REFERENCE_BYTES = 32 * 1024;
 // sides, so a batch the route accepts can never be rejected as too large by the
 // worker after the crops were already cut.
 const MAX_CROP_BYTES = 1024 * 1024;
-const MAX_TOTAL_CROP_BYTES = 8 * 1024 * 1024;
+// The worker rejects a JSON BODY over 8 MiB. The crops travel base64 encoded, so
+// the budget has to be counted in the encoded size plus the JSON envelope, not
+// as 8 MiB of binary. Raising the limits is not the fix: the crops are reduced.
+const MAX_WORKER_BODY_BYTES = 8 * 1024 * 1024;
+const WORKER_ENVELOPE_RESERVE = 64 * 1024;
+// At most six 0.75 steps, i.e. down to ~18 % of the linear size. Below that the
+// crop is not worth classifying and the batch fails explicitly instead.
+const MAX_CROP_SHRINK_STEPS = 6;
+const CROP_SHRINK_FACTOR = 0.75;
 const MAX_TOTAL_CROP_PIXELS = 24 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const HASH_ID = /^[A-Za-z0-9]{4,64}$/;
 const MAX_SOURCE_SIDE = 20_000;
+// Bumped from "1": the crops that reach BioCLIP are now reduced to fit the
+// worker body budget and a shared crop is distributed to every region that owns
+// it, so the classifier inputs are NOT the ones a "1" batch was computed from.
+// The version is part of the cache key, so old entries can never be reused.
+const SUGGESTION_VERSION = "2";
 const TOO_LARGE = Symbol("too-large");
 
 interface RegionInput {
@@ -130,6 +147,10 @@ export async function handleRegionSuggestions(
   }
   const proxy = context.proxy;
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const bodyLimitBytes =
+    Number.isSafeInteger(deps.workerBodyLimitBytes) && (deps.workerBodyLimitBytes as number) > 0
+      ? (deps.workerBodyLimitBytes as number)
+      : MAX_WORKER_BODY_BYTES;
 
   // The whole assisted journey shares one serial coordinator, so four panels
   // are never four parallel workers.
@@ -162,7 +183,7 @@ export async function handleRegionSuggestions(
       proxySha256,
       maskSetSha256,
       preprocessVersion: deps.preprocessMode,
-      suggestionVersion: "1",
+      suggestionVersion: SUGGESTION_VERSION,
     };
 
     // Bounded reuse is only attempted when the identity of the model can be
@@ -192,7 +213,7 @@ export async function handleRegionSuggestions(
       }
     }
 
-    let crops: Array<{ regionId: string; base64: string; cropBoxNormalized: Box }>;
+    let crops: Crop[];
     try {
       crops = await cutCrops(
         proxyBytes,
@@ -201,8 +222,14 @@ export async function handleRegionSuggestions(
         sourceWidth,
         sourceHeight,
         regions,
+        bodyLimitBytes,
       );
-    } catch {
+    } catch (error) {
+      // A batch that does not fit is reported as such. Dropping crops silently
+      // used to answer fewer labels than masks and look like a success.
+      if (error instanceof CropBudgetError) {
+        return { status: 413, body: { error: error.message } };
+      }
       return {
         status: 422,
         body: { error: "Las regiones propuestas no son válidas para esta fotografía." },
@@ -220,14 +247,31 @@ export async function handleRegionSuggestions(
       versions?: Record<string, string>;
       suggestions?: unknown;
     };
+    // The real serialised body is measured BEFORE sending it: the budget above is
+    // an estimate, this is the actual size the worker will read.
+    const workerBody = JSON.stringify({
+      preprocess: deps.preprocessMode,
+      regions: crops.map((crop) => ({
+        regionId: crop.regionIds[0],
+        cropPngBase64: crop.base64,
+      })),
+    });
+    if (Buffer.byteLength(workerBody, "utf8") > bodyLimitBytes) {
+      return {
+        status: 413,
+        body: {
+          error:
+            "El lote de recortes supera el tamaño que admite el worker BioCLIP. "
+            + "No se clasifica parcialmente: tus fotografías, máscaras y revisiones se conservan.",
+        },
+      };
+    }
+
     try {
       const upstream = await fetchImpl(`${deps.workerUrl.replace(/\/$/, "")}/suggest-regions`, {
         method: "POST",
         headers: { "content-type": "application/json", ...deps.authHeaders },
-        body: JSON.stringify({
-          preprocess: deps.preprocessMode,
-          regions: crops.map((crop) => ({ regionId: crop.regionId, cropPngBase64: crop.base64 })),
-        }),
+        body: workerBody,
         signal: AbortSignal.timeout(deps.timeoutMs),
         cache: "no-store",
       });
@@ -284,11 +328,13 @@ export async function handleRegionSuggestions(
           : declaredIdentity?.headError
             ? "La cabeza entrenada configurada no se pudo cargar; estas sugerencias provienen del modo zero-shot."
             : null,
-      geometry: crops.map((crop) => ({
-        regionId: crop.regionId,
-        cropBoxNormalized: crop.cropBoxNormalized,
-      })),
-      suggestions: sanitizeSuggestions(workerPayload.suggestions),
+      geometry: crops.flatMap((crop) =>
+        crop.regionIds.map((regionId) => ({
+          regionId,
+          cropBoxNormalized: crop.cropBoxNormalized,
+        })),
+      ),
+      suggestions: expandSuggestionsToAliases(sanitizeSuggestions(workerPayload.suggestions), crops),
       notice:
         "Puntuaciones crudas, no probabilidades. Cada región queda pendiente de tu revisión: "
         + "la etiqueta no demuestra que todos los píxeles de la máscara sean liquen.",
@@ -426,6 +472,24 @@ function parseRequest(value: unknown):
   };
 }
 
+// A batch that does not fit is a FAILURE, never a silent success with fewer
+// labels than masks.
+class CropBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CropBudgetError";
+  }
+}
+
+interface Crop {
+  // Every region that shares this crop. Two different masks can have the same
+  // bounding box; their identity is preserved and the single classification is
+  // distributed to all of them.
+  regionIds: string[];
+  base64: string;
+  cropBoxNormalized: Box;
+}
+
 // Single application of the geometry contract: the tight box measured on the
 // working grid is scaled to proxy pixels and the context margin is added ONCE,
 // here. The resulting crop is reported back normalised so the overlay matches.
@@ -436,11 +500,20 @@ async function cutCrops(
   sourceWidth: number,
   sourceHeight: number,
   regions: readonly RegionInput[],
-): Promise<Array<{ regionId: string; base64: string; cropBoxNormalized: Box }>> {
-  const crops: Array<{ regionId: string; base64: string; cropBoxNormalized: Box }> = [];
-  const keptBoxes: Box[] = [];
-  let totalBytes = 0;
+  bodyLimitBytes: number,
+): Promise<Crop[]> {
+  const crops: Crop[] = [];
+  const kept: Array<{ box: Box; crop: Crop }> = [];
   let totalPixels = 0;
+  // Per-crop budget in PNG bytes so that the whole base64 body fits the worker.
+  const cropBudget = Math.min(
+    MAX_CROP_BYTES,
+    Math.floor((((bodyLimitBytes - WORKER_ENVELOPE_RESERVE) * 3) / 4) / regions.length),
+  );
+  if (cropBudget <= 0) {
+    throw new CropBudgetError("Hay demasiadas regiones para clasificarlas en un solo lote.");
+  }
+
   for (const region of regions) {
     const tightOnProxy = scaleBoxToSpace(
       region.box,
@@ -450,35 +523,63 @@ async function cutCrops(
       proxyHeight,
     );
     const expanded = expandWithContext(tightOnProxy, proxyWidth, proxyHeight);
-    if (keptBoxes.some((other) => intersectionOverUnion(expanded, other) >= 0.92)) continue;
-    const downscale = scaleToMaxSide(expanded);
-    const outputWidth = Math.max(1, Math.round(expanded.width * downscale));
-    const outputHeight = Math.max(1, Math.round(expanded.height * downscale));
-    if (totalPixels + outputWidth * outputHeight > MAX_TOTAL_CROP_PIXELS) break;
-    // `extract` keeps the whole expanded region; the optional resize applies to
-    // the complete crop, so no extreme of the region is ever cut away.
-    let pipeline = sharp(proxyBytes, { failOn: "error", sequentialRead: true }).extract({
+    // Deduplication is about the CROP, not about the region: the identifier of a
+    // region whose mask differs is never dropped.
+    const duplicate = kept.find((other) => intersectionOverUnion(expanded, other.box) >= 0.92);
+    if (duplicate) {
+      duplicate.crop.regionIds.push(region.regionId);
+      continue;
+    }
+
+    // `extract` keeps the whole expanded region; every resize applies to the
+    // COMPLETE crop and is always recomputed from the original pixels, so no
+    // extreme of the region is cut away and no resampling is stacked.
+    const base = sharp(proxyBytes, { failOn: "error", sequentialRead: true }).extract({
       left: expanded.x,
       top: expanded.y,
       width: expanded.width,
       height: expanded.height,
     });
-    if (downscale < 1) {
-      pipeline = pipeline.resize({
-        width: outputWidth,
-        height: outputHeight,
-        fit: "fill",
-        kernel: sharp.kernel.lanczos3,
-      });
+
+    let scale = scaleToMaxSide(expanded);
+    let buffer: Buffer | null = null;
+    let outputWidth = expanded.width;
+    let outputHeight = expanded.height;
+    for (let attempt = 0; attempt <= MAX_CROP_SHRINK_STEPS; attempt += 1) {
+      outputWidth = Math.max(1, Math.round(expanded.width * scale));
+      outputHeight = Math.max(1, Math.round(expanded.height * scale));
+      let pipeline = base.clone();
+      if (scale < 1) {
+        pipeline = pipeline.resize({
+          width: outputWidth,
+          height: outputHeight,
+          fit: "fill",
+          kernel: sharp.kernel.lanczos3,
+        });
+      }
+      const encoded = await pipeline.png({ compressionLevel: 9 }).toBuffer();
+      if (encoded.byteLength <= cropBudget) {
+        buffer = encoded;
+        break;
+      }
+      if (outputWidth <= 1 && outputHeight <= 1) break;
+      scale *= CROP_SHRINK_FACTOR;
     }
-    const buffer = await pipeline.png({ compressionLevel: 9 }).toBuffer();
-    if (buffer.byteLength > MAX_CROP_BYTES) continue;
-    if (totalBytes + buffer.byteLength > MAX_TOTAL_CROP_BYTES) break;
-    totalBytes += buffer.byteLength;
+    if (!buffer) {
+      throw new CropBudgetError(
+        "Los recortes de esta vista no caben en un solo lote ni reduciéndolos. "
+        + "No se clasifica parcialmente: tus fotografías, máscaras y revisiones se conservan.",
+      );
+    }
+    if (totalPixels + outputWidth * outputHeight > MAX_TOTAL_CROP_PIXELS) {
+      throw new CropBudgetError(
+        "Las regiones propuestas superan el máximo de píxeles admitido en un lote. "
+        + "Reduce el número de regiones; tus máscaras y revisiones se conservan.",
+      );
+    }
     totalPixels += outputWidth * outputHeight;
-    keptBoxes.push(expanded);
-    crops.push({
-      regionId: region.regionId,
+    const crop: Crop = {
+      regionIds: [region.regionId],
       base64: buffer.toString("base64"),
       cropBoxNormalized: {
         x: expanded.x / proxyWidth,
@@ -486,12 +587,31 @@ async function cutCrops(
         width: expanded.width / proxyWidth,
         height: expanded.height / proxyHeight,
       },
-    });
+    };
+    kept.push({ box: expanded, crop });
+    crops.push(crop);
   }
   return crops;
 }
 
-function sanitizeSuggestions(value: unknown): unknown[] {
+// The classification of a shared crop belongs to every region that shares it.
+function expandSuggestionsToAliases(
+  suggestions: readonly Record<string, unknown>[],
+  crops: readonly Crop[],
+): unknown[] {
+  const aliasesOf = new Map<string, string[]>();
+  for (const crop of crops) aliasesOf.set(crop.regionIds[0], crop.regionIds);
+  const expanded: unknown[] = [];
+  for (const suggestion of suggestions) {
+    const regionId = typeof suggestion.regionId === "string" ? suggestion.regionId : "";
+    for (const alias of aliasesOf.get(regionId) ?? [regionId]) {
+      expanded.push({ ...suggestion, regionId: alias });
+    }
+  }
+  return expanded;
+}
+
+function sanitizeSuggestions(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, MAX_REGIONS_PER_VIEW).map((item) => {
     const suggestion = (item ?? {}) as Record<string, unknown>;

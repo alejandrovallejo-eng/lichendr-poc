@@ -51,20 +51,41 @@ export function masksEqual(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
-// Turns a decoded RGBA mask image into a binary mask. MobileSAM returns the
-// mask as a PNG, so the alpha channel carries the region.
+// How the region is carried inside the decoded RGBA pixels. This is a CONTRACT
+// with whoever produced the image, not something to guess from the file
+// extension: a PNG can carry the mask either way.
+//
+// * `alpha`: the region is the opaque part (an RGBA mask with transparency).
+// * `grayscale`: the image is opaque everywhere and the region is the WHITE
+//   part. This is what `services/vision` sends: `_mask_to_png_data_url` writes a
+//   PIL `mode="L"` PNG with 0 for background and 255 for the region. Reading its
+//   alpha channel would mark every pixel as region, turn every mask into the
+//   whole photograph and collapse them all into one.
+export type MaskEncoding = "alpha" | "grayscale";
+
+// Turns a decoded RGBA mask image into a binary mask.
 export function maskFromRgba(
   data: Uint8ClampedArray | Uint8Array,
   width: number,
   height: number,
-  alphaThreshold = 8,
+  options: { encoding?: MaskEncoding; alphaThreshold?: number; lumaThreshold?: number } = {},
 ): Uint8Array {
   if (data.length !== width * height * 4) {
     throw new Error("Los píxeles de la máscara no coinciden con sus dimensiones.");
   }
+  // Default `alpha` keeps every existing caller reading exactly as before.
+  const encoding: MaskEncoding = options.encoding ?? "alpha";
+  const alphaThreshold = options.alphaThreshold ?? 8;
+  const lumaThreshold = options.lumaThreshold ?? 128;
   const mask = new Uint8Array(width * height);
   for (let index = 0; index < mask.length; index += 1) {
-    mask[index] = data[index * 4 + 3] >= alphaThreshold ? 1 : 0;
+    const opaque = data[index * 4 + 3] >= alphaThreshold;
+    if (encoding === "grayscale") {
+      // Opaque AND white: an opaque black pixel is background, not region.
+      mask[index] = opaque && data[index * 4] >= lumaThreshold ? 1 : 0;
+    } else {
+      mask[index] = opaque ? 1 : 0;
+    }
   }
   return mask;
 }

@@ -58,7 +58,9 @@ import {
   type SuggestionPhase,
 } from "./types";
 
-const SUGGESTION_VERSION = "1";
+// Must match `SUGGESTION_VERSION` in `server/suggest.ts`: a batch produced with
+// another version of the crop/preprocessing contract is not applied.
+const SUGGESTION_VERSION = "2";
 const BRUSH_RADIUS = 12;
 
 export interface RegionSuggestionsPanelProps {
@@ -451,7 +453,10 @@ export function RegionSuggestionsPanel({
     abortRef.current = controller;
     setFailure(null);
     setCached(false);
-    setPhase((current) => nextPhase(current, { type: "regions_found", count: regions.length }));
+    // `regions_found` is ignored outside `searching_regions`, so a retry from
+    // `unavailable` used to keep showing "Asistencia no disponible" even when the
+    // labels arrived. `retry_labels` is the event for retrying only this step.
+    setPhase((current) => nextPhase(current, { type: "retry_labels" }));
     await classify(regions, workingGrid, generation, controller);
   }, [classify, ensureGrid, ownerId, regions]);
 

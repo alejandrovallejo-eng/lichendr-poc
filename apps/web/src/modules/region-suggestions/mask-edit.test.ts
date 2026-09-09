@@ -44,3 +44,28 @@ test("la máscara PNG de MobileSAM se convierte por canal alfa", () => {
   assert.deepEqual(Array.from(maskFromRgba(rgba, width, height)), [0, 1, 0, 1]);
   assert.throws(() => maskFromRgba(rgba, 3, 3), /no coinciden/);
 });
+
+test("una máscara opaca en escala de grises se lee por su blanco, no por su alfa", () => {
+  // The contract of `services/vision`: PIL mode "L", 0 background, 255 region,
+  // fully opaque. Reading its alpha would mark EVERY pixel as region.
+  const width = 2;
+  const height = 2;
+  const opaqueGrayscale = new Uint8ClampedArray([
+    0, 0, 0, 255,
+    255, 255, 255, 255,
+    127, 127, 127, 255,
+    128, 128, 128, 255,
+  ]);
+  assert.deepEqual(
+    Array.from(maskFromRgba(opaqueGrayscale, width, height, { encoding: "grayscale" })),
+    [0, 1, 0, 1],
+  );
+  // The same pixels read as alpha are the whole image: this is the real bug.
+  assert.deepEqual(Array.from(maskFromRgba(opaqueGrayscale, width, height)), [1, 1, 1, 1]);
+  // A white but transparent pixel is not a region either.
+  const transparentWhite = new Uint8ClampedArray([255, 255, 255, 0, 255, 255, 255, 255]);
+  assert.deepEqual(
+    Array.from(maskFromRgba(transparentWhite, 2, 1, { encoding: "grayscale" })),
+    [0, 1],
+  );
+});

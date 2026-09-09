@@ -400,3 +400,100 @@ Todo lo anterior son **simulaciones**: siguen sin existir en este entorno las
 fotografías ni los pesos privados, así que ninguna prueba de este PR afirma haber
 ejecutado MobileSAM ni BioCLIP reales.
 
+
+## Corrección tras la ejecución local con los servicios reales (`932fe92`)
+
+La persona revisora ejecutó Chrome contra los servicios HTTP **MobileSAM y
+BioCLIP reales** (auth, base de datos y Storage como fixtures locales: no es un
+E2E desplegado ni una validación científica) y encontró cuatro fallos que este
+entorno no podía ver. Se corrigen de forma acotada.
+
+### 1. La máscara del servicio es escala de grises opaca, no alfa
+
+`services/vision/model.py:_mask_to_png_data_url` escribe un PNG en modo `L`
+(fondo 0, región 255) **sin canal alfa**. Al dibujarlo en un canvas el alfa vale
+255 en todos los píxeles, así que `maskFromRgba`, que solo leía alfa, marcaba la
+imagen entera como región: 768×1024 = 786 432 píxeles por máscara, todas
+idénticas, deduplicadas a una y `/suggest` respondiendo 422.
+
+La codificación es ahora un **parámetro explícito**, nunca deducida del tipo
+`image/png`: `maskFromRgba(data, w, h, { encoding })` con `"alpha"` por defecto
+(compatibilidad con las máscaras dibujadas en el cliente) y `"grayscale"`, que
+exige `alpha >= 8` **y** `R >= 128`. `decodeMaskToWorkingGrid` pasa
+`"grayscale"`, que es el contrato del servicio, y mantiene el remuestreo
+*nearest-neighbor*. Si el servicio cambiara de contrato hay que cambiar aquí ese
+argumento, no adivinarlo.
+
+Regresiones: `mask-edit.test.ts` comprueba que un buffer opaco blanco/negro se
+lee `[0,1,0,1]` en grayscale y `[1,1,1,1]` como alfa (el fallo real), y conserva
+el test de máscaras con alfa. `sam-service.test.ts` genera con `sharp` un PNG
+**producido con el contrato real** (un canal, sin alfa) y lo pasa por
+`createImageBitmap`/canvas. Límite honesto: en Node esas API no existen y el test
+las respalda con `sharp`; comprueba el contrato de codificación, no el
+comportamiento exacto de Chrome.
+
+### 2. Presupuesto de bytes en vez de recortes descartados en silencio
+
+`cutCrops` tiraba todo PNG de más de 1 MiB. Con una foto texturada real nueve
+recortes pesaban entre 1 179 112 y 2 248 045 bytes y solo uno 91 390: diez
+máscaras, **una** etiqueta, y el panel presentándolo como éxito. Además el worker
+limita el **cuerpo JSON completo** a 8 MiB, y base64 infla los bytes en 4/3.
+
+Ahora el presupuesto es explícito y por lote:
+`cropBudget = min(1 MiB, floor(((8 MiB − 64 KiB) × 3/4) / nº de regiones))`. Un
+recorte que no quepa se **reencodifica desde los píxeles originales**
+(`pipeline.clone()`, escalado 0.75, hasta 6 intentos): se reduce la resolución,
+nunca se corta contexto, no se toca el original ni la máscara científica. Antes
+del `fetch` se serializa el cuerpo y se mide con `Buffer.byteLength`. Si aun así
+no cabe, la respuesta es **413 explícito** con aviso de preservación: ni se
+omiten regiones ni se presenta éxito parcial. Subir los límites no es la
+solución, así que los máximos de píxeles, regiones y bytes siguen donde estaban.
+`workerBodyLimitBytes` es inyectable únicamente para poder probar el fallo del
+presupuesto sin fabricar entradas absurdas.
+
+### 3. La caja no identifica la máscara
+
+La deduplicación por IoU de cajas ≥ 0.92 borraba `regionId`, pero dos máscaras de
+píxeles distintos pueden tener la misma caja. Ahora cada recorte guarda
+`regionIds[]`: se clasifica una vez y `expandSuggestionsToAliases` reparte esa
+clasificación a **todos** sus identificadores, que aparecen íntegros en
+`suggestions` y en `geometry`. Regresiones: dos máscaras distintas con caja
+idéntica, y un lote texturado de 12 regiones (ruido determinista, no imágenes
+planas comprimibles) que exige 12 etiquetas y 12 geometrías.
+
+### 4. Reintentar etiquetas sale de «Asistencia no disponible»
+
+`retryClassification` emitía `regions_found`, que `nextPhase` ignora desde
+`unavailable`; el panel se quedaba con el aviso pese a tener las etiquetas y el
+backend `ridge_head`. Se añade el evento **`retry_labels`**:
+`unavailable`/`review` → `suggesting_labels`, éxito → `review`, fallo →
+`unavailable`, sin resegmentar. Probado con una prueba de componente en jsdom:
+falla la primera petición, aparece el aviso; el reintento acierta, el aviso
+desaparece, vuelve «Revisar» y la máscara dibujada a mano sigue ahí.
+
+### Versión de preprocesado y caché
+
+Los recortes que entran al clasificador han cambiado (reducción proporcional por
+presupuesto), así que `SUGGESTION_VERSION` pasa de `"1"` a `"2"` en
+`server/suggest.ts` y en `RegionSuggestionsPanel.tsx`. Forma parte de la clave de
+caché y de la comprobación de procedencia, de modo que las sugerencias anteriores
+se invalidan en vez de mezclarse con las nuevas. Las decisiones humanas ya
+guardadas no se tocan.
+
+### Pruebas ejecutadas en esta corrección
+
+- `npm run test:routes` — 17/17, con las tres regresiones nuevas (lote texturado,
+  identidad por alias, fallo explícito de presupuesto).
+- `npm run test:unit` — 236/236, con el contrato grayscale, el PNG real por
+  canvas y `retry_labels`.
+- `npm run test:component` — 2/2, preservación humana y reintento.
+- `npm run test:proxy`, `npm run test:ready`, `npm run lint` y `npm run build`.
+- Las tres pruebas de ruta nuevas y la de reintento se ejecutaron sobre un
+  *worktree* de `932fe92`: fallan sin la corrección (el lote texturado daba 9
+  etiquetas de 12) y pasan con ella.
+
+Siguen siendo **simulaciones**: en este entorno no hay ni la fotografía
+autorizada ni los pesos, así que ninguna prueba de aquí afirma haber ejecutado
+MobileSAM o BioCLIP reales. La ejecución con modelos reales es la de la persona
+revisora, y sus nueve propuestas de liquen y una de musgo no son *ground truth*
+ni cobertura validada.

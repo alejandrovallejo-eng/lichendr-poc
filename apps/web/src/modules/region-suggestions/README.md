@@ -40,3 +40,12 @@ Invariantes:
 - Solo las regiones **aceptadas como liquen** entran en la cobertura; pendientes,
   excluidas y sin determinar quedan fuera, y un ROI de área cero da "resultado no
   disponible".
+- La máscara PNG del servicio es **escala de grises opaca** (fondo 0, región
+  255): `decodeMaskToWorkingGrid` pasa `encoding: "grayscale"` de forma
+  explícita. `maskFromRgba` mantiene `"alpha"` por defecto para las máscaras
+  dibujadas en el cliente.
+- Los recortes se ajustan a un **presupuesto de bytes** que contabiliza base64 y
+  metadatos contra el límite del cuerpo del worker; si un lote no cabe, la
+  respuesta es 413 explícito con preservación, nunca una clasificación parcial.
+- Un recorte puede servir a varias regiones con la misma caja: se conserva cada
+  `regionId` y la clasificación se reparte a todos.

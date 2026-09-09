@@ -14,8 +14,10 @@ import { SUGGESTION_LABELS } from "./types";
 export interface SuggestionCacheIdentity {
   ownerId: string;
   imageId: string;
-  imageSha256: string;
+  // SHA-256 of the analysis proxy PIXEL BYTES. The manifest signature is an
+  // HMAC over metadata, not an image hash, so it is not used as one.
   proxySha256: string;
+  // Hash of the mask PIXELS of the whole batch: editing a mask changes it.
   maskSetSha256: string;
   encoderId: string;
   headSha256: string | null;
@@ -31,7 +33,6 @@ export function suggestionCacheKey(identity: SuggestionCacheIdentity): string {
   const values = [
     identity.ownerId,
     identity.imageId,
-    identity.imageSha256,
     identity.proxySha256,
     identity.maskSetSha256,
     identity.encoderId,
@@ -55,9 +56,10 @@ export function isCachedBatchUsable(
   return cached.key === suggestionCacheKey(identity);
 }
 
-export function initialReview(regionId: string): RegionReview {
+export function initialReview(regionId: string, maskSha: string): RegionReview {
   return {
     regionId,
+    maskSha,
     decision: "pending",
     reviewedLabel: null,
     maskEdited: false,
@@ -69,16 +71,24 @@ export function initialReview(regionId: string): RegionReview {
 // Merge a fresh batch of predictions with the reviews already on record.
 // Decisions taken by a person survive untouched; only regions still `pending`
 // pick up the new prediction.
+// A decision is tied to the pixels it was taken on: it is only carried over
+// when the region still has the same mask hash. If the mask changed, the region
+// goes back to `pending` instead of inheriting a decision that was taken on
+// different pixels.
 export function mergeReviews(
   existing: readonly RegionReview[],
-  incoming: readonly RegionSuggestion[],
+  incoming: readonly { regionId: string; maskSha: string }[],
 ): RegionReview[] {
   const byId = new Map(existing.map((review) => [review.regionId, review]));
   const merged: RegionReview[] = [];
-  for (const suggestion of incoming) {
-    const previous = byId.get(suggestion.regionId);
-    merged.push(previous ? { ...previous } : initialReview(suggestion.regionId));
-    byId.delete(suggestion.regionId);
+  for (const region of incoming) {
+    const previous = byId.get(region.regionId);
+    if (previous && previous.maskSha === region.maskSha) {
+      merged.push({ ...previous });
+    } else {
+      merged.push(initialReview(region.regionId, region.maskSha));
+    }
+    byId.delete(region.regionId);
   }
   // A region that a person already reviewed is kept even if the new batch no
   // longer proposes it: a prediction must not erase a human decision.
@@ -86,6 +96,25 @@ export function mergeReviews(
     if (orphan.decision !== "pending") merged.push({ ...orphan });
   }
   return merged;
+}
+
+// The reviewer edited the mask: the pixels change, so the region is re-keyed and
+// the edit is only recorded when the pixels really differ from the proposal.
+export function applyMaskEdit(
+  reviews: readonly RegionReview[],
+  regionId: string,
+  nextMaskSha: string,
+  proposedMaskSha: string,
+): RegionReview[] {
+  const index = reviews.findIndex((review) => review.regionId === regionId);
+  if (index < 0) throw new Error("La región editada no existe en esta serie.");
+  const next = reviews.slice();
+  next[index] = {
+    ...next[index],
+    maskSha: nextMaskSha,
+    maskEdited: nextMaskSha !== proposedMaskSha,
+  };
+  return next;
 }
 
 export interface DecisionInput {
@@ -111,6 +140,7 @@ export function applyDecision(
   }
   const updated: RegionReview = {
     regionId: input.regionId,
+    maskSha: reviews[index].maskSha,
     decision: input.decision,
     reviewedLabel: input.decision === "accepted" ? (input.label as SuggestionLabel) : null,
     maskEdited: input.maskEdited ?? reviews[index].maskEdited,
@@ -155,27 +185,54 @@ export function acceptedLichenRegionIds(reviews: readonly RegionReview[]): strin
 // --- Context guards ---------------------------------------------------------
 
 export interface SuggestionContext {
+  // Monotonic run counter. The CURRENT generation is read from a ref after each
+  // await; comparing a captured snapshot with its own echo would always match
+  // and would let a stale run overwrite the active one.
+  generation: number;
   ownerId: string;
   treeSampleId: string;
   direction: string;
   imageId: string;
   requestToken: string;
+  // Hash of the exact mask set the request was built from.
+  maskSetSha: string;
   suggestionVersion: string;
 }
 
-// Called after every await: a late response must never be applied to another
-// tree, another view or another version of the pipeline.
+// Called after every await, against the generation that is live at that moment:
+// a late response must never be applied to another tree, another view, another
+// mask set or a superseded run.
 export function resultBelongsToContext(
-  expected: SuggestionContext,
+  current: SuggestionContext,
   received: SuggestionContext,
 ): boolean {
   return (
-    expected.ownerId === received.ownerId
-    && expected.treeSampleId === received.treeSampleId
-    && expected.direction === received.direction
-    && expected.imageId === received.imageId
-    && expected.requestToken === received.requestToken
-    && expected.suggestionVersion === received.suggestionVersion
+    current.generation === received.generation
+    && current.ownerId === received.ownerId
+    && current.treeSampleId === received.treeSampleId
+    && current.direction === received.direction
+    && current.imageId === received.imageId
+    && current.requestToken === received.requestToken
+    && current.maskSetSha === received.maskSetSha
+    && current.suggestionVersion === received.suggestionVersion
+  );
+}
+
+// Identity of the series/view a panel is bound to. When it changes, the panel
+// state is cleared instead of being carried over to another photograph.
+export interface ViewIdentity {
+  ownerId: string;
+  treeSampleId: string;
+  direction: string;
+  imageId: string;
+}
+
+export function sameViewIdentity(left: ViewIdentity, right: ViewIdentity): boolean {
+  return (
+    left.ownerId === right.ownerId
+    && left.treeSampleId === right.treeSampleId
+    && left.direction === right.direction
+    && left.imageId === right.imageId
   );
 }
 
@@ -277,7 +334,9 @@ export function restoreState(saved: {
   reviews: RegionReview[];
   reanalysisRequired: boolean;
 } {
-  const reviews = mergeReviews(saved.reviews, saved.suggestions);
+  // Restoration keeps the edited geometry: reviews are re-anchored on the mask
+  // hashes actually stored, not on the ids alone.
+  const reviews = mergeReviews(saved.reviews, saved.regions);
   return {
     phase: saved.regions.length > 0 || saved.suggestions.length > 0 ? "review" : "idle",
     regions: saved.regions.map((region) => ({ ...region })),

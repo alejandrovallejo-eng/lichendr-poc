@@ -1,15 +1,25 @@
 "use client";
 
-// Browser side of the pilot: it asks the in-browser SAM worker for region
-// proposals and then asks the server route for BioCLIP label suggestions.
+// Browser side of the pilot.
 //
-// The image bytes never travel in the suggestion request: only identifiers and
-// integer bounding boxes are sent, and the server cuts the crops from the
-// private analysis proxy. No signed URL is ever handled here.
+// Regions come from MobileSAM (`services/vision`, `vit_t`) through the existing
+// vision routes, NOT from the in-browser SlimSAM of `modules/vision-lab`.
+//
+// Geometry contract (applied once, see `crop-geometry.ts`):
+//
+// * EXIF orientation is already applied upstream by the proxy and by the vision
+//   service, so no coordinate is rotated here;
+// * the client sends the TIGHT mask bounding box expressed on the working grid
+//   plus that grid's dimensions;
+// * the server scales it to proxy pixels and applies the context margin exactly
+//   once, then reports the crop box back so the overlay matches the crop.
+//
+// The suggestion request carries only identifiers, integer boxes and mask pixel
+// hashes: no image bytes, no URL, no credential.
 
-import type { SegmentationCandidate } from "../vision-lab/types";
-import { planCropBatch, MAX_REGIONS_PER_VIEW } from "./crop-geometry";
-import type { ProposedRegion, RegionSuggestion, SuggestionProvenance } from "./types";
+import { maskBoundingBox } from "./crop-geometry";
+import { encodeMaskRle, maskArea } from "./mask-codec";
+import type { Box, ProposedRegion, RegionSuggestion, SuggestionProvenance } from "./types";
 
 export interface SuggestionRequestContext {
   imageId: string;
@@ -21,14 +31,17 @@ export interface SuggestionRequestContext {
 export interface SuggestionResponse {
   context: SuggestionRequestContext;
   cacheKey: string;
+  cached: boolean;
   provenance: SuggestionProvenance;
   backend: string;
+  headWarning: string | null;
+  geometry: Array<{ regionId: string; cropBoxNormalized: Box }>;
   suggestions: RegionSuggestion[];
   notice: string;
 }
 
-// Fixed, reproducible prompt grid — the same shape the vision service uses, so
-// proposals do not depend on where the reviewer happens to click.
+// Fixed, reproducible prompt grid — proposals must not depend on where the
+// reviewer happens to click.
 export function gridPromptPoints(rows = 5, columns = 2): Array<{ x: number; y: number }> {
   if (rows <= 0 || columns <= 0) throw new Error("La rejilla de propuestas no es válida.");
   const points: Array<{ x: number; y: number }> = [];
@@ -40,55 +53,80 @@ export function gridPromptPoints(rows = 5, columns = 2): Array<{ x: number; y: n
   return points;
 }
 
-// Turns raw SAM candidates into regions with their crop plan and full
-// transformation chain, dropping empty and duplicated masks.
-export function regionsFromCandidates(
-  candidates: readonly SegmentationCandidate[],
-  options: {
-    orientation: number;
-    proxyScale: number;
-    rectified: boolean;
-    canonicalWidth: number;
-    canonicalHeight: number;
-    preprocessMode: string;
-  },
+export interface MaskInput {
+  regionId: string;
+  mask: Uint8Array;
+  samScore: number;
+}
+
+export interface WorkingGrid {
+  width: number;
+  height: number;
+  // Scale from the EXIF-oriented original to the working grid, recorded for
+  // traceability only: no coordinate is rotated again.
+  originalWidth: number;
+  originalHeight: number;
+  orientationAppliedUpstream: boolean;
+  rectified: boolean;
+}
+
+// Deterministic content hash of the mask pixels (FNV-1a over the encoded runs).
+// Different pixels give a different key, so a cached suggestion can never be
+// reused for a mask the reviewer edited.
+export function maskPixelHash(encodedMask: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < encodedMask.length; index += 1) {
+    hash ^= encodedMask.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+// Turns real MobileSAM masks into proposed regions. Empty masks are dropped;
+// the mask pixels are preserved (run-length encoded), never replaced by a box.
+export function regionsFromMasks(
+  inputs: readonly MaskInput[],
+  grid: WorkingGrid,
+  maxRegions: number,
 ): ProposedRegion[] {
-  const inputs = candidates.map((candidate) => {
-    const height = candidate.mask.length;
-    const width = height > 0 ? candidate.mask[0].length : 0;
-    const flat = new Uint8Array(width * height);
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        flat[y * width + x] = candidate.mask[y][x] ? 1 : 0;
-      }
-    }
-    return {
-      regionId: candidate.id.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || `region-${x36()}`,
-      mask: flat,
-      maskWidth: width,
-      maskHeight: height,
-      ...options,
-    };
-  });
-  const scores = new Map(inputs.map((input, index) => [input.regionId, candidates[index]?.score ?? 0]));
-  const planned = planCropBatch(inputs, MAX_REGIONS_PER_VIEW);
-  return planned.map((plan) => {
-    const source = inputs.find((item) => item.regionId === plan.regionId)!;
-    let area = 0;
-    for (let position = 0; position < source.mask.length; position += 1) {
-      if (source.mask[position] !== 0) area += 1;
-    }
-    return {
-      regionId: plan.regionId,
-      maskWidth: source.maskWidth,
-      maskHeight: source.maskHeight,
-      maskAreaPixels: area,
-      box: plan.cropBox,
-      // SAM's own score: mask quality, never evidence of lichen.
-      samScore: scores.get(plan.regionId) ?? 0,
-      transformChain: plan.transformChain,
-    };
-  });
+  const regions: ProposedRegion[] = [];
+  const seenHashes = new Set<string>();
+  for (const input of inputs) {
+    if (regions.length >= maxRegions) break;
+    const tightBox = maskBoundingBox(input.mask, grid.width, grid.height);
+    if (!tightBox) continue;
+    const maskRle = encodeMaskRle(input.mask, grid.width, grid.height);
+    const maskSha = maskPixelHash(maskRle);
+    // MobileSAM returns the same region for neighbouring prompts: identical
+    // pixels are kept once so nothing is double counted later.
+    if (seenHashes.has(maskSha)) continue;
+    seenHashes.add(maskSha);
+    regions.push({
+      regionId: input.regionId,
+      maskWidth: grid.width,
+      maskHeight: grid.height,
+      maskRle,
+      maskSha,
+      maskAreaPixels: maskArea(input.mask),
+      box: tightBox,
+      cropBoxNormalized: null,
+      // MobileSAM's own score: mask quality, never evidence of lichen.
+      samScore: input.samScore,
+      transformChain: [
+        { step: "exif_orientation", appliedUpstream: grid.orientationAppliedUpstream },
+        {
+          step: "working_grid",
+          width: grid.width,
+          height: grid.height,
+          originalWidth: grid.originalWidth,
+          originalHeight: grid.originalHeight,
+        },
+        { step: "rectification", applied: grid.rectified },
+        { step: "mask_bounding_box", box: tightBox },
+      ],
+    });
+  }
+  return regions;
 }
 
 export class SuggestionRequestError extends Error {
@@ -101,23 +139,37 @@ export class SuggestionRequestError extends Error {
   }
 }
 
+export function buildSuggestionPayload(
+  context: SuggestionRequestContext,
+  regions: readonly ProposedRegion[],
+  grid: { width: number; height: number },
+) {
+  return {
+    ...context,
+    // Working grid dimensions: the server scales the boxes into proxy pixels.
+    sourceWidth: grid.width,
+    sourceHeight: grid.height,
+    regions: regions.map((region) => ({
+      regionId: region.regionId,
+      // TIGHT bounding box: the context margin is added once, on the server.
+      box: region.box,
+      maskAreaPixels: region.maskAreaPixels,
+      maskSha: region.maskSha,
+      samScore: region.samScore,
+    })),
+  };
+}
+
 export async function requestRegionSuggestions(
   context: SuggestionRequestContext,
   regions: readonly ProposedRegion[],
+  grid: { width: number; height: number },
   signal?: AbortSignal,
 ): Promise<SuggestionResponse> {
   const response = await fetch("/api/vision/region-suggestions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ...context,
-      regions: regions.map((region) => ({
-        regionId: region.regionId,
-        box: region.box,
-        maskAreaPixels: region.maskAreaPixels,
-        samScore: region.samScore,
-      })),
-    }),
+    body: JSON.stringify(buildSuggestionPayload(context, regions, grid)),
     signal,
   });
   let body: unknown = null;
@@ -141,6 +193,23 @@ export async function requestRegionSuggestions(
   return body as SuggestionResponse;
 }
 
-function x36(): string {
-  return Math.random().toString(36).slice(2, 10);
+// Applies the crop geometry the server reports so the overlay draws exactly the
+// crop BioCLIP saw, instead of a box the client expanded on its own.
+export function applyServerGeometry(
+  regions: readonly ProposedRegion[],
+  geometry: readonly { regionId: string; cropBoxNormalized: Box }[],
+): ProposedRegion[] {
+  const byId = new Map(geometry.map((entry) => [entry.regionId, entry.cropBoxNormalized]));
+  return regions.map((region) => {
+    const cropBoxNormalized = byId.get(region.regionId) ?? region.cropBoxNormalized;
+    if (!cropBoxNormalized) return region;
+    return {
+      ...region,
+      cropBoxNormalized,
+      transformChain: [
+        ...region.transformChain.filter((step) => step.step !== "server_crop"),
+        { step: "server_crop", boxNormalized: cropBoxNormalized },
+      ],
+    };
+  });
 }

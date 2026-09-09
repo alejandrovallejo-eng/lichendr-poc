@@ -1,85 +1,141 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { gridPromptPoints, regionsFromCandidates } from "./client.ts";
-import { parseSavedBatch, savedBatchStorageKey } from "./storage.ts";
+import test from "node:test";
 
-function squareMask(size: number, x0: number, y0: number, side: number): number[][] {
-  const mask: number[][] = [];
-  for (let y = 0; y < size; y += 1) {
-    const row: number[] = [];
-    for (let x = 0; x < size; x += 1) {
-      row.push(x >= x0 && x < x0 + side && y >= y0 && y < y0 + side ? 1 : 0);
-    }
-    mask.push(row);
-  }
+import {
+  applyServerGeometry,
+  buildSuggestionPayload,
+  gridPromptPoints,
+  maskPixelHash,
+  regionsFromMasks,
+} from "./client.ts";
+import { decodeMaskRle } from "./mask-codec.ts";
+import type { WorkingGrid } from "./client.ts";
+
+const GRID: WorkingGrid = {
+  width: 8,
+  height: 4,
+  originalWidth: 4284,
+  originalHeight: 5712,
+  orientationAppliedUpstream: true,
+  rectified: false,
+};
+
+function maskFromRows(rows: string[]): Uint8Array {
+  const mask = new Uint8Array(rows[0].length * rows.length);
+  rows.forEach((row, y) => {
+    [...row].forEach((cell, x) => {
+      mask[y * rows[0].length + x] = cell === "#" ? 1 : 0;
+    });
+  });
   return mask;
 }
 
+const BLOB = maskFromRows([
+  "........",
+  "..####..",
+  "..####..",
+  "........",
+]);
+const OTHER = maskFromRows([
+  "##......",
+  "##......",
+  "........",
+  "........",
+]);
+const EMPTY = maskFromRows([
+  "........",
+  "........",
+  "........",
+  "........",
+]);
+
 test("la rejilla de prompts es fija y reproducible", () => {
-  const points = gridPromptPoints();
+  const points = gridPromptPoints(5, 2);
   assert.equal(points.length, 10);
   assert.deepEqual(points[0], { x: 0.25, y: 0.1 });
-  assert.deepEqual(gridPromptPoints(), points);
-  assert.throws(() => gridPromptPoints(0, 2));
+  assert.deepEqual(gridPromptPoints(5, 2), points);
+  assert.throws(() => gridPromptPoints(0, 2), /rejilla/);
 });
 
-test("las candidatas se convierten en regiones con cadena de transformaciones", () => {
-  const regions = regionsFromCandidates(
+test("las regiones conservan los píxeles de la máscara, no sólo la caja", () => {
+  const [region] = regionsFromMasks([{ regionId: "a", mask: BLOB, samScore: 0.9 }], GRID, 24);
+  assert.deepEqual(region.box, { x: 2, y: 1, width: 4, height: 2 });
+  assert.equal(region.maskAreaPixels, 8);
+  const decoded = decodeMaskRle(region.maskRle);
+  assert.equal(decoded.width, GRID.width);
+  assert.equal(decoded.height, GRID.height);
+  assert.deepEqual(Array.from(decoded.mask), Array.from(BLOB));
+  // La caja NO se expande en el cliente: el contexto lo añade el servidor.
+  assert.equal(region.cropBoxNormalized, null);
+});
+
+test("máscaras vacías se descartan y los duplicados de píxeles se colapsan", () => {
+  const regions = regionsFromMasks(
     [
-      { id: "a", score: 0.8, mask: squareMask(100, 10, 10, 20), width: 100, height: 100 },
-      // Empty mask: it must be dropped, never turned into an empty region.
-      { id: "b", score: 0.9, mask: squareMask(100, 0, 0, 0), width: 100, height: 100 },
+      { regionId: "a", mask: BLOB, samScore: 0.9 },
+      { regionId: "b", mask: BLOB, samScore: 0.8 },
+      { regionId: "c", mask: EMPTY, samScore: 0.7 },
+      { regionId: "d", mask: OTHER, samScore: 0.6 },
     ],
-    {
-      orientation: 6,
-      proxyScale: 0.5,
-      rectified: true,
-      canonicalWidth: 400,
-      canonicalHeight: 2000,
-      preprocessMode: "whole_crop_pad",
-    },
+    GRID,
+    24,
+  );
+  assert.deepEqual(regions.map((region) => region.regionId), ["a", "d"]);
+});
+
+test("el número de regiones está acotado", () => {
+  const regions = regionsFromMasks(
+    [
+      { regionId: "a", mask: BLOB, samScore: 0.9 },
+      { regionId: "d", mask: OTHER, samScore: 0.6 },
+    ],
+    GRID,
+    1,
   );
   assert.equal(regions.length, 1);
-  const region = regions[0];
-  assert.equal(region.regionId, "a");
-  assert.equal(region.maskAreaPixels, 400);
-  assert.equal(region.samScore, 0.8);
-  // The crop keeps the whole region plus context; it never cuts it.
-  assert.ok(region.box.x <= 10 && region.box.y <= 10);
-  assert.ok(region.box.x + region.box.width >= 30);
-  assert.ok(region.box.y + region.box.height >= 30);
-  const steps = region.transformChain.map((step) => step.step);
-  assert.deepEqual(steps, [
-    "exif_orientation",
-    "analysis_proxy",
-    "rectification",
-    "mask_bounding_box",
-    "context_expansion",
-    "crop_downscale",
-    "encoder_preprocess",
-  ]);
-  const orientation = region.transformChain[0];
-  assert.equal(orientation.step === "exif_orientation" ? orientation.orientation : null, 6);
-  const preprocess = region.transformChain[6];
-  assert.equal(preprocess.step === "encoder_preprocess" ? preprocess.centerCrop : true, false);
 });
 
-test("la clave de almacenamiento está acotada al propietario", () => {
-  assert.equal(
-    savedBatchStorageKey("owner-1", "image-1"),
-    "lichendr:region-suggestions:owner-1:image-1",
-  );
-  assert.throws(() => savedBatchStorageKey("", "image-1"));
+test("el hash de máscara depende de los píxeles", () => {
+  const [first] = regionsFromMasks([{ regionId: "a", mask: BLOB, samScore: 0.9 }], GRID, 24);
+  const [second] = regionsFromMasks([{ regionId: "a", mask: OTHER, samScore: 0.9 }], GRID, 24);
+  assert.notEqual(first.maskSha, second.maskSha);
+  assert.equal(first.maskSha, maskPixelHash(first.maskRle));
 });
 
-test("el estado guardado se valida antes de restaurarse", () => {
-  assert.equal(parseSavedBatch(null), null);
-  assert.equal(parseSavedBatch("{"), null);
-  assert.equal(parseSavedBatch('{"regions":[]}'), null);
-  const parsed = parseSavedBatch(
-    '{"regions":[],"suggestions":[],"reviews":[],"backend":"zeroshot","completenessReviewed":true}',
+test("el payload lleva identificadores, cajas ajustadas y hashes, nunca bytes ni URLs", () => {
+  const regions = regionsFromMasks([{ regionId: "a", mask: BLOB, samScore: 0.9 }], GRID, 24);
+  const payload = buildSuggestionPayload(
+    {
+      imageId: "img-1",
+      treeSampleId: "tree-1",
+      direction: "N",
+      requestToken: "token-1",
+    },
+    regions,
+    { width: GRID.width, height: GRID.height },
   );
-  assert.ok(parsed);
-  assert.equal(parsed.backend, "zeroshot");
-  assert.equal(parsed.completenessReviewed, true);
+  assert.equal(payload.sourceWidth, 8);
+  assert.equal(payload.sourceHeight, 4);
+  assert.deepEqual(payload.regions[0], {
+    regionId: "a",
+    box: { x: 2, y: 1, width: 4, height: 2 },
+    maskAreaPixels: 8,
+    maskSha: regions[0].maskSha,
+    samScore: 0.9,
+  });
+  const serialized = JSON.stringify(payload);
+  assert.ok(!serialized.includes("http"));
+  assert.ok(!serialized.includes("data:image"));
+  assert.ok(!serialized.includes("maskRle"));
+});
+
+test("la geometría del servidor se aplica al overlay una sola vez", () => {
+  const regions = regionsFromMasks([{ regionId: "a", mask: BLOB, samScore: 0.9 }], GRID, 24);
+  const cropBoxNormalized = { x: 0.2, y: 0.1, width: 0.6, height: 0.7 };
+  const withGeometry = applyServerGeometry(regions, [{ regionId: "a", cropBoxNormalized }]);
+  assert.deepEqual(withGeometry[0].cropBoxNormalized, cropBoxNormalized);
+  const steps = withGeometry[0].transformChain.filter((step) => step.step === "server_crop");
+  assert.equal(steps.length, 1);
+  const again = applyServerGeometry(withGeometry, [{ regionId: "a", cropBoxNormalized }]);
+  assert.equal(again[0].transformChain.filter((step) => step.step === "server_crop").length, 1);
 });

@@ -9,8 +9,7 @@ import {
   expandWithContext,
   intersectionOverUnion,
   maskBoundingBox,
-  planCrop,
-  planCropBatch,
+  scaleBoxToSpace,
   scaleToMaxSide,
 } from "./crop-geometry.ts";
 
@@ -39,17 +38,6 @@ test("el recuadro cubre todos los píxeles de la máscara", () => {
 test("una máscara vacía no produce recorte", () => {
   const { mask, width, height } = maskFromRows(["..", ".."]);
   assert.equal(maskBoundingBox(mask, width, height), null);
-  assert.equal(planCrop({
-    mask,
-    maskWidth: width,
-    maskHeight: height,
-    orientation: 1,
-    proxyScale: 1,
-    rectified: false,
-    canonicalWidth: width,
-    canonicalHeight: height,
-    preprocessMode: "whole_crop_pad",
-  }), null);
 });
 
 test("la máscara debe coincidir con las dimensiones declaradas", () => {
@@ -106,86 +94,74 @@ test("la orientación EXIF 6 reubica las coordenadas y las inválidas se rechaza
   assert.throws(() => applyExifOrientationToBox(box, 42, 100, 200), /Orientación EXIF/);
 });
 
-test("el plan de recorte registra la cadena completa de transformaciones", () => {
-  const { mask, width, height } = maskFromRows([
-    "........",
-    "..####..",
-    "..####..",
-    "........",
-  ]);
-  const plan = planCrop({
-    mask,
-    maskWidth: width,
-    maskHeight: height,
-    orientation: 6,
-    proxyScale: 0.5,
-    rectified: true,
-    canonicalWidth: 400,
-    canonicalHeight: 2000,
-    preprocessMode: "whole_crop_pad",
-  });
-  assert.ok(plan);
-  assert.deepEqual(plan!.transformChain.map((step) => step.step), [
-    "exif_orientation",
-    "analysis_proxy",
-    "rectification",
-    "mask_bounding_box",
-    "context_expansion",
-    "crop_downscale",
-    "encoder_preprocess",
-  ]);
-  const preprocess = plan!.transformChain.at(-1) as { centerCrop: boolean };
-  // Nunca se aplica un center crop accidental sobre el recorte propuesto.
-  assert.equal(preprocess.centerCrop, false);
+// --- Contrato único de geometría -------------------------------------------
+//
+// Original 4284x5712 con EXIF 6: la orientación ya está aplicada aguas arriba
+// (proxy con `.rotate()` y servicio con `exif_transpose`), así que el original
+// canónico y el proxy comparten espacio y sólo cambian de escala.
+
+const ORIGINAL = { width: 4284, height: 5712 };
+const PROXY = { width: 1536, height: 2048 };
+const WORKING = { width: 768, height: 1024 };
+
+test("una caja de la rejilla de trabajo se escala al proxy sin perder la región", () => {
+  const box = { x: 100, y: 200, width: 50, height: 40 };
+  const onProxy = scaleBoxToSpace(box, WORKING.width, WORKING.height, PROXY.width, PROXY.height);
+  assert.deepEqual(onProxy, { x: 200, y: 400, width: 100, height: 80 });
+  // La escala trabajo→proxy es la misma que trabajo→original salvo el factor.
+  const onOriginal = scaleBoxToSpace(
+    box,
+    WORKING.width,
+    WORKING.height,
+    ORIGINAL.width,
+    ORIGINAL.height,
+  );
+  assert.ok(onOriginal.x <= Math.floor((box.x / WORKING.width) * ORIGINAL.width));
+  assert.ok(
+    onOriginal.x + onOriginal.width
+      >= Math.floor(((box.x + box.width) / WORKING.width) * ORIGINAL.width),
+  );
 });
 
-test("el lote descarta máscaras vacías, duplicados y respeta el tope de regiones", () => {
-  const big = maskFromRows([
-    "........",
-    "..####..",
-    "..####..",
-    "........",
-  ]);
-  const duplicate = maskFromRows([
-    "........",
-    "..####..",
-    "..####..",
-    "........",
-  ]);
-  const empty = maskFromRows([
-    "........",
-    "........",
-    "........",
-    "........",
-  ]);
-  const far = maskFromRows([
-    "##......",
-    "##......",
-    "........",
-    "........",
-  ]);
-  const common = {
-    orientation: 1,
-    proxyScale: 1,
-    rectified: false,
-    canonicalWidth: 8,
-    canonicalHeight: 4,
-    preprocessMode: "whole_crop_pad",
-  };
-  const planned = planCropBatch([
-    { regionId: "a", mask: big.mask, maskWidth: big.width, maskHeight: big.height, ...common },
-    { regionId: "b", mask: duplicate.mask, maskWidth: duplicate.width, maskHeight: duplicate.height, ...common },
-    { regionId: "c", mask: empty.mask, maskWidth: empty.width, maskHeight: empty.height, ...common },
-    { regionId: "d", mask: far.mask, maskWidth: far.width, maskHeight: far.height, ...common },
-  ]);
-  assert.deepEqual(planned.map((item) => item.regionId), ["a"]);
+test("el recorte del servidor coincide con el overlay del panel, también en los bordes", () => {
+  // Región pegada al borde inferior derecho de la vista.
+  const box = { x: WORKING.width - 20, y: WORKING.height - 30, width: 20, height: 30 };
+  const onProxy = scaleBoxToSpace(box, WORKING.width, WORKING.height, PROXY.width, PROXY.height);
+  assert.equal(onProxy.x + onProxy.width, PROXY.width);
+  assert.equal(onProxy.y + onProxy.height, PROXY.height);
 
-  const capped = planCropBatch(
-    [
-      { regionId: "a", mask: big.mask, maskWidth: big.width, maskHeight: big.height, ...common },
-      { regionId: "d", mask: far.mask, maskWidth: far.width, maskHeight: far.height, ...common },
-    ],
-    1,
+  // El contexto se añade UNA sola vez, en el servidor.
+  const crop = expandWithContext(onProxy, PROXY.width, PROXY.height);
+  assert.ok(crop.x <= onProxy.x && crop.y <= onProxy.y);
+  assert.equal(crop.x + crop.width, PROXY.width);
+  assert.equal(crop.y + crop.height, PROXY.height);
+
+  // El overlay dibuja el recorte normalizado que devuelve el servidor: al
+  // llevarlo a píxeles del proxy vuelve a ser exactamente el mismo recorte.
+  const normalized = {
+    x: crop.x / PROXY.width,
+    y: crop.y / PROXY.height,
+    width: crop.width / PROXY.width,
+    height: crop.height / PROXY.height,
+  };
+  assert.deepEqual(
+    {
+      x: Math.round(normalized.x * PROXY.width),
+      y: Math.round(normalized.y * PROXY.height),
+      width: Math.round(normalized.width * PROXY.width),
+      height: Math.round(normalized.height * PROXY.height),
+    },
+    crop,
   );
-  assert.equal(capped.length, 1);
+  // Expandir otra vez (doble contexto) daría un recorte distinto: por eso la
+  // expansión sólo ocurre en el servidor.
+  const doubleExpanded = expandWithContext(crop, PROXY.width, PROXY.height);
+  assert.notDeepEqual(doubleExpanded, crop);
+});
+
+test("las dimensiones del espacio de coordenadas se validan", () => {
+  assert.throws(
+    () => scaleBoxToSpace({ x: 0, y: 0, width: 1, height: 1 }, 0, 10, 10, 10),
+    /espacio de coordenadas/,
+  );
 });

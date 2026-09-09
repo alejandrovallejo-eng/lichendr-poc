@@ -29,10 +29,21 @@ export interface Box {
 // Every geometric step between the untouched original and the crop that the
 // encoder saw, so a suggestion can always be traced back.
 export type TransformStep =
-  | { step: "exif_orientation"; orientation: number }
-  | { step: "analysis_proxy"; scale: number; width: number; height: number }
-  | { step: "rectification"; applied: boolean; canonicalWidth: number; canonicalHeight: number }
+  // EXIF orientation is applied ONCE upstream (analysis proxy `.rotate()` and
+  // the vision service `exif_transpose`); the pilot never rotates again.
+  | { step: "exif_orientation"; appliedUpstream: boolean }
+  | {
+      step: "working_grid";
+      width: number;
+      height: number;
+      originalWidth: number;
+      originalHeight: number;
+    }
+  | { step: "rectification"; applied: boolean }
   | { step: "mask_bounding_box"; box: Box }
+  // Crop actually cut by the server, in normalised coordinates so the overlay
+  // can draw exactly what BioCLIP saw.
+  | { step: "server_crop"; boxNormalized: Box }
   | { step: "context_expansion"; box: Box; marginRatio: number }
   | { step: "crop_downscale"; scale: number }
   | { step: "encoder_preprocess"; mode: string; centerCrop: boolean };
@@ -46,11 +57,19 @@ export interface LabelRawScore {
 
 export interface ProposedRegion {
   regionId: string;
-  // Mask in the coordinate space described by `transformChain`.
+  // REAL mask pixels proposed by MobileSAM, run-length encoded so they survive
+  // state updates and a reload. A region is never reduced to its box.
   maskWidth: number;
   maskHeight: number;
+  maskRle: string;
+  // Content hash of the mask pixels: it changes as soon as the reviewer edits
+  // the mask, which invalidates any cached suggestion for that region.
+  maskSha: string;
   maskAreaPixels: number;
+  // Tight bounding box of the mask on the working grid.
   box: Box;
+  // Crop the server actually cut, normalised; null until the server answers.
+  cropBoxNormalized: Box | null;
   // MobileSAM's own score: mask quality, not evidence of lichen.
   samScore: number;
   transformChain: TransformStep[];
@@ -69,10 +88,13 @@ export interface RegionSuggestion {
 // What a human decided. Never overwritten by a later prediction.
 export interface RegionReview {
   regionId: string;
+  // Mask hash the decision was taken on: a decision is only preserved while the
+  // pixels it was taken on are still the same.
+  maskSha: string;
   decision: ReviewDecision;
   // The label the person confirmed; null while pending or when excluded.
   reviewedLabel: SuggestionLabel | null;
-  // True when the person edited the proposed mask.
+  // True only when the edited pixels actually differ from the proposal.
   maskEdited: boolean;
   reviewedAt: string;
   reviewedBy: string;
@@ -99,8 +121,10 @@ export interface SuggestionProvenance {
   treeSampleId: string;
   direction: string;
   imageId: string;
-  imageSha256: string;
+  // SHA-256 of the analysis proxy pixel bytes (the manifest signature is an
+  // HMAC over metadata and is reported separately, never as an image hash).
   proxySha256: string;
+  proxyManifestSignature: string;
   maskSetSha256: string;
   encoderId: string;
   headSha256: string | null;

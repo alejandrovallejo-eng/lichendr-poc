@@ -12,7 +12,7 @@
 //   bounding box, context expansion, downscale, encoder preprocessing) so a
 //   suggestion can be mapped back to the untouched original.
 
-import type { Box, TransformStep } from "./types";
+import type { Box } from "./types";
 
 export const CONTEXT_MARGIN_RATIO = 0.25;
 export const MIN_CROP_SIDE = 48;
@@ -149,74 +149,41 @@ export function applyExifOrientationToBox(
   }
 }
 
-export interface CropPlanInput {
-  mask: ArrayLike<number>;
-  maskWidth: number;
-  maskHeight: number;
-  orientation: number;
-  proxyScale: number;
-  rectified: boolean;
-  canonicalWidth: number;
-  canonicalHeight: number;
-  preprocessMode: string;
-}
+// NOTE: the crop plan (context expansion + downscale) lives on the SERVER, in
+// `app/api/vision/region-suggestions/route.ts`, and is applied exactly once
+// there. The client only measures the tight bounding box and draws back the
+// crop geometry the server reports.
 
-export interface CropPlan {
-  tightBox: Box;
-  cropBox: Box;
-  downscale: number;
-  transformChain: TransformStep[];
-}
-
-// Builds the crop and the full transformation chain for one proposed mask.
-export function planCrop(input: CropPlanInput): CropPlan | null {
-  const tight = maskBoundingBox(input.mask, input.maskWidth, input.maskHeight);
-  if (!tight) return null;
-  const cropBox = expandWithContext(tight, input.maskWidth, input.maskHeight);
-  const downscale = scaleToMaxSide(cropBox);
-  return {
-    tightBox: tight,
-    cropBox,
-    downscale,
-    transformChain: [
-      { step: "exif_orientation", orientation: input.orientation },
-      {
-        step: "analysis_proxy",
-        scale: input.proxyScale,
-        width: input.maskWidth,
-        height: input.maskHeight,
-      },
-      {
-        step: "rectification",
-        applied: input.rectified,
-        canonicalWidth: input.canonicalWidth,
-        canonicalHeight: input.canonicalHeight,
-      },
-      { step: "mask_bounding_box", box: tight },
-      { step: "context_expansion", box: cropBox, marginRatio: CONTEXT_MARGIN_RATIO },
-      { step: "crop_downscale", scale: downscale },
-      // The encoder resizes the whole crop and pads it: no centre crop, so the
-      // extremes of the region are never lost.
-      { step: "encoder_preprocess", mode: input.preprocessMode, centerCrop: false },
-    ],
-  };
-}
-
-// Plans a batch of crops, dropping empty masks and near-duplicates and
-// enforcing the per-view region cap.
-export function planCropBatch(
-  inputs: readonly (CropPlanInput & { regionId: string })[],
-  maxRegions = MAX_REGIONS_PER_VIEW,
-): Array<CropPlan & { regionId: string }> {
-  const kept: Array<CropPlan & { regionId: string }> = [];
-  for (const input of inputs) {
-    if (kept.length >= maxRegions) break;
-    const plan = planCrop(input);
-    if (!plan) continue;
-    if (kept.some((other) => intersectionOverUnion(plan.cropBox, other.cropBox) >= DUPLICATE_IOU)) {
-      continue;
+// --- Single geometry contract ----------------------------------------------
+//
+// EXIF orientation is applied ONCE, upstream: the analysis proxy is generated
+// with `.rotate()` and the vision service decodes with `exif_transpose`, so both
+// the MobileSAM masks and the proxy live in the same EXIF-oriented canonical
+// space and differ only in scale.
+//
+// Therefore the pilot never rotates coordinates again. A mask box measured on
+// the working grid is mapped to proxy pixels by a single proportional scaling,
+// and the context margin is applied EXACTLY ONCE, on the server, when the crop
+// is cut. The client sends the tight bounding box and draws the crop box the
+// server reports back, so overlay and crop always coincide.
+export function scaleBoxToSpace(
+  box: Box,
+  fromWidth: number,
+  fromHeight: number,
+  toWidth: number,
+  toHeight: number,
+): Box {
+  for (const value of [fromWidth, fromHeight, toWidth, toHeight]) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error("Las dimensiones del espacio de coordenadas no son válidas.");
     }
-    kept.push({ ...plan, regionId: input.regionId });
   }
-  return kept;
+  const scaleX = toWidth / fromWidth;
+  const scaleY = toHeight / fromHeight;
+  // Floor the origin and ceil the far edge: rounding never shrinks the region.
+  const left = Math.max(0, Math.min(toWidth - 1, Math.floor(box.x * scaleX)));
+  const top = Math.max(0, Math.min(toHeight - 1, Math.floor(box.y * scaleY)));
+  const right = Math.max(left + 1, Math.min(toWidth, Math.ceil((box.x + box.width) * scaleX)));
+  const bottom = Math.max(top + 1, Math.min(toHeight, Math.ceil((box.y + box.height) * scaleY)));
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }

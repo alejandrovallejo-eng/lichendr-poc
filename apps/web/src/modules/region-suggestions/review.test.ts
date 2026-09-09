@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   acceptedLichenRegionIds,
   applyDecision,
+  applyMaskEdit,
   initialReview,
   isCachedBatchUsable,
   mergeReviews,
@@ -11,15 +12,15 @@ import {
   phaseNotice,
   restoreState,
   resultBelongsToContext,
+  sameViewIdentity,
   reviewCounts,
   suggestionCacheKey,
 } from "./review.ts";
-import type { RegionReview, RegionSuggestion } from "./types.ts";
+import type { ProposedRegion, RegionReview, RegionSuggestion } from "./types.ts";
 
 const identity = {
   ownerId: "owner-1",
   imageId: "image-1",
-  imageSha256: "aaa",
   proxySha256: "bbb",
   maskSetSha256: "ccc",
   encoderId: "imageomics/bioclip-2@2957b322090f",
@@ -28,6 +29,25 @@ const identity = {
   preprocessVersion: "crop-context-1",
   suggestionVersion: "1",
 };
+
+function review(regionId: string, maskSha: string, extra: Partial<RegionReview> = {}): RegionReview {
+  return { ...initialReview(regionId, maskSha), ...extra };
+}
+
+function region(regionId: string, maskSha: string): ProposedRegion {
+  return {
+    regionId,
+    maskWidth: 4,
+    maskHeight: 4,
+    maskRle: "4:4:0,16",
+    maskSha,
+    maskAreaPixels: 4,
+    box: { x: 1, y: 1, width: 2, height: 2 },
+    cropBoxNormalized: null,
+    samScore: 0.9,
+    transformChain: [],
+  };
+}
 
 function suggestion(regionId: string): RegionSuggestion {
   return {
@@ -67,40 +87,68 @@ test("la caché de otro propietario o de otra versión nunca se reutiliza", () =
 
 test("una predicción nueva nunca sobrescribe una decisión humana", () => {
   const reviewed: RegionReview[] = [
-    {
-      regionId: "r1",
+    review("r1", "m1", {
       decision: "accepted",
       reviewedLabel: "lichen",
       maskEdited: true,
       reviewedAt: "2026-01-01T00:00:00.000Z",
       reviewedBy: "revisor",
-    },
-    initialReview("r2"),
+    }),
+    review("r2", "m2"),
   ];
-  const merged = mergeReviews(reviewed, [suggestion("r1"), suggestion("r2"), suggestion("r3")]);
+  const merged = mergeReviews(reviewed, [
+    { regionId: "r1", maskSha: "m1" },
+    { regionId: "r2", maskSha: "m2" },
+    { regionId: "r3", maskSha: "m3" },
+  ]);
   assert.deepEqual(merged[0], reviewed[0]);
   assert.equal(merged[1].decision, "pending");
   assert.equal(merged[2].regionId, "r3");
   assert.equal(merged[2].decision, "pending");
 });
 
+test("una decisión no se conserva sólo por regionId si la máscara cambió", () => {
+  const reviewed: RegionReview[] = [
+    review("r1", "m1", {
+      decision: "accepted",
+      reviewedLabel: "lichen",
+      maskEdited: false,
+      reviewedAt: "2026-01-01T00:00:00.000Z",
+      reviewedBy: "revisor",
+    }),
+  ];
+  const merged = mergeReviews(reviewed, [{ regionId: "r1", maskSha: "OTRA" }]);
+  assert.equal(merged[0].decision, "pending");
+  assert.equal(merged[0].maskSha, "OTRA");
+  assert.equal(merged[0].reviewedLabel, null);
+});
+
+test("editar la máscara re-clava la revisión sobre los píxeles nuevos", () => {
+  let reviews = [review("r1", "m1")];
+  reviews = applyMaskEdit(reviews, "r1", "m1", "m1");
+  assert.equal(reviews[0].maskEdited, false, "sin cambio de píxeles no hay edición");
+  reviews = applyMaskEdit(reviews, "r1", "m2", "m1");
+  assert.equal(reviews[0].maskEdited, true);
+  assert.equal(reviews[0].maskSha, "m2");
+  assert.throws(() => applyMaskEdit(reviews, "otra", "m3", "m1"), /no existe/);
+});
+
 test("una decisión humana sobrevive aunque la nueva tanda ya no proponga la región", () => {
   const reviewed: RegionReview[] = [
-    {
-      regionId: "r9",
+    review("r9", "m9", {
       decision: "rejected",
       reviewedLabel: null,
       maskEdited: false,
       reviewedAt: "2026-01-01T00:00:00.000Z",
       reviewedBy: "revisor",
-    },
+    }),
   ];
-  const merged = mergeReviews(reviewed, [suggestion("r1")]);
+  const merged = mergeReviews(reviewed, [{ regionId: "r1", maskSha: "m1" }]);
   assert.deepEqual(merged.map((item) => item.regionId).sort(), ["r1", "r9"]);
 });
 
 test("aceptar exige etiqueta confirmada y excluir la borra", () => {
-  let reviews = [initialReview("r1")];
+  let reviews = [initialReview("r1", "m1")];
   assert.throws(
     () => applyDecision(reviews, {
       regionId: "r1",
@@ -138,11 +186,11 @@ test("aceptar exige etiqueta confirmada y excluir la borra", () => {
 
 test("sólo el liquen aceptado cuenta: pendiente, excluido y sin determinar quedan fuera", () => {
   const reviews: RegionReview[] = [
-    { regionId: "r1", decision: "accepted", reviewedLabel: "lichen", maskEdited: false, reviewedAt: "t", reviewedBy: "u" },
-    { regionId: "r2", decision: "accepted", reviewedLabel: "moss", maskEdited: false, reviewedAt: "t", reviewedBy: "u" },
-    { regionId: "r3", decision: "pending", reviewedLabel: null, maskEdited: false, reviewedAt: "", reviewedBy: "" },
-    { regionId: "r4", decision: "rejected", reviewedLabel: null, maskEdited: false, reviewedAt: "t", reviewedBy: "u" },
-    { regionId: "r5", decision: "undetermined", reviewedLabel: null, maskEdited: true, reviewedAt: "t", reviewedBy: "u" },
+    review("r1", "m1", { decision: "accepted", reviewedLabel: "lichen", reviewedAt: "t", reviewedBy: "u" }),
+    review("r2", "m2", { decision: "accepted", reviewedLabel: "moss", reviewedAt: "t", reviewedBy: "u" }),
+    review("r3", "m3"),
+    review("r4", "m4", { decision: "rejected", reviewedAt: "t", reviewedBy: "u" }),
+    review("r5", "m5", { decision: "undetermined", maskEdited: true, reviewedAt: "t", reviewedBy: "u" }),
   ];
   assert.deepEqual(acceptedLichenRegionIds(reviews), ["r1"]);
   assert.deepEqual(reviewCounts(reviews), {
@@ -157,11 +205,13 @@ test("sólo el liquen aceptado cuenta: pendiente, excluido y sin determinar qued
 
 test("una respuesta tardía de otro árbol, vista o versión se descarta", () => {
   const expected = {
+    generation: 7,
     ownerId: "owner-1",
     treeSampleId: "tree-1",
     direction: "N",
     imageId: "image-1",
     requestToken: "token-1",
+    maskSetSha: "set-1",
     suggestionVersion: "1",
   };
   assert.equal(resultBelongsToContext(expected, { ...expected }), true);
@@ -169,8 +219,42 @@ test("una respuesta tardía de otro árbol, vista o versión se descarta", () =>
   assert.equal(resultBelongsToContext(expected, { ...expected, direction: "E" }), false);
   assert.equal(resultBelongsToContext(expected, { ...expected, imageId: "image-2" }), false);
   assert.equal(resultBelongsToContext(expected, { ...expected, requestToken: "token-2" }), false);
+  assert.equal(resultBelongsToContext(expected, { ...expected, maskSetSha: "set-2" }), false);
   assert.equal(resultBelongsToContext(expected, { ...expected, suggestionVersion: "2" }), false);
   assert.equal(resultBelongsToContext(expected, { ...expected, ownerId: "owner-2" }), false);
+});
+
+test("A→B: la respuesta tardía de A no se aplica a B aunque el contexto viejo sea coherente", () => {
+  // El panel guarda la generación viva en una ref. La ejecución A captura su
+  // propio contexto; comparar ese contexto con su propio eco siempre casaría.
+  const generationRef = { current: 0 };
+
+  const startRun = (direction: string, imageId: string) => {
+    generationRef.current += 1;
+    return {
+      generation: generationRef.current,
+      ownerId: "owner-1",
+      treeSampleId: "tree-1",
+      direction,
+      imageId,
+      requestToken: `token-${direction}`,
+      maskSetSha: `set-${direction}`,
+      suggestionVersion: "1",
+    };
+  };
+
+  const runA = startRun("N", "image-N");
+  const runB = startRun("E", "image-E");
+
+  // Respuesta de A que llega DESPUÉS de haber empezado B.
+  const liveContext = { ...runB, generation: generationRef.current };
+  assert.equal(resultBelongsToContext(liveContext, runA), false);
+  assert.equal(resultBelongsToContext(liveContext, runB), true);
+
+  // Cambiar de vista limpia el estado en vez de arrastrarlo.
+  assert.equal(sameViewIdentity(runA, runB), false);
+  const { ownerId, treeSampleId, direction, imageId } = runA;
+  assert.equal(sameViewIdentity({ ownerId, treeSampleId, direction, imageId }, runA), true);
 });
 
 test("las fases avanzan Buscando regiones → Sugiriendo etiquetas → Revisar", () => {
@@ -198,33 +282,41 @@ test("sin regiones propuestas se pide revisar el ROI, no se declara ausencia", (
 });
 
 test("la restauración devuelve fotos, sugerencias y revisiones sin reanalizar", () => {
+  const stored = region("r1", "m-editada");
   const restored = restoreState({
-    regions: [
-      {
-        regionId: "r1",
-        maskWidth: 10,
-        maskHeight: 10,
-        maskAreaPixels: 12,
-        box: { x: 1, y: 1, width: 4, height: 4 },
-        samScore: 0.9,
-        transformChain: [],
-      },
-    ],
+    regions: [stored],
     suggestions: [suggestion("r1")],
     reviews: [
-      {
-        regionId: "r1",
+      review("r1", "m-editada", {
         decision: "accepted",
         reviewedLabel: "lichen",
         maskEdited: true,
         reviewedAt: "2026-01-01T00:00:00.000Z",
         reviewedBy: "revisor",
-      },
+      }),
     ],
   });
   assert.equal(restored.phase, "review");
   assert.equal(restored.reanalysisRequired, false);
   assert.equal(restored.regions.length, 1);
+  assert.equal(restored.regions[0].maskRle, stored.maskRle);
   assert.equal(restored.reviews[0].decision, "accepted");
   assert.equal(restored.reviews[0].maskEdited, true);
+  assert.equal(restored.reviews[0].maskSha, "m-editada");
+});
+
+test("una revisión guardada sobre otra máscara no se reaplica al restaurar", () => {
+  const restored = restoreState({
+    regions: [region("r1", "m-nueva")],
+    suggestions: [suggestion("r1")],
+    reviews: [
+      review("r1", "m-vieja", {
+        decision: "accepted",
+        reviewedLabel: "lichen",
+        reviewedAt: "2026-01-01T00:00:00.000Z",
+        reviewedBy: "revisor",
+      }),
+    ],
+  });
+  assert.equal(restored.reviews[0].decision, "pending");
 });

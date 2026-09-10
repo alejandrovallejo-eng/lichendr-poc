@@ -92,7 +92,7 @@ test("una respuesta tardía de BioCLIP no deshace lo que la persona hizo mientra
         encoderId: "imageomics/bioclip-2",
         headSha256: null,
         preprocessVersion: "1",
-        suggestionVersion: "2",
+        suggestionVersion: "3",
       },
       geometry: body.regions.map((region) => ({
         regionId: region.regionId,
@@ -206,7 +206,7 @@ test("reintentar etiquetas tras un fallo devuelve el panel a Revisar", async () 
         encoderId: "imageomics/bioclip-2",
         headSha256: null,
         preprocessVersion: "1",
-        suggestionVersion: "2",
+        suggestionVersion: "3",
       },
       geometry: [],
       suggestions: body.regions.map((region) => ({

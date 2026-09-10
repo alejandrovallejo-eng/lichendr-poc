@@ -461,6 +461,26 @@ clasificación a **todos** sus identificadores, que aparecen íntegros en
 idéntica, y un lote texturado de 12 regiones (ruido determinista, no imágenes
 planas comprimibles) que exige 12 etiquetas y 12 geometrías.
 
+#### Ajuste posterior: compartir recorte exige identidad exacta, no IoU
+
+Conservar `regionIds[]` era necesario pero no suficiente: el criterio seguía
+siendo `IoU(expandida, otra) >= 0.92`, que comparte **una** clasificación entre
+recortes de píxeles distintos. Con una imagen de 1200×1000 y cajas ajustadas
+A = {100, 100, 400, 400} y B = {120, 100, 400, 400}, `expandWithContext` produce
+A = {0, 0, 600, 600} y B = {20, 0, 600, 600}: IoU = 0.9354…, por encima del
+umbral, y sin embargo no son el mismo recorte. (Es evidencia **geométrica**; no
+mide cuánto diferirían las predicciones de BioCLIP.)
+
+Ahora un recorte se comparte **solo** cuando es exactamente el mismo del mismo
+proxy: igualdad de `x`, `y`, `width` y `height` enteros después de
+`scaleBoxToSpace` y `expandWithContext`, lo que implica los mismos bytes. Los
+alias siguen existiendo para máscaras diferentes cuya caja expandida coincide
+exactamente. No se deduplica por solapamiento aproximado y no se toca el ROI ni
+la máscara de la persona revisora. `deduplicateBoxes` (IoU) sigue existiendo en
+`crop-geometry.ts` para el cliente, pero el servidor ya no lo usa para decidir
+qué se clasifica. Regresión: esas dos cajas envían **dos** recortes al worker y
+cada identificador conserva su propia `cropBoxNormalized`.
+
 ### 4. Reintentar etiquetas sale de «Asistencia no disponible»
 
 `retryClassification` emitía `regions_found`, que `nextPhase` ignora desde
@@ -474,7 +494,9 @@ desaparece, vuelve «Revisar» y la máscara dibujada a mano sigue ahí.
 ### Versión de preprocesado y caché
 
 Los recortes que entran al clasificador han cambiado (reducción proporcional por
-presupuesto), así que `SUGGESTION_VERSION` pasa de `"1"` a `"2"` en
+presupuesto y, después, identidad exacta en vez de IoU: dos regiones que antes
+compartían recorte ahora se clasifican por separado), así que
+`SUGGESTION_VERSION` pasa de `"1"` a `"3"` en
 `server/suggest.ts` y en `RegionSuggestionsPanel.tsx`. Forma parte de la clave de
 caché y de la comprobación de procedencia, de modo que las sugerencias anteriores
 se invalidan en vez de mezclarse con las nuevas. Las decisiones humanas ya
@@ -482,8 +504,9 @@ guardadas no se tocan.
 
 ### Pruebas ejecutadas en esta corrección
 
-- `npm run test:routes` — 17/17, con las tres regresiones nuevas (lote texturado,
-  identidad por alias, fallo explícito de presupuesto).
+- `npm run test:routes` — 18/18, con las regresiones nuevas (lote texturado,
+  identidad por alias, solapamiento que no comparte recorte y fallo explícito de
+  presupuesto).
 - `npm run test:unit` — 236/236, con el contrato grayscale, el PNG real por
   canvas y `retry_labels`.
 - `npm run test:component` — 2/2, preservación humana y reintento.

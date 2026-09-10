@@ -47,5 +47,8 @@ Invariantes:
 - Los recortes se ajustan a un **presupuesto de bytes** que contabiliza base64 y
   metadatos contra el límite del cuerpo del worker; si un lote no cabe, la
   respuesta es 413 explícito con preservación, nunca una clasificación parcial.
-- Un recorte puede servir a varias regiones con la misma caja: se conserva cada
-  `regionId` y la clasificación se reparte a todos.
+- Un recorte se comparte entre varias regiones **solo** si su caja expandida es
+  exactamente igual (mismos `x`, `y`, `width`, `height` enteros del mismo proxy):
+  se conserva cada `regionId` y la clasificación se reparte a todos. Un
+  solapamiento aproximado (IoU) **no** es identidad y da lugar a recortes
+  distintos.

@@ -18,6 +18,7 @@ import { handleRegionSuggestions } from "./suggest.ts";
 import { issueSessionTicket } from "./session-ticket.ts";
 import { resetSerialCoordinator } from "./serial.ts";
 import { clearSuggestionCache } from "../../../app/api/vision/region-suggestions/cache.ts";
+import type { Box } from "../types.ts";
 
 const SUPABASE_URL = "https://project.supabase.co";
 const TOKEN = "0123456789abcdef0123456789abcdef";
@@ -714,6 +715,52 @@ test("two different masks with the same box keep both identities", async () => {
   assert.deepEqual(suggestions.map((suggestion) => suggestion.regionId).sort(), ["sam-0", "sam-1"]);
   const geometry = result.body.geometry as { regionId: string }[];
   assert.deepEqual(geometry.map((entry) => entry.regionId).sort(), ["sam-0", "sam-1"]);
+});
+
+test("crops that merely overlap are classified separately, not shared", async () => {
+  reset();
+  const log = emptyLog();
+  const deps = await suggestDeps(log);
+  // Source space equals the proxy here, so the numbers are the reproducible
+  // geometry: A expands to {0,0,600,600} and B to {20,0,600,600}. Their IoU is
+  // 0.935…, above the old 0.92 threshold, yet they are DIFFERENT pixels.
+  const result = await handleRegionSuggestions(
+    deps,
+    jsonRequest({
+      imageId: IMAGE_IDS.N,
+      treeSampleId: TREE,
+      direction: "N",
+      requestToken: "overlap",
+      sourceWidth: PROXY_WIDTH,
+      sourceHeight: PROXY_HEIGHT,
+      regions: [
+        {
+          regionId: "sam-0",
+          box: { x: 100, y: 100, width: 400, height: 400 },
+          maskAreaPixels: 120_000,
+          maskSha: "aaaa",
+          samScore: 0.7,
+        },
+        {
+          regionId: "sam-1",
+          box: { x: 120, y: 100, width: 400, height: 400 },
+          maskAreaPixels: 118_000,
+          maskSha: "bbbb",
+          samScore: 0.6,
+        },
+      ],
+    }),
+  );
+  assert.equal(result.status, 200);
+  // Two crops travel to the worker: an approximate overlap is not identity.
+  assert.equal(log.suggestCrops[0].length, 2);
+  const geometry = result.body.geometry as { regionId: string; cropBoxNormalized: Box }[];
+  assert.deepEqual(geometry.map((entry) => entry.regionId).sort(), ["sam-0", "sam-1"]);
+  const first = geometry.find((entry) => entry.regionId === "sam-0");
+  const second = geometry.find((entry) => entry.regionId === "sam-1");
+  assert.equal(first?.cropBoxNormalized.x, 0);
+  assert.equal(second?.cropBoxNormalized.x, 20 / PROXY_WIDTH);
+  assert.notDeepEqual(first?.cropBoxNormalized, second?.cropBoxNormalized);
 });
 
 test("a batch that does not fit fails explicitly instead of classifying part of it", async () => {

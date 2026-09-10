@@ -11,7 +11,6 @@ import sharp from "sharp";
 import {
   MAX_REGIONS_PER_VIEW,
   expandWithContext,
-  intersectionOverUnion,
   scaleBoxToSpace,
   scaleToMaxSide,
 } from "../crop-geometry";
@@ -72,7 +71,7 @@ const MAX_SOURCE_SIDE = 20_000;
 // worker body budget and a shared crop is distributed to every region that owns
 // it, so the classifier inputs are NOT the ones a "1" batch was computed from.
 // The version is part of the cache key, so old entries can never be reused.
-const SUGGESTION_VERSION = "2";
+const SUGGESTION_VERSION = "3";
 const TOO_LARGE = Symbol("too-large");
 
 interface RegionInput {
@@ -523,9 +522,11 @@ async function cutCrops(
       proxyHeight,
     );
     const expanded = expandWithContext(tightOnProxy, proxyWidth, proxyHeight);
-    // Deduplication is about the CROP, not about the region: the identifier of a
-    // region whose mask differs is never dropped.
-    const duplicate = kept.find((other) => intersectionOverUnion(expanded, other.box) >= 0.92);
+    // A crop is shared ONLY when it is exactly the same pixels of the same
+    // proxy: identical integer x/y/width/height after scaling and expansion.
+    // An approximate overlap is not identity, so two masks whose expanded boxes
+    // merely resemble each other are cut and classified separately.
+    const duplicate = kept.find((other) => sameCropBox(expanded, other.box));
     if (duplicate) {
       duplicate.crop.regionIds.push(region.regionId);
       continue;
@@ -592,6 +593,16 @@ async function cutCrops(
     crops.push(crop);
   }
   return crops;
+}
+
+// Exact crop identity: same rectangle of the same proxy, hence the same bytes.
+function sameCropBox(first: Box, second: Box): boolean {
+  return (
+    first.x === second.x
+    && first.y === second.y
+    && first.width === second.width
+    && first.height === second.height
+  );
 }
 
 // The classification of a shared crop belongs to every region that shares it.

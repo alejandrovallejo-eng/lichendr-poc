@@ -60,7 +60,7 @@ import {
 
 // Must match `SUGGESTION_VERSION` in `server/suggest.ts`: a batch produced with
 // another version of the crop/preprocessing contract is not applied.
-const SUGGESTION_VERSION = "2";
+const SUGGESTION_VERSION = "3";
 const BRUSH_RADIUS = 12;
 
 export interface RegionSuggestionsPanelProps {

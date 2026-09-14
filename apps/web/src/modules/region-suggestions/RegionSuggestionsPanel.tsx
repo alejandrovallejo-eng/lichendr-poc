@@ -14,7 +14,6 @@ import {
   SuggestionRequestError,
   applyEditedMask,
   applyServerGeometry,
-  gridPromptPoints,
   manualRegion,
   maskPixelHash,
   regionsFromMasks,
@@ -48,6 +47,8 @@ import {
   workingSize,
 } from "./sam-service";
 import { loadSavedBatch, saveBatch } from "./storage";
+import { TrunkOutlineEditor } from "./TrunkOutlineEditor";
+import { clipToTrunk, parseTrunkOutline, rasterizeTrunk, trunkPromptPoints, trunkStorageKey, type TrunkPoint } from "./trunk-outline";
 import {
   SUGGESTION_LABELS,
   SUGGESTION_LABEL_ES,
@@ -104,6 +105,9 @@ export function RegionSuggestionsPanel({
   const [reviews, setReviews] = useState<RegionReview[]>([]);
   const [grid, setGrid] = useState<GridState | null>(null);
   const [roiRle, setRoiRle] = useState<string | null>(null);
+  const [trunkOutline, setTrunkOutline] = useState<TrunkPoint[] | null>(null);
+  const [outlineEditing, setOutlineEditing] = useState(false);
+  const [outlineNotice, setOutlineNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [brushMode, setBrushMode] = useState<"add" | "erase">("add");
@@ -125,7 +129,7 @@ export function RegionSuggestionsPanel({
   const activeRegion = regions.find((region) => region.regionId === selected) ?? regions[0];
   const activeRegionId = activeRegion?.regionId ?? null;
   const activeIndex = regions.findIndex((region) => region.regionId === activeRegionId);
-  const editingPixels = editing !== null || roiEditing;
+  const editingPixels = editing !== null || roiEditing || outlineEditing;
 
   // Live run generation and abort handle. A late answer is compared against the
   // generation that is CURRENT when it arrives, never against its own echo.
@@ -170,6 +174,9 @@ export function RegionSuggestionsPanel({
     setReviews([]);
     setGrid(null);
     setRoiRle(null);
+    setTrunkOutline(null);
+    setOutlineEditing(false);
+    setOutlineNotice(null);
     setSelected(null);
     setEditing(null);
     setRoiEditing(false);
@@ -197,6 +204,8 @@ export function RegionSuggestionsPanel({
         identityRef.current = identity;
       }
       setOwnerId(data.user.id);
+      try { setTrunkOutline(parseTrunkOutline(window.localStorage.getItem(trunkStorageKey(identity)))); }
+      catch { setTrunkOutline(null); }
       const saved = loadSavedBatch(identity);
       if (!saved) return;
       const restored = restoreState(saved);
@@ -261,6 +270,32 @@ export function RegionSuggestionsPanel({
     setGrid(next);
     return next;
   }, [grid]);
+
+  // Also restores a contour saved before the first model run (no regions yet).
+  useEffect(() => {
+    if (!trunkOutline) return;
+    const working = ensureGrid();
+    if (working) setRoiRle(encodeMaskRle(rasterizeTrunk(trunkOutline, working.width, working.height), working.width, working.height));
+  }, [trunkOutline, ensureGrid]);
+
+  const confirmTrunk = useCallback((points: TrunkPoint[]) => {
+    const working = ensureGrid();
+    if (!working) { setOutlineNotice("La fotografía todavía está cargando. Vuelve a confirmar el contorno."); return false; }
+    const mask = rasterizeTrunk(points, working.width, working.height);
+    if (maskArea(mask) === 0) { setOutlineNotice("El contorno no contiene píxeles. Amplíalo un poco."); return false; }
+    const encoded = encodeMaskRle(mask, working.width, working.height);
+    setTrunkOutline(points);
+    setRoiRle(encoded);
+    setCompleteness(false);
+    setConfirmRegeneration(false);
+    setOutlineNotice(regions.length
+      ? "Contorno guardado. Tus regiones y decisiones anteriores siguen intactas; para buscar dentro del tronco, usa «Volver a proponer regiones»."
+      : "Contorno guardado. Ya puedes pedir propuestas dentro del tronco.");
+    try { window.localStorage.setItem(trunkStorageKey(storageIdentity), JSON.stringify({ version: 1, points })); }
+    catch { setOutlineNotice("Contorno activo en esta pestaña, pero el navegador no pudo guardarlo. No cierres esta página."); }
+    persist({ regions, suggestions, reviews, backend, completenessReviewed: false, roiRle: encoded });
+    return true;
+  }, [ensureGrid, regions, suggestions, reviews, backend, storageIdentity, persist]);
 
   // Asks BioCLIP for labels for the regions given, WITHOUT touching their
   // pixels: this is what "retry labels" does, so a failed classification can
@@ -380,7 +415,7 @@ export function RegionSuggestionsPanel({
   // are REPLACED. This is destructive by definition, so it is a separate action
   // from retrying a failed classification.
   const regenerate = useCallback(async () => {
-    if (!ownerId) return;
+    if (!ownerId || !trunkOutline || outlineEditing) return;
     generationRef.current += 1;
     const generation = generationRef.current;
     abortRef.current?.abort();
@@ -411,8 +446,18 @@ export function RegionSuggestionsPanel({
         originalWidth: session.width,
         originalHeight: session.height,
       };
+      const trunkMask = rasterizeTrunk(trunkOutline, size.width, size.height);
+      const prompts = trunkPromptPoints(trunkMask, size.width, size.height);
+      if (!prompts.length) throw new Error("El contorno no contiene puntos de búsqueda.");
+      const trunkRle = encodeMaskRle(trunkMask, size.width, size.height);
+      setGrid(workingGrid);
+      setRoiRle(trunkRle);
+      roiRleRef.current = trunkRle;
+      setCompleteness(false);
+      completenessRef.current = false;
+      const trunkHash = maskPixelHash(trunkRle);
       const masks: Array<{ regionId: string; mask: Uint8Array; samScore: number }> = [];
-      for (const [index, point] of gridPromptPoints().entries()) {
+      for (const [index, point] of prompts.entries()) {
         const { candidates, recommendedIndex } = await segmentAtPoint(
           session,
           point,
@@ -421,10 +466,11 @@ export function RegionSuggestionsPanel({
         if (generationRef.current !== generation) return;
         const best = pickBestCandidate(candidates, recommendedIndex);
         if (!best) continue;
-        const mask = await decodeMaskToWorkingGrid(best.maskDataUrl, size.width, size.height);
+        const decoded = await decodeMaskToWorkingGrid(best.maskDataUrl, size.width, size.height);
+        const mask = clipToTrunk(decoded, trunkMask);
         if (generationRef.current !== generation) return;
         if (maskArea(mask) === 0) continue;
-        masks.push({ regionId: `sam-${index}`, mask, samScore: best.score });
+        masks.push({ regionId: `sam-trunk-${trunkHash}-${index}`, mask, samScore: best.score });
       }
       proposed = regionsFromMasks(
         masks,
@@ -463,7 +509,7 @@ export function RegionSuggestionsPanel({
     setPhase((current) => nextPhase(current, { type: "regions_found", count: proposed.length }));
     if (proposed.length === 0) return;
     await classify(proposed, workingGrid, generation, controller);
-  }, [classify, direction, imageId, ownerId, treeSampleId]);
+  }, [classify, direction, imageId, ownerId, treeSampleId, trunkOutline, outlineEditing]);
 
   // Retry of the labelling step only. Nothing is resegmented, so edited masks,
   // the ROI and the decisions already taken survive untouched.
@@ -728,7 +774,9 @@ export function RegionSuggestionsPanel({
     context.putImageData(image, 0, 0);
   }, [activeRegionId, editingPixels, grid, maskOpacity, regions, reviews, roiEditing, roiRle, showAllMasks, showMasks]);
 
-  const counts = reviewCounts(reviews);
+  // Preserve earlier decisions in storage, but don't count orphaned region IDs
+  // after an explicit regeneration changes the proposal set.
+  const counts = reviewCounts(reviews.filter(review => regions.some(region => region.regionId === review.regionId)));
   const info = phaseNotice(phase, regions.length, failure ?? undefined);
   const busy = phase === "searching_regions" || phase === "suggesting_labels";
 
@@ -771,7 +819,7 @@ export function RegionSuggestionsPanel({
           <button
             type="button"
             onClick={() => regions.length ? setConfirmRegeneration(true) : void regenerate()}
-            disabled={busy || !ownerId || editingPixels}
+            disabled={busy || !ownerId || editingPixels || !trunkOutline}
             className="min-h-11 rounded-lg bg-emerald-800 px-4 py-2 font-semibold text-white hover:bg-emerald-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? "Procesando…" : regions.length ? "Volver a proponer regiones" : "Proponer regiones (MobileSAM)"}
@@ -779,7 +827,7 @@ export function RegionSuggestionsPanel({
           <button
             type="button"
             onClick={() => void retryClassification()}
-            disabled={busy || !ownerId || regions.length === 0}
+            disabled={busy || !ownerId || regions.length === 0 || outlineEditing}
             className={CONTROL}
             title="Conserva las máscaras editadas, el área delimitada y tus decisiones. No vuelve a segmentar."
           >
@@ -793,7 +841,7 @@ export function RegionSuggestionsPanel({
           <p>Volver a proponer regiones reemplaza las máscaras actuales. Para conservarlas, reintenta solo las etiquetas.</p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" className={CONTROL} onClick={() => setConfirmRegeneration(false)}>Conservar mis regiones</button>
-            <button type="button" disabled={busy || editingPixels} className={CONTROL} onClick={() => { setConfirmRegeneration(false); void regenerate(); }}>Confirmar nueva propuesta</button>
+            <button type="button" disabled={busy || editingPixels || !trunkOutline} className={CONTROL} onClick={() => { setConfirmRegeneration(false); void regenerate(); }}>Confirmar nueva propuesta</button>
           </div>
         </div>
       ) : null}
@@ -808,6 +856,11 @@ export function RegionSuggestionsPanel({
         </span>
       </div>
       <p className="mt-3 text-slate-700">La identificación y la calibración son pasos distintos. Una sugerencia de IA no confirma la especie ni una medición de cobertura.</p>
+      <TrunkOutlineEditor key={`${ownerId}:${imageId}:${direction}`} src={previewUrl} viewName={VIEW_NAMES[direction] ?? direction} points={trunkOutline}
+        disabled={busy || !ownerId || editing !== null || roiEditing} onConfirm={confirmTrunk} onEditingChange={setOutlineEditing} />
+      <p className="mt-2 text-xs text-slate-600">El contorno se guarda en este navegador para esta fotografía, árbol y vista. No cambia la imagen original ni inicia la IA por sí solo.</p>
+      {outlineNotice ? <p className="mt-2 rounded-lg bg-sky-50 p-3 text-sky-950" role="status">{outlineNotice}</p> : null}
+      {!trunkOutline ? <p className="mt-2 font-medium text-sky-950">Primero confirma el contorno del tronco para habilitar nuevas propuestas.</p> : null}
 
       {notice ? <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">{notice}</p> : null}
       {headWarning ? <p className="mt-2 text-sm text-amber-900">Cabeza entrenada: {headWarning}</p> : null}
@@ -817,7 +870,7 @@ export function RegionSuggestionsPanel({
         </p>
       ) : null}
 
-      <div className="mt-5 grid items-start gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,1fr)]">
+      <div className={`${outlineEditing ? "hidden" : "grid"} mt-5 items-start gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,1fr)]`}>
         <div className="min-w-0">
           <div className="mb-3 flex flex-wrap items-center gap-3">
             <label className="flex min-h-11 items-center gap-2">
@@ -847,8 +900,11 @@ export function RegionSuggestionsPanel({
           >
             {/* Keep image + overlay in the SAME unstretched box: no letterboxing. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img ref={previewRef} src={previewUrl} alt={`Vista ${VIEW_NAMES[direction] ?? direction}`} className="block h-auto w-full" />
+            <img ref={previewRef} src={previewUrl} alt={`Vista ${VIEW_NAMES[direction] ?? direction}`} className="block h-auto w-full" onLoad={() => { ensureGrid(); }} />
             <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden />
+            {trunkOutline ? <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden>
+              <polygon points={trunkOutline.map(p => `${p.x * 1000},${p.y * 1000}`).join(" ")} fill="none" stroke="#0284c7" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+            </svg> : null}
             {editingPixels ? (
               <p className="pointer-events-none absolute bottom-2 left-2 right-2 rounded bg-slate-950/90 px-3 py-2 text-sm text-white">
                 {roiEditing ? "Delimitando área de tronco" : "Editando píxeles de la máscara"}: {brushMode === "add" ? "añadir" : "borrar"}. Pulsa sobre la fotografía.
@@ -926,7 +982,7 @@ export function RegionSuggestionsPanel({
                       Las puntuaciones no son probabilidades ni porcentajes de certeza.
                     </p>
                     <p className="mt-2 text-xs text-slate-700">
-                      Puntuación SAM {region.samScore.toFixed(3)} (calidad de máscara, no evidencia de liquen) · {region.maskAreaPixels} px de máscara.
+                      Puntuación SAM {region.samScore.toFixed(3)} ({region.regionId.startsWith("sam-trunk-") ? "candidato original antes de recortarlo al tronco; " : ""}calidad de máscara, no evidencia de liquen) · {region.maskAreaPixels} px de máscara.
                       La etiqueta no demuestra que todos los píxeles sean liquen.
                     </p>
                   </details>
@@ -937,21 +993,23 @@ export function RegionSuggestionsPanel({
         </div>
       </div>
 
-      <details className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
+      <details className={`${outlineEditing ? "hidden" : ""} mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4`}>
         <summary className="cursor-pointer font-semibold">Área de tronco y regiones que faltan</summary>
         <p className="mt-3 text-slate-700">Delimita el tronco (ROI), añade regiones omitidas y comprueba toda el área antes de interpretar la cobertura.</p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => { setRoiEditing((current) => !current); setEditing(null); setBrushMode("add"); }} className={CONTROL}>
+          {!trunkOutline ? <button type="button" onClick={() => { setRoiEditing((current) => !current); setEditing(null); setBrushMode("add"); }} className={CONTROL}>
             {roiEditing ? "Terminar ROI de tronco" : "Delimitar ROI de tronco"}
-          </button>
+          </button> : null}
           {roiEditing ? (
             <button type="button" onClick={() => setBrushMode((mode) => mode === "add" ? "erase" : "add")} className={CONTROL}>
               Pincel ROI: {brushMode === "add" ? "añadir" : "borrar"}
             </button>
           ) : null}
           <button type="button" onClick={addOmittedRegion} className={CONTROL}>Añadir máscara omitida</button>
-          <button type="button" onClick={clearRoi} disabled={!roiRle} className={CONTROL}>Borrar ROI</button>
-          <button type="button" onClick={setFullViewRoi} className={CONTROL} title="Atajo exploratorio: toda la fotografía no es el tronco.">Usar vista completa como ROI (exploratorio)</button>
+          {!trunkOutline ? <>
+            <button type="button" onClick={clearRoi} disabled={!roiRle} className={CONTROL}>Borrar ROI</button>
+            <button type="button" onClick={setFullViewRoi} className={CONTROL} title="Atajo exploratorio: toda la fotografía no es el tronco.">Usar vista completa como ROI (exploratorio)</button>
+          </> : <span className="text-sky-900">Área de cobertura: contorno confirmado del tronco.</span>}
         </div>
         <label className="mt-4 flex items-start gap-3 text-sm">
           <input type="checkbox" checked={completeness} className="mt-1 h-4 w-4 accent-emerald-800" onChange={(event) => {

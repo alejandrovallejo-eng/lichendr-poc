@@ -7,6 +7,7 @@
 // weights are used, and no claim about the model is made here.
 
 import { PREVIEW_BOX } from "./component-test-env.ts";
+import "./trunk-outline.test.ts";
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -16,6 +17,8 @@ import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { RegionSuggestionsPanel } from "./RegionSuggestionsPanel.tsx";
+import { TrunkOutlineEditor } from "./TrunkOutlineEditor.tsx";
+import { parseTrunkOutline, trunkStorageKey, type TrunkPoint } from "./trunk-outline.ts";
 import { loadSavedBatch, saveBatch } from "./storage.ts";
 import { initialReview } from "./review.ts";
 import { encodeMaskRle } from "./mask-codec.ts";
@@ -305,9 +308,7 @@ test("enfocar y ocultar regiones conserva máscaras, decisiones y restauración 
     assert.equal(loadSavedBatch(identity)?.reviews.find((review) => review.regionId === "sam-b")?.reviewedLabel, "moss");
     assert.equal(loadSavedBatch(identity)?.reviews.find((review) => review.regionId === "sam-a")?.decision, "pending");
     assert.deepEqual(loadSavedBatch(identity)?.regions, regions);
-    await act(async () => click(buttonByText(container, "Volver a proponer regiones")));
-    assert.match(container.textContent ?? "", /reemplaza las máscaras actuales/);
-    await act(async () => click(buttonByText(container, "Conservar mis regiones")));
+    assert.equal(buttonByText(container, "Volver a proponer regiones").disabled, true, "legacy batch needs a confirmed trunk before regeneration");
     assert.equal(modelCalls, 0);
     await act(async () => click(buttonByText(container, "Editar máscara")));
     assert.equal(buttonByText(container, "Anterior").disabled, true);
@@ -328,4 +329,62 @@ test("enfocar y ocultar regiones conserva máscaras, decisiones y restauración 
     if (root) { const mounted = root as Root; await act(async () => mounted.unmount()); }
     container.remove();
   }
+});
+
+test("contorno ajustable: añadir, mover con teclado, deshacer y cancelar no cambian el confirmado", async () => {
+  const container = document.createElement("div"); document.body.appendChild(container);
+  const root = createRoot(container);
+  const original: TrunkPoint[] = [{ x: .4, y: .1 }, { x: .6, y: .1 }, { x: .6, y: .9 }, { x: .4, y: .9 }];
+  let confirmed: TrunkPoint[] | null = null;
+  try {
+    await act(async () => root.render(createElement(TrunkOutlineEditor, { src: "blob:preview", viewName: "Norte", points: original, disabled: false, onConfirm: p => { confirmed = p; }, onEditingChange: () => {} })));
+    await act(async () => click(buttonByText(container, "Ajustar contorno del tronco")));
+    const first = container.querySelector("circle")!;
+    await act(async () => first.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
+    assert.equal(container.querySelector("circle")?.getAttribute("cx"), "402");
+    await act(async () => click(buttonByText(container, "Deshacer punto o movimiento")));
+    assert.equal(container.querySelector("circle")?.getAttribute("cx"), "400");
+    await act(async () => click(buttonByText(container, "Cancelar contorno")));
+    assert.equal(confirmed, null);
+    await act(async () => click(buttonByText(container, "Ajustar contorno del tronco")));
+    await act(async () => click(buttonByText(container, "Reiniciar dibujo")));
+    assert.equal(buttonByText(container, "Confirmar tronco").disabled, true);
+    const surface = container.querySelector("svg")!;
+    for (const p of original) await act(async () => surface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: p.x * PREVIEW_BOX.width, clientY: p.y * PREVIEW_BOX.height })));
+    assert.equal(buttonByText(container, "Confirmar tronco").disabled, false);
+    await act(async () => click(buttonByText(container, "Confirmar tronco")));
+    assert.deepEqual(confirmed, original);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
+test("confirmar tronco persiste antes de ejecutar IA, restaura tras recarga y no inicia modelos", async () => {
+  const identity = { ownerId: OWNER, treeSampleId: TREE, direction: "E", imageId: "44444444-4444-4444-8444-444444444449" };
+  const container = document.createElement("div"); document.body.appendChild(container);
+  let root = createRoot(container);
+  const originalFetch = globalThis.fetch;
+  let modelCalls = 0;
+  globalThis.fetch = (async () => { modelCalls++; throw new Error("must not run models"); }) as typeof fetch;
+  const render = async () => {
+    await act(async () => root.render(createElement(RegionSuggestionsPanel, { ...identity, file: new File(["fixture"], "trunk.jpg", { type: "image/jpeg" }) })));
+    await flush();
+  };
+  try {
+    await render();
+    assert.equal(buttonByText(container, "Proponer regiones (MobileSAM)").disabled, true);
+    await act(async () => click(buttonByText(container, "Dibujar contorno del tronco")));
+    const surface = container.querySelector('svg[role="group"]')!;
+    for (const [x, y] of [[.45, .1], [.6, .1], [.6, .9], [.45, .9]]) {
+      await act(async () => surface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: x * PREVIEW_BOX.width, clientY: y * PREVIEW_BOX.height })));
+    }
+    await act(async () => click(buttonByText(container, "Confirmar tronco")));
+    assert.equal(parseTrunkOutline(localStorage.getItem(trunkStorageKey(identity)))?.length, 4);
+    assert.equal(buttonByText(container, "Proponer regiones (MobileSAM)").disabled, false);
+    assert.ok(loadSavedBatch(identity)?.roiRle);
+    assert.deepEqual(loadSavedBatch(identity)?.regions, []);
+    assert.equal(modelCalls, 0);
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    assert.match(container.textContent ?? "", /Contorno confirmado · 4 puntos/);
+    assert.equal(buttonByText(container, "Proponer regiones (MobileSAM)").disabled, false);
+    assert.equal(modelCalls, 0);
+  } finally { globalThis.fetch = originalFetch; await act(async () => root.unmount()); container.remove(); }
 });

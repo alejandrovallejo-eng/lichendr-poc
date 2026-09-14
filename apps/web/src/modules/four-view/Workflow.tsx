@@ -47,7 +47,6 @@ import {
 import { captureToAnnotationsDestination, jornadaTreesDestination } from "./navigation";
 import {
   captureProgress,
-  captureProgressLabel,
   contextMatchesTree,
   describeFailure,
   evaluateSeriesReadiness,
@@ -1289,7 +1288,11 @@ export default function FourViewWorkflow() {
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-lg font-semibold">Fotografías del árbol</h2>
-          <p className="text-sm font-semibold" aria-live="polite">{captureProgressLabel(progress)}</p>
+          <p className="text-sm font-semibold" aria-live="polite">
+            {progress.selected} de 4 fotografías seleccionadas · {progress.stored} guardadas · {progress.processed} rectificadas
+            {progress.needsReview > 0 ? ` · ${progress.needsReview} requieren revisar la calibración` : ""}
+            {progress.failed > 0 ? ` · ${progress.failed} no se pudieron completar` : ""}
+          </p>
         </div>
         <p className="mt-2 text-sm">
           La escala se obtiene de la plantilla, no de la distancia. {suggestion
@@ -1320,7 +1323,9 @@ export default function FourViewWorkflow() {
           </p>
         ) : (
           <p className="mt-3 rounded p-3 text-sm" style={{ background: "#E4F1D9", color: "#2C5C1A" }}>
-            Las cuatro vistas de esta serie ya están analizadas.
+            {summary.calibrated
+              ? "Las cuatro vistas están rectificadas y calibradas."
+              : "Las fotografías se conservan. Revisa los pasos de calibración pendientes; las sugerencias de IA se muestran por separado más abajo."}
           </p>
         )}
       </section>

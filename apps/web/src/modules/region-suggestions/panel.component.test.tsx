@@ -16,12 +16,14 @@ import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { RegionSuggestionsPanel } from "./RegionSuggestionsPanel.tsx";
+import { loadSavedBatch, saveBatch } from "./storage.ts";
+import { initialReview } from "./review.ts";
+import { encodeMaskRle } from "./mask-codec.ts";
+import type { ProposedRegion } from "./types.ts";
 
 const OWNER = "00000000-0000-4000-8000-000000000001";
 const TREE = "33333333-3333-4333-8333-333333333333";
 const IMAGE = "44444444-4444-4444-8444-444444444441";
-// A different photograph, so this test does not restore what the previous one
-// persisted for the same owner/tree/view/image.
 const IMAGE_RETRY = "44444444-4444-4444-8444-444444444442";
 
 function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
@@ -137,11 +139,13 @@ test("una respuesta tardía de BioCLIP no deshace lo que la persona hizo mientra
     // decision on the first one and the ROI.
     await act(async () => click(buttonByText(container, "Añadir máscara omitida")));
     await act(async () => paintAt(container, 0.7, 0.7));
+    await act(async () => click(buttonByText(container, "Terminar edición")));
+    await act(async () => click(buttonByText(container, "Anterior")));
     await act(async () => click(buttonByText(container, "Aceptar como liquen")));
     await act(async () =>
       click(buttonByText(container, "Usar vista completa como ROI (exploratorio)")),
     );
-    assert.equal(container.querySelectorAll("li").length, 2);
+    assert.equal(container.querySelectorAll("select option").length, 2);
 
     // Now the slow answer arrives.
     await act(async () => {
@@ -152,7 +156,8 @@ test("una respuesta tardía de BioCLIP no deshace lo que la persona hizo mientra
 
     const text = container.textContent ?? "";
     // The second mask survives: the answer is applied over the live state.
-    assert.equal(container.querySelectorAll("li").length, 2);
+    assert.equal(container.querySelectorAll("select option").length, 2);
+    assert.equal(container.querySelectorAll("li").length, 1, "one region shown, both preserved");
     // The human decision survives.
     assert.match(text, /Aceptadas 1 \(liquen 1\)/);
     assert.match(text, /Pendientes 1/);
@@ -172,41 +177,27 @@ test("una respuesta tardía de BioCLIP no deshace lo que la persona hizo mientra
   }
 });
 
-test("reintentar etiquetas tras un fallo devuelve el panel a Revisar", async () => {
+test("reintentar etiquetas tras un fallo devuelve el panel a revisión", async () => {
   const container = document.createElement("div");
   document.body.appendChild(container);
   let root: Root | null = null;
-
   let failNext = true;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url !== "/api/vision/region-suggestions") throw new Error(`unexpected fetch ${url}`);
-    const body = JSON.parse(String(init?.body)) as {
-      requestToken: string;
-      regions: { regionId: string }[];
-    };
+    const body = JSON.parse(String(init?.body)) as { requestToken: string; regions: { regionId: string }[] };
     if (failNext) {
       failNext = false;
-      return Response.json(
-        { error: "El worker BioCLIP no está disponible." },
-        { status: 503 },
-      );
+      return Response.json({ error: "El worker BioCLIP no está disponible." }, { status: 503 });
     }
     return Response.json({
-      backend: "ridge_head",
-      cached: false,
-      notice: "Puntuaciones crudas, no probabilidades.",
+      backend: "ridge_head", cached: false, notice: "Puntuaciones crudas, no probabilidades.",
       context: { requestToken: body.requestToken },
       provenance: {
-        ownerId: OWNER,
-        treeSampleId: TREE,
-        imageId: IMAGE_RETRY,
-        direction: "N",
-        encoderId: "imageomics/bioclip-2",
-        headSha256: null,
-        preprocessVersion: "1",
-        suggestionVersion: "3",
+        ownerId: OWNER, treeSampleId: TREE, imageId: IMAGE_RETRY, direction: "N",
+        encoderId: "imageomics/bioclip-2", headSha256: null,
+        preprocessVersion: "1", suggestionVersion: "3",
       },
       geometry: [],
       suggestions: body.regions.map((region) => ({
@@ -215,45 +206,126 @@ test("reintentar etiquetas tras un fallo devuelve el panel a Revisar", async () 
       })),
     });
   }) as typeof fetch;
-
   try {
     await act(async () => {
       root = createRoot(container);
-      root.render(
-        createElement(RegionSuggestionsPanel, {
-          treeSampleId: TREE,
-          direction: "N",
-          imageId: IMAGE_RETRY,
-          file: new File([new Uint8Array([1, 2, 3])], "n.jpg", { type: "image/jpeg" }),
-        }),
-      );
+      root.render(createElement(RegionSuggestionsPanel, {
+        treeSampleId: TREE, direction: "N", imageId: IMAGE_RETRY,
+        file: new File([new Uint8Array([1, 2, 3])], "n.jpg", { type: "image/jpeg" }),
+      }));
     });
     await flush();
-
     await act(async () => click(buttonByText(container, "Añadir máscara omitida")));
     await act(async () => paintAt(container, 0.5, 0.5));
-
-    // First classification fails: the panel says so instead of faking success.
     await act(async () => click(buttonByText(container, "Reintentar etiquetas (BioCLIP)")));
     await flush();
-    assert.match(container.textContent ?? "", /Asistencia no disponible/);
-
-    // The retry succeeds: the labels arrive AND the failure notice goes away.
+    assert.match(container.textContent ?? "", /requiere reintento/);
     await act(async () => click(buttonByText(container, "Reintentar etiquetas (BioCLIP)")));
     await flush();
     const text = container.textContent ?? "";
-    assert.doesNotMatch(text, /Asistencia no disponible/);
-    assert.match(text, /Revisar/);
+    assert.doesNotMatch(text, /requiere reintento/);
+    assert.match(text, /1 sugerencias recibidas/);
     assert.match(text, /liquen \(puntuación cruda 0\.700\)/);
     assert.match(text, /Backend ridge_head/);
-    // The mask drawn by hand is still there: nothing was resegmented.
     assert.equal(container.querySelectorAll("li").length, 1);
   } finally {
     globalThis.fetch = originalFetch;
-    if (root) {
-      const mounted = root as Root;
-      await act(async () => mounted.unmount());
-    }
+    if (root) { const mounted = root as Root; await act(async () => mounted.unmount()); }
+    container.remove();
+  }
+});
+
+test("enfocar y ocultar regiones conserva máscaras, decisiones y restauración sin llamadas IA", async () => {
+  const originalContext = HTMLCanvasElement.prototype.getContext;
+  let overlay = new Uint8ClampedArray(36);
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    clearRect: () => { overlay = new Uint8ClampedArray(36); },
+    createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
+    putImageData: (image: ImageData) => { overlay = new Uint8ClampedArray(image.data); },
+  })) as unknown as typeof originalContext;
+  const identity = { ownerId: OWNER, treeSampleId: TREE, direction: "N", imageId: "44444444-4444-4444-8444-444444444443" };
+  const regions: ProposedRegion[] = ["sam-a", "sam-b"].map((regionId, index) => ({
+    regionId, maskWidth: 3, maskHeight: 3,
+    maskRle: encodeMaskRle(Uint8Array.from({ length: 9 }, (_, i) => i === index + 3 ? 1 : 0), 3, 3),
+    maskSha: regionId, maskAreaPixels: 1,
+    box: { x: index, y: 1, width: 1, height: 1 },
+    cropBoxNormalized: null, samScore: 0.9, transformChain: [],
+  }));
+  saveBatch(identity, {
+    regions, suggestions: regions.map((region) => ({
+      regionId: region.regionId,
+      ranking: [{ label: "lichen", labelEs: "liquen", rawScore: 0.4 }],
+      backend: "ridge_head", encoderId: "test", headSha256: null, preprocess: "test", versions: { schema: "3" },
+    })),
+    reviews: regions.map((region) => initialReview(region.regionId, region.maskSha)),
+    backend: "ridge_head", completenessReviewed: false, roiRle: null,
+  });
+  const before = JSON.stringify(loadSavedBatch(identity));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+  const originalFetch = globalThis.fetch;
+  let modelCalls = 0;
+  globalThis.fetch = (async () => { modelCalls += 1; throw new Error("must not call models"); }) as typeof fetch;
+  const render = async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(createElement(RegionSuggestionsPanel, {
+        treeSampleId: TREE, direction: "N", imageId: identity.imageId,
+        file: new File([new Uint8Array([1])], "fixture.jpg", { type: "image/jpeg" }),
+      }));
+    });
+    await flush();
+  };
+  try {
+    await render();
+    assert.equal(container.querySelectorAll("li[data-region-id]").length, 1);
+    assert.equal(container.querySelector("li[data-region-id]")?.getAttribute("data-region-id"), "sam-a");
+    assert.match(container.textContent ?? "", /Región 1 de 2/);
+    assert.match(container.textContent ?? "", /2 sugerencias recibidas/);
+    assert.ok(overlay[3 * 4 + 3] > 0, "first mask is drawn by default");
+    assert.equal(overlay[4 * 4 + 3], 0, "other mask is hidden, not deleted");
+    await act(async () => click(buttonByText(container, "Siguiente")));
+    assert.equal(container.querySelector("li[data-region-id]")?.getAttribute("data-region-id"), "sam-b");
+    assert.equal(overlay[3 * 4 + 3], 0);
+    assert.ok(overlay[4 * 4 + 3] > 0, "navigation also changes the real pixel overlay");
+    const visibility = Array.from(container.querySelectorAll("label")).find((label) => label.textContent?.trim() === "Mostrar máscaras")?.querySelector("input");
+    assert.ok(visibility);
+    await act(async () => click(visibility));
+    assert.match(container.textContent ?? "", /Fotografía sin superposiciones/);
+    assert.ok(overlay.every((value) => value === 0));
+    await act(async () => click(visibility));
+    const allMasks = Array.from(container.querySelectorAll("label")).find((label) => label.textContent?.trim() === "Ver todas las regiones")?.querySelector("input");
+    assert.ok(allMasks);
+    await act(async () => click(allMasks));
+    assert.ok(overlay[3 * 4 + 3] > 0 && overlay[4 * 4 + 3] > 0);
+    await act(async () => click(allMasks));
+    assert.equal(JSON.stringify(loadSavedBatch(identity)), before, "presentation must never persist model or review changes");
+    await act(async () => click(buttonByText(container, "Aceptar como musgo")));
+    assert.equal(loadSavedBatch(identity)?.reviews.find((review) => review.regionId === "sam-b")?.reviewedLabel, "moss");
+    assert.equal(loadSavedBatch(identity)?.reviews.find((review) => review.regionId === "sam-a")?.decision, "pending");
+    assert.deepEqual(loadSavedBatch(identity)?.regions, regions);
+    await act(async () => click(buttonByText(container, "Volver a proponer regiones")));
+    assert.match(container.textContent ?? "", /reemplaza las máscaras actuales/);
+    await act(async () => click(buttonByText(container, "Conservar mis regiones")));
+    assert.equal(modelCalls, 0);
+    await act(async () => click(buttonByText(container, "Editar máscara")));
+    assert.equal(buttonByText(container, "Anterior").disabled, true);
+    assert.equal(visibility.disabled, true);
+    await act(async () => click(buttonByText(container, "Terminar edición")));
+    const saved = JSON.stringify(loadSavedBatch(identity));
+    const mounted = root as unknown as Root;
+    await act(async () => mounted.unmount());
+    root = null;
+    await render();
+    await act(async () => click(buttonByText(container, "Siguiente")));
+    assert.match(container.textContent ?? "", /Aceptada como musgo/);
+    assert.equal(JSON.stringify(loadSavedBatch(identity)), saved);
+    assert.equal(modelCalls, 0);
+  } finally {
+    HTMLCanvasElement.prototype.getContext = originalContext;
+    globalThis.fetch = originalFetch;
+    if (root) { const mounted = root as Root; await act(async () => mounted.unmount()); }
     container.remove();
   }
 });

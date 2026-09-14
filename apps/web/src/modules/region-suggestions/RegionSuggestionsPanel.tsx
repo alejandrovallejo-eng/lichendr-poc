@@ -62,6 +62,17 @@ import {
 // another version of the crop/preprocessing contract is not applied.
 const SUGGESTION_VERSION = "3";
 const BRUSH_RADIUS = 12;
+const VIEW_NAMES: Record<string, string> = { N: "Norte", E: "Este", S: "Sur", W: "Oeste" };
+const CONTROL = "min-h-11 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 aria-pressed:border-emerald-800 aria-pressed:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-50";
+
+function decisionLabel(review?: RegionReview): string {
+  if (review?.decision === "accepted") {
+    return `Aceptada como ${review.reviewedLabel ? SUGGESTION_LABEL_ES[review.reviewedLabel] : "sin etiqueta"}`;
+  }
+  if (review?.decision === "rejected") return "Excluida";
+  if (review?.decision === "undetermined") return "Sin determinar";
+  return "Pendiente de revisión";
+}
 
 export interface RegionSuggestionsPanelProps {
   treeSampleId: string;
@@ -105,6 +116,16 @@ export function RegionSuggestionsPanel({
   const [headWarning, setHeadWarning] = useState<string | null>(null);
   const [completeness, setCompleteness] = useState(false);
   const [cached, setCached] = useState(false);
+  // Presentation only: changing focus or visibility never modifies mask pixels,
+  // human decisions, saved batches or the inputs sent to either model.
+  const [showMasks, setShowMasks] = useState(true);
+  const [showAllMasks, setShowAllMasks] = useState(false);
+  const [maskOpacity, setMaskOpacity] = useState(35);
+  const [confirmRegeneration, setConfirmRegeneration] = useState(false);
+  const activeRegion = regions.find((region) => region.regionId === selected) ?? regions[0];
+  const activeRegionId = activeRegion?.regionId ?? null;
+  const activeIndex = regions.findIndex((region) => region.regionId === activeRegionId);
+  const editingPixels = editing !== null || roiEditing;
 
   // Live run generation and abort handle. A late answer is compared against the
   // generation that is CURRENT when it arrives, never against its own echo.
@@ -158,6 +179,10 @@ export function RegionSuggestionsPanel({
     setHeadWarning(null);
     setCompleteness(false);
     setCached(false);
+    setShowMasks(true);
+    setShowAllMasks(false);
+    setMaskOpacity(35);
+    setConfirmRegeneration(false);
   }, []);
 
   // Session owner plus restoration of the saved batch (photographs, masks with
@@ -659,10 +684,11 @@ export function RegionSuggestionsPanel({
     const context = canvas.getContext("2d");
     if (!context) return;
     context.clearRect(0, 0, grid.width, grid.height);
+    if (!showMasks && !editingPixels) return;
     const image = context.createImageData(grid.width, grid.height);
     // The reviewed ROI is drawn faithfully underneath, so what is measured is
     // what is seen.
-    if (roiRle) {
+    if (roiRle && (roiEditing || showAllMasks)) {
       const roi = decodeMaskRle(roiRle);
       if (roi.width === grid.width && roi.height === grid.height) {
         for (let index = 0; index < roi.mask.length; index += 1) {
@@ -674,7 +700,11 @@ export function RegionSuggestionsPanel({
         }
       }
     }
-    for (const region of regions) {
+    // Draw the focused region last, so an overlapping proposal cannot hide it.
+    const visibleRegions = regions
+      .filter((region) => !roiEditing && (showAllMasks || region.regionId === activeRegionId))
+      .sort((a, b) => Number(a.regionId === activeRegionId) - Number(b.regionId === activeRegionId));
+    for (const region of visibleRegions) {
       const review = reviews.find((item) => item.regionId === region.regionId);
       const colour =
         review?.decision === "accepted"
@@ -684,7 +714,7 @@ export function RegionSuggestionsPanel({
             : review?.decision === "undetermined"
               ? [148, 163, 184]
               : [250, 204, 21];
-      const alpha = region.regionId === selected ? 190 : 110;
+      const alpha = Math.round(255 * maskOpacity / 100 * (region.regionId === activeRegionId ? 1 : 0.45));
       const decoded = decodeMaskRle(region.maskRle);
       if (decoded.width !== grid.width || decoded.height !== grid.height) continue;
       for (let index = 0; index < decoded.mask.length; index += 1) {
@@ -696,7 +726,7 @@ export function RegionSuggestionsPanel({
       }
     }
     context.putImageData(image, 0, 0);
-  }, [grid, regions, reviews, roiRle, selected]);
+  }, [activeRegionId, editingPixels, grid, maskOpacity, regions, reviews, roiEditing, roiRle, showAllMasks, showMasks]);
 
   const counts = reviewCounts(reviews);
   const info = phaseNotice(phase, regions.length, failure ?? undefined);
@@ -730,253 +760,225 @@ export function RegionSuggestionsPanel({
   });
 
   return (
-    <section className="rounded-lg border border-dashed border-emerald-700/50 bg-slate-900/40 p-4 text-sm">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h4 className="font-semibold text-emerald-200">
-            Asistencia de regiones (piloto) · {direction}
-          </h4>
-          <p className="text-xs text-slate-300">
-            {info.title}: {info.detail}
-          </p>
+    <section aria-label={`Revisión de regiones · ${VIEW_NAMES[direction] ?? direction}`} className="rounded-xl border border-emerald-200 bg-white p-4 text-sm text-slate-900 shadow-sm sm:p-6">
+      <header className="flex flex-wrap items-start justify-between gap-4" style={{ display: "flex" }}>
+        <div className="max-w-2xl">
+          <p className="text-xs font-semibold uppercase tracking-wide text-emerald-800">Identificación asistida · piloto</p>
+          <h4 className="mt-1 text-xl font-semibold">{VIEW_NAMES[direction] ?? direction}: revisar regiones</h4>
+          <p className="mt-2 text-slate-700">{info.detail}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => void regenerate()}
-            disabled={busy || !ownerId}
-            className="rounded border border-emerald-500 px-3 py-1 text-emerald-200 disabled:opacity-50"
+            onClick={() => regions.length ? setConfirmRegeneration(true) : void regenerate()}
+            disabled={busy || !ownerId || editingPixels}
+            className="min-h-11 rounded-lg bg-emerald-800 px-4 py-2 font-semibold text-white hover:bg-emerald-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy ? "Procesando…" : "Proponer regiones (MobileSAM)"}
+            {busy ? "Procesando…" : regions.length ? "Volver a proponer regiones" : "Proponer regiones (MobileSAM)"}
           </button>
           <button
             type="button"
             onClick={() => void retryClassification()}
             disabled={busy || !ownerId || regions.length === 0}
-            className="rounded border border-sky-500 px-3 py-1 text-sky-200 disabled:opacity-50"
-            title="Vuelve a pedir etiquetas a BioCLIP sin volver a segmentar: conserva las máscaras editadas, el ROI y tus decisiones."
+            className={CONTROL}
+            title="Conserva las máscaras editadas, el área delimitada y tus decisiones. No vuelve a segmentar."
           >
             Reintentar etiquetas (BioCLIP)
           </button>
         </div>
       </header>
 
-      {notice ? <p className="mt-2 text-xs text-amber-200">{notice}</p> : null}
-      {headWarning ? (
-        <p className="mt-2 text-xs text-amber-300">Cabeza entrenada: {headWarning}</p>
+      {confirmRegeneration ? (
+        <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950" role="alert">
+          <p>Volver a proponer regiones reemplaza las máscaras actuales. Para conservarlas, reintenta solo las etiquetas.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" className={CONTROL} onClick={() => setConfirmRegeneration(false)}>Conservar mis regiones</button>
+            <button type="button" disabled={busy || editingPixels} className={CONTROL} onClick={() => { setConfirmRegeneration(false); void regenerate(); }}>Confirmar nueva propuesta</button>
+          </div>
+        </div>
       ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2" aria-live="polite">
+        <span className="rounded-full bg-emerald-50 px-3 py-1 font-medium text-emerald-900">Fotografía guardada</span>
+        <span className="rounded-full bg-sky-50 px-3 py-1 font-medium text-sky-900">
+          IA: {busy ? info.title : phase === "unavailable" ? "requiere reintento" : suggestions.length > 0 ? `${suggestions.length} sugerencias recibidas` : info.title.toLowerCase()}
+        </span>
+        <span className="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-800">
+          Revisión: {counts.pending} pendientes · {counts.accepted + counts.rejected + counts.undetermined} revisadas
+        </span>
+      </div>
+      <p className="mt-3 text-slate-700">La identificación y la calibración son pasos distintos. Una sugerencia de IA no confirma la especie ni una medición de cobertura.</p>
+
+      {notice ? <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">{notice}</p> : null}
+      {headWarning ? <p className="mt-2 text-sm text-amber-900">Cabeza entrenada: {headWarning}</p> : null}
       {failure ? (
-        <p className="mt-2 text-xs text-amber-300">
+        <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-950" role="alert">
           {failure} Tus fotografías y revisiones se conservan; puedes anotar manualmente.
         </p>
       ) : null}
 
-      <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,360px)_1fr]">
-        <div
-          className="relative"
-          onClick={(event) => {
-            if (!editing && !roiEditing) return;
-            const bounds = event.currentTarget.getBoundingClientRect();
-            const x = (event.clientX - bounds.left) / bounds.width;
-            const y = (event.clientY - bounds.top) / bounds.height;
-            if (roiEditing) paintRoi(x, y);
-            else if (editing) paint(editing, x, y);
-          }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            ref={previewRef}
-            src={previewUrl}
-            alt={`Vista ${direction}`}
-            className="w-full rounded"
-          />
-          <canvas
-            ref={overlayRef}
-            className="pointer-events-none absolute inset-0 h-full w-full"
-            aria-hidden
-          />
-          {roiEditing || editing ? (
-            <p className="absolute bottom-1 left-1 rounded bg-slate-900/80 px-2 py-0.5 text-[11px] text-emerald-200">
-              {roiEditing ? "Delimitando ROI de tronco" : "Editando píxeles de la máscara"}:{" "}
-              {brushMode === "add" ? "añadir" : "borrar"}
-            </p>
-          ) : null}
+      <div className="mt-5 grid items-start gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,1fr)]">
+        <div className="min-w-0">
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <label className="flex min-h-11 items-center gap-2">
+              <input type="checkbox" checked={showMasks || editingPixels} disabled={editingPixels} onChange={(event) => setShowMasks(event.target.checked)} className="h-4 w-4 accent-emerald-800" />
+              Mostrar máscaras
+            </label>
+            <label className="flex min-h-11 items-center gap-2">
+              <input type="checkbox" checked={showAllMasks} disabled={editingPixels || !showMasks} onChange={(event) => setShowAllMasks(event.target.checked)} className="h-4 w-4 accent-emerald-800" />
+              Ver todas las regiones
+            </label>
+            <label className="flex min-h-11 items-center gap-2 text-sm">
+              Opacidad
+              <input type="range" min="10" max="80" step="5" value={maskOpacity} disabled={!showMasks && !editingPixels} onChange={(event) => setMaskOpacity(Number(event.target.value))} className="w-24 accent-emerald-800" />
+              <span className="tabular-nums">{maskOpacity}%</span>
+            </label>
+          </div>
+          <div
+            className="relative overflow-hidden rounded-lg bg-slate-100"
+            onClick={(event) => {
+              if (!editing && !roiEditing) return;
+              const bounds = event.currentTarget.getBoundingClientRect();
+              const x = (event.clientX - bounds.left) / bounds.width;
+              const y = (event.clientY - bounds.top) / bounds.height;
+              if (roiEditing) paintRoi(x, y);
+              else if (editing) paint(editing, x, y);
+            }}
+          >
+            {/* Keep image + overlay in the SAME unstretched box: no letterboxing. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img ref={previewRef} src={previewUrl} alt={`Vista ${VIEW_NAMES[direction] ?? direction}`} className="block h-auto w-full" />
+            <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden />
+            {editingPixels ? (
+              <p className="pointer-events-none absolute bottom-2 left-2 right-2 rounded bg-slate-950/90 px-3 py-2 text-sm text-white">
+                {roiEditing ? "Delimitando área de tronco" : "Editando píxeles de la máscara"}: {brushMode === "add" ? "añadir" : "borrar"}. Pulsa sobre la fotografía.
+              </p>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-slate-600">
+            {roiEditing ? "Azul: área de tronco que estás delimitando." : showMasks ? "Amarillo: pendiente · verde: aceptada · rojo: excluida · gris: sin determinar." : "Fotografía sin superposiciones. Las máscaras y decisiones siguen guardadas."}
+          </p>
         </div>
 
-        <ul className="space-y-2">
-          {regions.length === 0 ? (
-            <li className="text-xs text-slate-300">
-              Sin regiones propuestas. Que no haya propuestas no demuestra ausencia de líquenes:
-              revisa todo el ROI y usa «Añadir máscara omitida» para dibujar a mano las que falten
-              antes de finalizar.
-            </li>
-          ) : null}
-          {regions.map((region) => {
-            const suggestion = suggestions.find((item) => item.regionId === region.regionId);
-            const review = reviews.find((item) => item.regionId === region.regionId);
-            const top = suggestion?.ranking?.[0];
-            return (
-              <li
-                key={region.regionId}
-                className={`rounded border p-2 ${
-                  selected === region.regionId ? "border-emerald-400" : "border-slate-700"
-                }`}
-                onMouseEnter={() => setSelected(region.regionId)}
-              >
-                <p className="text-xs text-slate-200">
-                  Sugerencia:{" "}
-                  {top
-                    ? `${top.labelEs} (puntuación cruda ${top.rawScore?.toFixed(3) ?? "—"})`
-                    : "pendiente"}
-                  {" · "}
-                  Estado:{" "}
-                  {review?.decision === "pending" ? "pendiente de revisión" : review?.decision}
-                  {review?.maskEdited ? " · máscara editada" : ""}
-                </p>
-                <p className="text-[11px] text-slate-400">
-                  Puntuación SAM {region.samScore.toFixed(3)} (calidad de máscara, no evidencia de
-                  liquen) · {region.maskAreaPixels} px de máscara. La etiqueta no demuestra que todos
-                  los píxeles sean liquen; nada se acepta automáticamente.
-                </p>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {SUGGESTION_LABELS.map((label) => (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => decide(region.regionId, "accepted", label)}
-                      className="rounded border border-emerald-600 px-2 py-0.5 text-[11px] text-emerald-200"
-                    >
-                      Aceptar como {SUGGESTION_LABEL_ES[label]}
-                    </button>
+        <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          {regions.length > 0 ? (
+            <nav aria-label={`Elegir región · ${direction}`}>
+              <div className="flex items-center justify-between gap-2">
+                <button type="button" className={CONTROL} disabled={activeIndex <= 0 || editingPixels} onClick={() => setSelected(regions[activeIndex - 1].regionId)}>Anterior</button>
+                <p className="font-semibold tabular-nums" aria-live="polite">Región {activeIndex + 1} de {regions.length}</p>
+                <button type="button" className={CONTROL} disabled={activeIndex >= regions.length - 1 || editingPixels} onClick={() => setSelected(regions[activeIndex + 1].regionId)}>Siguiente</button>
+              </div>
+              <label className="mt-3 block text-sm font-medium">
+                Ir a una región
+                <select className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900" value={activeRegionId ?? ""} disabled={editingPixels} onChange={(event) => setSelected(event.target.value)}>
+                  {regions.map((region, index) => (
+                    <option key={region.regionId} value={region.regionId}>Región {index + 1} · {decisionLabel(reviews.find((review) => review.regionId === region.regionId))}</option>
                   ))}
-                  <button
-                    type="button"
-                    onClick={() => decide(region.regionId, "rejected")}
-                    className="rounded border border-rose-600 px-2 py-0.5 text-[11px] text-rose-200"
-                  >
-                    Excluir
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => decide(region.regionId, "undetermined")}
-                    className="rounded border border-slate-600 px-2 py-0.5 text-[11px] text-slate-200"
-                  >
-                    Sin determinar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
+                </select>
+              </label>
+              {editingPixels ? <p className="mt-2 text-xs text-sky-900">Termina la edición para cambiar de región.</p> : null}
+            </nav>
+          ) : null}
+          <ul className="mt-4 space-y-3">
+            {regions.length === 0 ? (
+              <li className="text-sm text-slate-700">
+                Sin regiones propuestas. Que no haya propuestas no demuestra ausencia de líquenes:
+                revisa toda la fotografía y usa «Añadir máscara omitida» para dibujar las que falten.
+              </li>
+            ) : null}
+            {activeRegion ? [activeRegion].map((region) => {
+              const suggestion = suggestions.find((item) => item.regionId === region.regionId);
+              const review = reviews.find((item) => item.regionId === region.regionId);
+              const top = suggestion?.ranking?.[0];
+              return (
+                <li key={region.regionId} data-region-id={region.regionId}>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Sugerencia de la IA</p>
+                  <p className="mt-1 text-2xl font-semibold text-emerald-950">{top?.labelEs ?? "Sin etiqueta"}</p>
+                  <p className="mt-2 rounded-lg border border-slate-200 bg-white p-3 text-sm font-medium">{decisionLabel(review)}{review?.maskEdited ? " · máscara editada" : ""}</p>
+                  <p className="mt-3 text-sm text-slate-700">Comprueba la zona resaltada. Tú decides qué contiene; nada se acepta automáticamente.</p>
+                  <div className="mt-4 grid gap-2">
+                    {SUGGESTION_LABELS.map((label) => (
+                      <button key={label} type="button" onClick={() => decide(region.regionId, "accepted", label)} className={CONTROL} aria-pressed={review?.decision === "accepted" && review.reviewedLabel === label}>
+                        Aceptar como {SUGGESTION_LABEL_ES[label]}
+                      </button>
+                    ))}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button type="button" onClick={() => decide(region.regionId, "rejected")} className={CONTROL} aria-pressed={review?.decision === "rejected"}>Excluir</button>
+                      <button type="button" onClick={() => decide(region.regionId, "undetermined")} className={CONTROL} aria-pressed={review?.decision === "undetermined"}>Sin determinar</button>
+                    </div>
+                    <button type="button" onClick={() => {
                       setSelected(region.regionId);
                       setRoiEditing(false);
-                      setEditing((current) =>
-                        current === region.regionId ? null : region.regionId,
-                      );
-                    }}
-                    className="rounded border border-sky-600 px-2 py-0.5 text-[11px] text-sky-200"
-                  >
-                    {editing === region.regionId ? "Terminar edición" : "Editar máscara"}
-                  </button>
-                  {editing === region.regionId ? (
-                    <button
-                      type="button"
-                      onClick={() => setBrushMode((mode) => (mode === "add" ? "erase" : "add"))}
-                      className="rounded border border-sky-600 px-2 py-0.5 text-[11px] text-sky-200"
-                    >
-                      Pincel: {brushMode === "add" ? "añadir" : "borrar"}
+                      setEditing((current) => current === region.regionId ? null : region.regionId);
+                    }} className={CONTROL}>
+                      {editing === region.regionId ? "Terminar edición" : "Editar máscara"}
                     </button>
-                  ) : null}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                    {editing === region.regionId ? (
+                      <button type="button" onClick={() => setBrushMode((mode) => mode === "add" ? "erase" : "add")} className={CONTROL}>
+                        Pincel: {brushMode === "add" ? "añadir" : "borrar"}
+                      </button>
+                    ) : null}
+                  </div>
+                  <details className="mt-4 border-t border-slate-200 pt-3">
+                    <summary className="cursor-pointer text-sm font-medium">Detalles de esta sugerencia</summary>
+                    <p className="mt-2 text-xs text-slate-700">
+                      {top ? `${top.labelEs} (puntuación cruda ${top.rawScore?.toFixed(3) ?? "—"})` : "Etiqueta pendiente"}.
+                      Las puntuaciones no son probabilidades ni porcentajes de certeza.
+                    </p>
+                    <p className="mt-2 text-xs text-slate-700">
+                      Puntuación SAM {region.samScore.toFixed(3)} (calidad de máscara, no evidencia de liquen) · {region.maskAreaPixels} px de máscara.
+                      La etiqueta no demuestra que todos los píxeles sean liquen.
+                    </p>
+                  </details>
+                </li>
+              );
+            }) : null}
+          </ul>
+        </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-200">
-        <button
-          type="button"
-          onClick={() => {
-            setRoiEditing((current) => !current);
-            setEditing(null);
-            setBrushMode("add");
-          }}
-          className={`rounded border px-2 py-0.5 text-[11px] ${
-            roiEditing ? "border-sky-400 text-sky-200" : "border-slate-600"
-          }`}
-        >
-          {roiEditing ? "Terminar ROI de tronco" : "Delimitar ROI de tronco"}
-        </button>
-        {roiEditing ? (
-          <button
-            type="button"
-            onClick={() => setBrushMode((mode) => (mode === "add" ? "erase" : "add"))}
-            className="rounded border border-sky-600 px-2 py-0.5 text-[11px] text-sky-200"
-          >
-            Pincel ROI: {brushMode === "add" ? "añadir" : "borrar"}
+      <details className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
+        <summary className="cursor-pointer font-semibold">Área de tronco y regiones que faltan</summary>
+        <p className="mt-3 text-slate-700">Delimita el tronco (ROI), añade regiones omitidas y comprueba toda el área antes de interpretar la cobertura.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => { setRoiEditing((current) => !current); setEditing(null); setBrushMode("add"); }} className={CONTROL}>
+            {roiEditing ? "Terminar ROI de tronco" : "Delimitar ROI de tronco"}
           </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={setFullViewRoi}
-          className="rounded border border-slate-600 px-2 py-0.5 text-[11px]"
-          title="Atajo exploratorio: toda la fotografía no es el tronco."
-        >
-          Usar vista completa como ROI (exploratorio)
-        </button>
-        <button
-          type="button"
-          onClick={clearRoi}
-          disabled={!roiRle}
-          className="rounded border border-slate-600 px-2 py-0.5 text-[11px] disabled:opacity-50"
-        >
-          Borrar ROI
-        </button>
-        <button
-          type="button"
-          onClick={addOmittedRegion}
-          className="rounded border border-emerald-600 px-2 py-0.5 text-[11px] text-emerald-200"
-        >
-          Añadir máscara omitida
-        </button>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={completeness}
-            onChange={(event) => {
-              setCompleteness(event.target.checked);
-              persist({
-                regions,
-                suggestions,
-                reviews,
-                backend,
-                completenessReviewed: event.target.checked,
-                roiRle,
-              });
-            }}
-          />
+          {roiEditing ? (
+            <button type="button" onClick={() => setBrushMode((mode) => mode === "add" ? "erase" : "add")} className={CONTROL}>
+              Pincel ROI: {brushMode === "add" ? "añadir" : "borrar"}
+            </button>
+          ) : null}
+          <button type="button" onClick={addOmittedRegion} className={CONTROL}>Añadir máscara omitida</button>
+          <button type="button" onClick={clearRoi} disabled={!roiRle} className={CONTROL}>Borrar ROI</button>
+          <button type="button" onClick={setFullViewRoi} className={CONTROL} title="Atajo exploratorio: toda la fotografía no es el tronco.">Usar vista completa como ROI (exploratorio)</button>
+        </div>
+        <label className="mt-4 flex items-start gap-3 text-sm">
+          <input type="checkbox" checked={completeness} className="mt-1 h-4 w-4 accent-emerald-800" onChange={(event) => {
+            setCompleteness(event.target.checked);
+            persist({ regions, suggestions, reviews, backend, completenessReviewed: event.target.checked, roiRle });
+          }} />
           Revisé todo el ROI y añadí o amplié las máscaras omitidas.
         </label>
-      </div>
+      </details>
 
-      <p className="mt-2 text-[11px] text-slate-400">
+      <p className="mt-4 text-sm text-slate-700">
         Pendientes {counts.pending} · Aceptadas {counts.accepted} (liquen {counts.acceptedLichen}) ·
-        Excluidas {counts.rejected} · Sin determinar {counts.undetermined} · Máscaras editadas{" "}
-        {counts.maskEdited} · Backend {backend ?? "no ejecutado"}
-        {cached ? " (reutilizado de caché)" : ""}.
+        Excluidas {counts.rejected} · Sin determinar {counts.undetermined} · Máscaras editadas {counts.maskEdited}.
       </p>
-
-      <p className="mt-1 text-[11px] text-slate-300">
-        {coverage === null
+      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+        <p>{coverage === null
           ? "Cobertura revisada: confirma el ROI de tronco para calcularla."
           : coverage.available
-            ? `Cobertura revisada exploratoria: ${coverage.coveragePercent?.toFixed(2)} % `
-              + `(${coverage.intersectionPixels} px de unión aceptada sobre ${coverage.roiPixels} px de ROI). `
-              + coverage.notice
-            : `Cobertura revisada no disponible (${coverage.unavailableReason}). ${coverage.notice}`}
-      </p>
-      {!finalisation.canFinalize && finalisation.reason ? (
-        <p className="mt-1 text-[11px] text-amber-200">{finalisation.reason}</p>
-      ) : null}
+            ? `Cobertura revisada exploratoria: ${coverage.coveragePercent?.toFixed(2)} % (${coverage.intersectionPixels} px de unión aceptada sobre ${coverage.roiPixels} px de ROI). ${coverage.notice}`
+            : `Cobertura revisada no disponible (${coverage.unavailableReason}). ${coverage.notice}`}</p>
+        {!finalisation.canFinalize && finalisation.reason ? <p className="mt-1">{finalisation.reason}</p> : null}
+        <p className="mt-1">Esta revisión no sustituye la calibración física ni permite estimar por sí sola la calidad del aire.</p>
+      </div>
+      <details className="mt-3 text-xs text-slate-600">
+        <summary className="cursor-pointer">Información del modelo</summary>
+        <p className="mt-2">Backend {backend ?? "no ejecutado"}{cached ? " (reutilizado de caché)" : ""} · versión de sugerencias {SUGGESTION_VERSION}.</p>
+      </details>
     </section>
   );
 }

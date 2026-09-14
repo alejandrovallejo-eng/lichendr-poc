@@ -8,6 +8,8 @@
 
 import { PREVIEW_BOX } from "./component-test-env.ts";
 import "./trunk-outline.test.ts";
+import "./trunk-colors.test.ts";
+import "./trunk-colors.component.test.tsx";
 
 import assert from "node:assert/strict";
 import test from "node:test";

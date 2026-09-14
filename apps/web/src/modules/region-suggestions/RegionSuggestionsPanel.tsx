@@ -48,6 +48,7 @@ import {
 } from "./sam-service";
 import { loadSavedBatch, saveBatch } from "./storage";
 import { TrunkOutlineEditor } from "./TrunkOutlineEditor";
+import { TrunkColorPanel } from "./TrunkColorPanel";
 import { clipToTrunk, parseTrunkOutline, rasterizeTrunk, trunkPromptPoints, trunkStorageKey, type TrunkPoint } from "./trunk-outline";
 import {
   SUGGESTION_LABELS,
@@ -861,6 +862,9 @@ export function RegionSuggestionsPanel({
       <p className="mt-2 text-xs text-slate-600">El contorno se guarda en este navegador para esta fotografía, árbol y vista. No cambia la imagen original ni inicia la IA por sí solo.</p>
       {outlineNotice ? <p className="mt-2 rounded-lg bg-sky-50 p-3 text-sky-950" role="status">{outlineNotice}</p> : null}
       {!trunkOutline ? <p className="mt-2 font-medium text-sky-950">Primero confirma el contorno del tronco para habilitar nuevas propuestas.</p> : null}
+      {trunkOutline && ownerId && !outlineEditing ? <TrunkColorPanel key={`${ownerId}:${treeSampleId}:${imageId}:${direction}`} src={previewUrl}
+        viewName={VIEW_NAMES[direction] ?? direction} points={trunkOutline} identity={trunkStorageKey(storageIdentity)}
+        disabled={busy || editing !== null || roiEditing} /> : null}
 
       {notice ? <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">{notice}</p> : null}
       {headWarning ? <p className="mt-2 text-sm text-amber-900">Cabeza entrenada: {headWarning}</p> : null}

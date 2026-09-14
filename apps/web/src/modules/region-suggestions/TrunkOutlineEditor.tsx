@@ -36,9 +36,9 @@ export function TrunkOutlineEditor({ src, viewName, points, disabled, onConfirm,
       setDraft(points?.map(p => ({ ...p })) ?? []); setHistory([]); setSelected(null); setEditing(true); onEditingChange(true);
     }}>{points ? "Ajustar contorno del tronco" : "Dibujar contorno del tronco"}</button> : <>
       <p className="my-3 text-sm">Haz clic siguiendo el borde del tronco. Arrastra los puntos para ajustarlos. Con teclado: selecciona un punto y usa las flechas; Suprimir lo elimina. El último punto se une al primero.</p>
-      <div className="relative mx-auto max-w-2xl overflow-hidden rounded-lg bg-slate-200">
+      <div className="relative mx-auto w-fit max-w-full overflow-hidden rounded-lg bg-slate-200">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={src} alt={`Delimitar ${viewName}`} className="block h-auto w-full" draggable={false} />
+        <img src={src} alt={`Delimitar ${viewName}`} className="block h-auto max-h-[65vh] w-auto max-w-full" draggable={false} />
         <svg ref={svgRef} viewBox="0 0 1000 1000" preserveAspectRatio="none" className="absolute inset-0 h-full w-full touch-none" role="group" aria-label={`Puntos del tronco de ${viewName}`}
           onClick={event => {
             if (moved.current) { moved.current = false; return; }

@@ -1,7 +1,7 @@
 import type { GuidedReview } from "./guided-flow";
 import { DIRECTIONS, type Direction } from "./types";
 import { rasterizeTrunk, type TrunkPoint } from "../region-suggestions/trunk-outline";
-import { classifyTrunkColors, colorWorkingSize, OVERLAY_RGB } from "../region-suggestions/trunk-colors";
+import { classifyTrunkColors, colorWorkingSize } from "../region-suggestions/trunk-colors";
 import { buildOrbitWrapMap, wrapOrbitPixels, type OrbitSkin, type OrbitSurface } from "./tree-orbit-render";
 
 export type OrbitEntry = { src: string; review: GuidedReview | null };
@@ -9,6 +9,25 @@ export type OrbitTexture = OrbitSkin & { fingerprint: string; warning: string };
 export const normalizeRotation = (angle: number) => ((angle % 360) + 360) % 360;
 export const orbitDirection = (rotation: number): Direction => DIRECTIONS[Math.round(normalizeRotation(-rotation) / 90) % 4];
 export const directionRotation = (direction: Direction) => -90 * DIRECTIONS.indexOf(direction);
+
+// Display-only reference for exact decoded duplicate photos. First available
+// N/E/S/O wins, deterministically. Never write this back to per-view reviews or
+// apply it to missing/unidentified/different photos. UI must disclose the source.
+export function consistentOrbitTextures(input: Record<Direction, OrbitTexture | null>) {
+  const textures = { ...input }, sources: Record<Direction, Direction> = { N: "N", E: "E", S: "S", W: "W" };
+  const seen = new Map<string, Direction>();
+  for (const d of DIRECTIONS) {
+    const texture = input[d];
+    if (!texture?.fingerprint) continue;
+    const reference = seen.get(texture.fingerprint);
+    if (reference) { textures[d] = input[reference]; sources[d] = reference; }
+    else seen.set(texture.fingerprint, d);
+  }
+  return { textures, sources };
+}
+
+// One stable visual highlight, not a species or the photographed lichen hue.
+export const ORBIT_HIGHLIGHT = [35, 191, 135, 150] as const;
 
 // Copy only occupied polygon pixels; concave background is transparent, never
 // filled from another orientation. Input pixels and stored outlines are immutable.
@@ -70,7 +89,7 @@ export async function prepareOrbitTexture(entry: OrbitEntry, signal: AbortSignal
       const result = await classifyTrunkColors(rgba, width, height, entry.review.outline, entry.review.config, signal, "lichen-only");
       if (result.counts.some((n, i) => n !== a.counts[i])) throw new Error("La selección guardada no coincide con esta copia de la foto.");
       const marked = new Uint8ClampedArray(rgba.length);
-      result.labels.forEach((code, i) => { if (code >= 3) marked.set([...OVERLAY_RGB[code - 1], 150], i * 4); });
+      result.labels.forEach((code, i) => { if (code >= 3) marked.set(ORBIT_HIGHLIGHT, i * 4); });
       const mask = cropTrunkPixels(marked, width, height, entry.review.outline);
       overlay = wrapOrbitPixels(mask, map);
     } catch (error) {

@@ -20,6 +20,7 @@ export function TreeSummary({ session, services, onEdit }: {
   const [expanded, setExpanded] = useState<Direction | null>(null);
   const [orbit, setOrbit] = useState(false);
   const [marked, setMarked] = useState(true);
+  const [orbitMarked, setOrbitMarked] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const viewsKey = JSON.stringify(session.views);
   useEffect(() => {
@@ -56,12 +57,12 @@ export function TreeSummary({ session, services, onEdit }: {
       <div><h2 ref={heading} tabIndex={-1} style={{ margin: 0, fontSize: 20 }}>{orbit ? "Explorar el árbol · 360° aproximado" : expanded ? DIRECTION_LABELS[expanded] : "Un árbol · cuatro vistas"}</h2>
         <p style={{ fontSize: 13 }}>{loaded ? `${savedCount} de 4 vistas con análisis guardado` : "Cargando resultados guardados…"}</p></div>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <label style={{ fontSize: 13 }}><input type="checkbox" checked={marked} onChange={e => setMarked(e.target.checked)} /> Mostrar selección</label>
-        {!orbit ? <button disabled={!loaded || !DIRECTIONS.some(d => entries[d].src && entries[d].review?.savedAt && entries[d].review?.outline.length)} onClick={() => { setExpanded(null); setOrbit(true); }}>Explorar 360°</button> : null}
+        <label style={{ fontSize: 13 }}><input type="checkbox" checked={orbit ? orbitMarked : marked} onChange={e => orbit ? setOrbitMarked(e.target.checked) : setMarked(e.target.checked)} /> {orbit ? "Resaltar áreas seleccionadas" : "Mostrar selección"}</label>
+        {!orbit ? <button disabled={!loaded || !DIRECTIONS.some(d => entries[d].src && entries[d].review?.savedAt && entries[d].review?.outline.length)} onClick={() => { setExpanded(null); setOrbitMarked(false); setOrbit(true); }}>Explorar 360°</button> : null}
         {expanded || orbit ? <button onClick={() => { setExpanded(null); setOrbit(false); }}>Ver las cuatro vistas</button> : null}
       </div>
     </div>
-    {orbit ? <TreeOrbit entries={entries} marked={marked} onOpenPhoto={d => { setOrbit(false); setExpanded(d); }} /> : <div className={`tree-summary-grid${expanded ? " tree-summary-expanded" : ""}`}>
+    {orbit ? <TreeOrbit entries={entries} marked={orbitMarked} onOpenPhoto={d => { setOrbit(false); setExpanded(d); }} /> : <div className={`tree-summary-grid${expanded ? " tree-summary-expanded" : ""}`}>
       {(expanded ? [expanded] : DIRECTIONS).map(direction => <SummaryCard key={direction}
         direction={direction} entry={entries[direction]} imageId={session.views[direction]} treeSampleId={session.treeSampleId}
         marked={marked} expanded={expanded !== null} onExpand={() => setExpanded(direction)}

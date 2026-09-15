@@ -55,7 +55,6 @@ export function renderOrbitPixels(textures: Record<Direction, OrbitSkin | null>,
   const available = DIRECTIONS.map(d => textures[d]).filter((t): t is OrbitSkin => t !== null);
   const trunkHeight = height * .83, top = (height - trunkHeight) / 2;
   const radius = trunkHeight * clamp(median(available.map(t => t.aspect)), .27, .42) / 2;
-  const blendWidth = .028;
   for (let y = Math.ceil(top); y < top + trunkHeight; y++) {
     const v = clamp((y - top) / trunkHeight, 0, .999999);
     const profile = available.length ? available.reduce((sum, t) => sum + t.profile[Math.min(t.profile.length - 1, Math.floor(v * t.profile.length))], 0) / available.length : 1;
@@ -69,30 +68,18 @@ export function renderOrbitPixels(textures: Record<Direction, OrbitSkin | null>,
       const skin = textures[DIRECTIONS[sector]], dest = (y * width + x) * 4;
       const source = skin ? sample(skin.photo, u, v) : 0;
       const valid = Boolean(skin?.photo.pixels[source + 3]);
-      const shade = .77 + .2 * Math.sqrt(1 - normal * normal) - .065 * normal;
       if (!valid || !skin) {
         const hatch = (x + y) % 12 < 3 ? 168 : 188;
-        pixels.set([hatch * shade, (hatch + 9) * shade, (hatch + 3) * shade, 255], dest);
+        pixels.set([hatch, hatch + 9, hatch + 3, 255], dest);
         continue;
       }
       const rgb = [skin.photo.pixels[source], skin.photo.pixels[source + 1], skin.photo.pixels[source + 2]];
-      // Only feather observed photograph edges. Never bridge a missing sector
-      // or blend saved lichen masks between different orientations.
-      if (!marked && (u < blendWidth || u > 1 - blendWidth)) {
-        const previous = u < blendWidth;
-        const neighbor = textures[DIRECTIONS[(sector + (previous ? 3 : 1)) % 4]];
-        if (neighbor) {
-          const other = sample(neighbor.photo, previous ? 1 - blendWidth + u : u - (1 - blendWidth), v);
-          if (neighbor.photo.pixels[other + 3]) {
-            const weight = .5 * (1 - (previous ? u : 1 - u) / blendWidth);
-            for (let c = 0; c < 3; c++) rgb[c] = rgb[c] * (1 - weight) + neighbor.photo.pixels[other + c] * weight;
-          }
-        }
-      }
+      // Preserve photographed RGB: no angle-dependent lighting or cross-photo
+      // colour blending. Volume comes from projection/silhouette, not tinting.
       const overlay = marked ? skin.overlay : null;
       const mark = overlay ? sample(overlay, u, v) : 0;
       const alpha = overlay ? overlay.pixels[mark + 3] / 255 : 0;
-      for (let c = 0; c < 3; c++) pixels[dest + c] = rgb[c] * shade * (1 - alpha) + (overlay ? overlay.pixels[mark + c] * alpha : 0);
+      for (let c = 0; c < 3; c++) pixels[dest + c] = rgb[c] * (1 - alpha) + (overlay ? overlay.pixels[mark + c] * alpha : 0);
       pixels[dest + 3] = 255 * Math.min(1, rowRadius * (1 - Math.abs(normal)));
     }
   }

@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DIRECTIONS, DIRECTION_LABELS, type Direction } from "./types";
-import { directionRotation, normalizeRotation, orbitDirection, prepareOrbitTexture, type OrbitEntry, type OrbitTexture } from "./tree-orbit";
+import { consistentOrbitTextures, directionRotation, normalizeRotation, orbitDirection, prepareOrbitTexture, type OrbitEntry, type OrbitTexture } from "./tree-orbit";
 import { renderOrbitPixels } from "./tree-orbit-render";
 
 type Sector = { texture: OrbitTexture | null; error: string };
@@ -20,6 +20,7 @@ export function TreeOrbit({ entries, marked, onOpenPhoto, prepare = prepareOrbit
   const canvas = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{ id: number; x: number; rotation: number } | null>(null);
   const direction = orbitDirection(rotation);
+  const montage = useMemo(() => consistentOrbitTextures({ N: sectors.N.texture, E: sectors.E.texture, S: sectors.S.texture, W: sectors.W.texture }), [sectors]);
   useEffect(() => {
     const abort = new AbortController();
     setSectors(emptySectors());
@@ -48,15 +49,15 @@ export function TreeOrbit({ entries, marked, onOpenPhoto, prepare = prepareOrbit
         const ctx = canvas.current?.getContext("2d");
         if (!ctx) throw new Error("No se pudo dibujar la vista 360. Puedes abrir las fotos originales.");
         const image = ctx.createImageData(600, 720);
-        image.data.set(renderOrbitPixels({ N: sectors.N.texture, E: sectors.E.texture, S: sectors.S.texture, W: sectors.W.texture }, rotation, marked, 600, 720));
+        image.data.set(renderOrbitPixels(montage.textures, rotation, marked, 600, 720));
         ctx.putImageData(image, 0, 0); setRenderError("");
       } catch (error) { setRenderError(error instanceof Error ? error.message : "No se pudo dibujar la vista 360."); }
     });
     return () => cancelAnimationFrame(frame);
-  }, [sectors, rotation, marked]);
+  }, [montage, rotation, marked]);
   const hashes = DIRECTIONS.map(d => sectors[d].texture?.fingerprint).filter((s): s is string => Boolean(s));
   const repeated = new Set(hashes).size < hashes.length;
-  const current = sectors[direction];
+  const current = montage.textures[direction], source = montage.sources[direction];
   const rotate = (delta: number) => setRotation(r => normalizeRotation(r + delta));
   return <section className="tree-orbit" aria-label="Explorador 360 aproximado">
     <style>{`.tree-orbit{display:flex;flex-direction:column;gap:10px;min-height:0;flex:1}.tree-orbit-stage{height:clamp(250px,44vh,430px);min-height:250px;position:relative;overflow:hidden;border-radius:18px;background:radial-gradient(ellipse at 48% 35%,#f5f4e9 0%,#e8eee3 50%,#d7e1d3 100%);touch-action:pan-y;cursor:grab;user-select:none;outline-offset:-4px}.tree-orbit-stage:active{cursor:grabbing}.tree-orbit-shadow{position:absolute;left:50%;bottom:7%;width:115px;height:13px;background:#354b3433;filter:blur(8px);border-radius:50%;transform:translateX(-50%);pointer-events:none}.tree-orbit-canvas{position:absolute;left:50%;top:50%;height:100%;width:auto;max-width:none;pointer-events:none}.tree-orbit-label{position:absolute;top:12px;left:14px;background:#fffdf2;border:1px solid #d5dece;border-radius:20px;padding:6px 12px;font-size:12px}.tree-orbit-instruction{position:absolute;bottom:10px;left:0;right:0;text-align:center;font-size:12px;color:#324b3d;pointer-events:none}.tree-orbit-controls{display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap}.tree-orbit-directions{display:flex;gap:6px}.tree-orbit-directions button[aria-pressed=true]{background:#00634e;color:white}.tree-orbit-caption{text-align:center;font-size:12px;color:#425b4e}.tree-orbit-message{font-size:12px;text-align:center;color:#765622}.tree-orbit-controls input{width:100px;vertical-align:middle}@media(max-width:600px){.tree-orbit-stage{height:36vh;min-height:240px}.tree-orbit-controls{gap:7px}.tree-orbit-directions button{padding:8px}}`}</style>
@@ -74,7 +75,7 @@ export function TreeOrbit({ entries, marked, onOpenPhoto, prepare = prepareOrbit
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
       <div className="tree-orbit-shadow" aria-hidden="true" />
       <canvas ref={canvas} width={600} height={720} className="tree-orbit-canvas" aria-hidden="true" data-marked={marked} style={{ transform: `translate(-50%,-50%) scale(${zoom})` }} />
-      <div className="tree-orbit-label">360° aproximado · {DIRECTION_LABELS[direction]}</div>
+      <div className="tree-orbit-label">360° aproximado · {DIRECTION_LABELS[direction]} · {marked ? "Verde = áreas seleccionadas" : "Colores de la foto"}</div>
       <div className="tree-orbit-instruction">Arrastra para girar · también puedes usar N / E / S / O</div>
     </div>
     <div className="tree-orbit-controls">
@@ -87,10 +88,10 @@ export function TreeOrbit({ entries, marked, onOpenPhoto, prepare = prepareOrbit
       <button onClick={() => { setRotation(0); setZoom(1); }}>Restablecer</button>
       <button disabled={!entries[direction].src} onClick={() => onOpenPhoto(direction)}>Abrir foto de {DIRECTION_LABELS[direction].toLowerCase()}</button>
     </div>
-    <p className="tree-orbit-caption" role="status">{progress || (current.texture ? `${DIRECTION_LABELS[direction]} · contorno guardado${marked && current.texture.overlay ? " y selección de liquen" : ""}` : `${DIRECTION_LABELS[direction]} · sector sin recorte. ${current.error}`)}</p>
+    <p className="tree-orbit-caption" role="status">{progress || (current ? `${DIRECTION_LABELS[direction]} · ${source === direction ? "contorno guardado" : `foto repetida: referencia visual de ${DIRECTION_LABELS[source]}`}${marked && current.overlay ? " · verde: selección, no color real" : ""}` : `${DIRECTION_LABELS[direction]} · sector sin recorte. ${sectors[direction].error}`)}</p>
     {renderError ? <p className="tree-orbit-message" role="alert">{renderError}</p> : null}
-    {current.texture?.warning ? <p className="tree-orbit-message" role="alert">{current.texture.warning}</p> : null}
-    {repeated ? <p className="tree-orbit-message">Hay fotografías repetidas entre las vistas. Este montaje no representa cuatro lados distintos del árbol.</p> : null}
-    <p className="tree-orbit-caption">Tus cuatro recortes se adaptan visualmente a un tronco continuo. Forma, luz y uniones aproximadas; el gris rayado indica zonas sin imagen. Las fotos y porcentajes originales no cambian. No es un escaneo 3D.</p>
+    {current?.warning ? <p className="tree-orbit-message" role="alert">{current.warning}</p> : null}
+    {repeated ? <p className="tree-orbit-message">Hay fotografías repetidas: comparten un único recorte y selección solo en este montaje. No representan lados distintos. Los análisis por vista se conservan en «Ver las cuatro vistas».</p> : null}
+    <p className="tree-orbit-caption">Colores de la fotografía, sin iluminación ni mezcla añadida. Forma y uniones aproximadas; el gris rayado indica zonas sin imagen. Las fotos y porcentajes guardados no cambian. No es un escaneo 3D.</p>
   </section>;
 }

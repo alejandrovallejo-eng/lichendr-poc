@@ -7,6 +7,7 @@ import { analysisRecord, checkLichenSamples, guidedKey, parseGuidedReview, type 
 import { classifyTrunkColors, colorWorkingSize, initialColorConfig, OVERLAY_RGB, rgbToLab, sampleColor,
   type ColorConfig, type ColorClass, type ColorResult } from "../region-suggestions/trunk-colors";
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
+import { orderedCloudWriter, reviewFingerprint, type CloudReview } from "./guided-cloud";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
 const STEPS = ["Foto", "Tronco", "Colores", "Análisis", "Guardar"];
@@ -37,6 +38,8 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
   const [saved, setSaved] = useState<Partial<Record<Direction, boolean>>>({});
   const [finished, setFinished] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [cloudStatus, setCloudStatus] = useState("");
+  const [recovery, setRecovery] = useState<GuidedReview | null>(null);
   const [cursor, setCursor] = useState<TrunkPoint>({ x: .5, y: .5 });
   const [keyboard, setKeyboard] = useState(false);
   const controller = useRef<AbortController | null>(null);
@@ -45,8 +48,13 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
   const drag = useRef<number | null>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const screen = useRef<HTMLElement>(null);
+  const cloudWriter = useRef<((value: GuidedReview) => Promise<CloudReview>) | null>(null);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCloud = useRef("");
+  const latestReview = useRef(review);
   const imageId = session?.views[direction];
   const key = session?.treeSampleId && imageId ? guidedKey(session.ownerId, session.treeSampleId, direction, imageId) : null;
+  const currentKey = useRef(key); currentKey.current = key;
   const name = DIRECTION_LABELS[direction];
   const contextId = `${context.projectId}:${context.siteId}:${context.eventId}:${context.treeId}`;
 
@@ -71,14 +79,10 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     services.load(context).then(data => {
       if (!active) return;
       setSession(data);
-      const restored: Partial<Record<Direction, boolean>> = {};
-      try {
-        for (const d of DIRECTIONS) if (data.views[d]) restored[d] = Boolean(parseGuidedReview(localStorage.getItem(guidedKey(data.ownerId, data.treeSampleId, d, data.views[d]!)))?.savedAt);
-        setSaved(restored);
-      } catch { setError("No se pudo leer el guardado de este navegador."); }
+      setSaved(data.savedViews ?? {});
       setBusy("");
     }).catch(e => { if (active) { setError(message(e)); setBusy(""); } });
-    return () => { active = false; generation.current++; controller.current?.abort(); };
+    return () => { active = false; generation.current++; controller.current?.abort(); if (draftTimer.current) clearTimeout(draftTimer.current); };
     // The parent keys this component by the complete context.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contextId, services]);
@@ -88,19 +92,49 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     let active = true, objectUrl = "";
     const current = ++generation.current;
     controller.current?.abort();
-    setBusy("Abriendo la fotografía…"); setError(""); setPixels(null); setSrc(""); setResult(null); setOverlay("");
-    try { setReview(parseGuidedReview(localStorage.getItem(key)) ?? fresh()); }
-    catch { setReview(fresh()); setError("No se pudo recuperar la revisión local."); }
-    services.photo(session.ownerId, imageId).then(blob => {
+    setBusy("Abriendo la fotografía y su revisión…"); setError(""); setPixels(null); setSrc(""); setResult(null); setOverlay("");
+    cloudWriter.current = null; lastCloud.current = ""; setRecovery(null); setCloudStatus("");
+    const reference = { ownerId: session.ownerId, treeSampleId: session.treeSampleId, direction, imageId };
+    Promise.all([services.photo(session.ownerId, imageId), services.cloud.read(reference)]).then(([blob, remote]) => {
       if (!active || generation.current !== current) return;
+      let local: GuidedReview | null = null;
+      try { local = parseGuidedReview(localStorage.getItem(key)); } catch { /* Cloud does not depend on local storage. */ }
+      const restored = remote?.review ?? (local ? { ...local, savedAt: null } : fresh());
+      cloudWriter.current = orderedCloudWriter(services.cloud, reference, remote?.revision ?? 0);
+      lastCloud.current = remote ? reviewFingerprint(remote.review) : "";
+      latestReview.current = restored; setReview(restored);
+      setSaved(prev => ({ ...prev, [direction]: Boolean(remote?.review.savedAt) }));
+      setCloudStatus(remote ? "Guardado en la nube ✓" : local ? "Borrador local pendiente de sincronizar" : "");
+      if (remote && local && reviewFingerprint(local) !== reviewFingerprint(remote.review)) {
+        setRecovery(local);
+        try { localStorage.setItem(`${key}:recovery`, JSON.stringify(local)); } catch { /* Retained in memory. */ }
+      }
       objectUrl = URL.createObjectURL(blob); setSrc(objectUrl); setBusy("");
     }).catch(e => { if (active && generation.current === current) { setError(message(e)); setBusy(""); } });
-    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+    return () => { active = false; if (draftTimer.current) clearTimeout(draftTimer.current); if (objectUrl) URL.revokeObjectURL(objectUrl); };
     // Do not reopen the photograph just because another session field changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageId, key, services, loadAttempt]);
 
   useEffect(() => { title.current?.focus(); }, [step, direction, finished]);
+  useEffect(() => {
+    // Restore the visible mask from the stored colours, without another AI call.
+    if (!pixels || !review.analysis || result) return;
+    const abort = new AbortController();
+    void classifyTrunkColors(pixels.rgba, pixels.width, pixels.height, review.outline,
+      review.config, abort.signal, "lichen-only").then(restored => {
+      if (abort.signal.aborted) return;
+      if (reviewFingerprint(restored.counts) !== reviewFingerprint(review.analysis?.counts)) {
+        setError("La imagen de análisis cambió. Recalcula la selección antes de confirmar su cobertura.");
+        const invalidated = { ...review, analysis: null, savedAt: null };
+        latestReview.current = invalidated; setReview(invalidated);
+        setSaved(s => ({ ...s, [direction]: false }));
+        return;
+      }
+      setResult(restored);
+    }).catch(e => { if (!abort.signal.aborted) setError(message(e)); });
+    return () => abort.abort();
+  }, [pixels, review.analysis, review.outline, review.config, result, direction]);
   useEffect(() => {
     if (!result || !pixels) { setOverlay(""); return; }
     const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
@@ -115,20 +149,48 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
 
   const persist = (next: GuidedReview) => {
     if (!key) throw new Error("La fotografía debe terminar de guardarse primero.");
-    localStorage.setItem(key, JSON.stringify(next));
+    latestReview.current = next;
+    try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* The cloud save remains authoritative. */ }
+  };
+  const sync = async (next: GuidedReview) => {
+    if (draftTimer.current) { clearTimeout(draftTimer.current); draftTimer.current = null; }
+    const writer = cloudWriter.current, targetKey = key;
+    if (!writer || !targetKey) throw new Error("Espera a que se abra la revisión de esta fotografía.");
+    setCloudStatus("Guardando en la nube…");
+    try {
+      const row = await writer(next);
+      if (currentKey.current === targetKey) {
+        lastCloud.current = reviewFingerprint(row.review);
+        if (reviewFingerprint(latestReview.current) === lastCloud.current) setCloudStatus("Guardado en la nube ✓");
+      }
+      return row;
+    } catch (e) {
+      if (currentKey.current === targetKey) setCloudStatus("Sin sincronizar: borrador conservado aquí");
+      throw e;
+    }
   };
   const edit = (outline: TrunkPoint[], config: ColorConfig) => {
     controller.current?.abort(); generation.current++; setResult(null); setError("");
     const next: GuidedReview = { version: 1, outline, config, analysis: null, savedAt: null };
     setReview(next); setSaved(prev => ({ ...prev, [direction]: false }));
-    try { persist(next); } catch { setError("No se pudo guardar el borrador en este navegador. Mantén esta pestaña abierta."); }
+    persist(next); setCloudStatus("Cambios pendientes de guardar…");
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => { void sync(next).catch(e => setError(message(e))); }, 750);
   };
-  const switchView = (d: Direction) => {
-    if (lock.current || busy) return;
+  const openView = (d: Direction) => {
     if (d === direction && !finished) return;
     if (d === direction) setLoadAttempt(n => n + 1);
     controller.current?.abort(); generation.current++;
     setDirection(d); setStep(0); setFinished(false); setReview(fresh()); setResult(null); setPixels(null); setSrc(""); setError("");
+  };
+  const switchView = async (d: Direction) => {
+    if (lock.current || busy || (d === direction && !finished)) return;
+    lock.current = true; setBusy("Guardando antes de cambiar de vista…");
+    try {
+      if (key && reviewFingerprint(latestReview.current) !== lastCloud.current) await sync(latestReview.current);
+      openView(d);
+    } catch (e) { setError(message(e)); }
+    finally { lock.current = false; setBusy(""); }
   };
   const upload = async (file: File) => {
     if (!session || lock.current || session.completed) return;
@@ -164,7 +226,8 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     if (!session || !pixels || !imageId || lock.current) return;
     lock.current = true; const current = ++generation.current;
     controller.current?.abort(); const abort = new AbortController(); controller.current = abort;
-    const timeout = setTimeout(() => abort.abort(), 90_000);
+    // 150 s cold start + 120 s inference fit inside the route's 300 s budget.
+    const timeout = setTimeout(() => abort.abort(), 285_000);
     setStep(3); setBusy("Calculando cobertura y consultando BioCLIP…"); setError(""); setResult(null);
     try {
       const colors = await classifyTrunkColors(pixels.rgba, pixels.width, pixels.height, review.outline, review.config, abort.signal, "lichen-only");
@@ -173,23 +236,30 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
       setResult(colors);
       const partial = { ...review, savedAt: null, analysis: analysisRecord(colors, pixels.width, pixels.height, null) };
       setReview(partial); persist(partial);
+      await sync(partial);
+      if (current !== generation.current) return;
+      setBusy("Preparando la IA y revisando tus ejemplos. El primer análisis puede tardar unos dos minutos…");
       const ai = await checkSamples({ imageId, treeSampleId: session.treeSampleId, direction }, review.outline, review.config, pixels.width, pixels.height, abort.signal);
       if (current !== generation.current) return;
       if (ai.context.imageId !== imageId || ai.context.treeSampleId !== session.treeSampleId || ai.context.direction !== direction || !ai.suggestions.length)
         throw new Error("La respuesta de IA no corresponde a esta fotografía.");
       const next = { ...partial, analysis: analysisRecord(colors, pixels.width, pixels.height, ai) };
-      setReview(next); persist(next); setStep(4);
+      setReview(next); persist(next); await sync(next);
+      if (current === generation.current) setStep(4);
     } catch (e) { if (current === generation.current) setError(abort.signal.aborted ? "La IA tardó demasiado. Tus colores y la estimación se conservaron. Puedes reintentar o revisar sin IA." : message(e)); }
     finally { clearTimeout(timeout); if (current === generation.current) { lock.current = false; setBusy(""); } }
   };
-  const save = () => {
+  const save = async () => {
     if (!review.analysis || lock.current || busy) return;
+    lock.current = true; setBusy("Confirmando el guardado en la nube…"); setError("");
     try {
       const next = { ...review, savedAt: new Date().toISOString() }; persist(next); setReview(next);
+      await sync(next);
       const complete = { ...saved, [direction]: true }; setSaved(complete);
       const nextView = DIRECTIONS[DIRECTIONS.indexOf(direction) + 1] ?? DIRECTIONS.find(d => !complete[d]);
-      if (nextView) switchView(nextView); else setFinished(true);
-    } catch { setError("No se pudo guardar la revisión. No avanzamos a la siguiente foto; vuelve a intentar."); }
+      if (nextView) openView(nextView); else setFinished(true);
+    } catch (e) { setError(`No avanzamos a la siguiente foto. ${message(e)}`); }
+    finally { lock.current = false; setBusy(""); }
   };
   const a = review.analysis;
   const percent = a ? (100 * a.lichen / a.total).toFixed(1) : "—";
@@ -202,7 +272,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     return x >= 0 && y >= 0 && x < 1 && y < 1 ? { x, y } : null;
   };
   const leave = (event: React.MouseEvent<HTMLAnchorElement>) => {
-    if (busy || (review.outline.length && !review.savedAt && !window.confirm("El borrador queda en este navegador. ¿Volver a la jornada?"))) event.preventDefault();
+    if (busy || (reviewFingerprint(latestReview.current) !== lastCloud.current && review.outline.length && !window.confirm("Hay cambios pendientes de sincronizar. El borrador queda aquí. ¿Volver a la jornada?"))) event.preventDefault();
   };
 
   return <section ref={screen} aria-label="Captura paso a paso" className="guided-capture" style={{ position: "fixed", inset: 0, zIndex: 60, background: "#f4f7f5", color: "#172e25", display: "grid", gridTemplateRows: "auto auto minmax(0,1fr) auto", height: "100dvh" } as CSSProperties}>
@@ -212,7 +282,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
       <a href={backHref} onClick={leave} style={{ fontSize: 13 }}>Volver a la jornada</a>
     </header>
     <nav className="g-steps" aria-label="Pasos de esta fotografía">{STEPS.map((label, i) => <span key={label} aria-current={i === step ? "step" : undefined} style={{ background: i === step ? "#d1eadc" : "transparent", fontWeight: i === step ? 700 : 400 }}>{i + 1}. {label}</span>)}</nav>
-    {finished ? <main className="g-main" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}><div className="g-tools" style={{ maxWidth: 540 }}><h2>Listo por hoy</h2><p>Originales guardados en tu proyecto. Contornos, muestras y revisiones guardados en este navegador.</p><p>Estos porcentajes describen el tronco visible; no son una medición de superficie real ni de calidad del aire.</p>{DIRECTIONS.map(d => <button key={d} onClick={() => switchView(d)}>Revisar {DIRECTION_LABELS[d]} ✓</button>)}</div></main> : <main className="g-main">
+    {finished ? <main className="g-main" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}><div className="g-tools" style={{ maxWidth: 540 }}><h2>Listo por hoy</h2><p>Fotografías, contornos, colores y revisiones guardados en la nube, dentro de tu proyecto y jornada.</p><p>Estos porcentajes describen el tronco visible; no son una medición de superficie real ni de calidad del aire.</p>{DIRECTIONS.map(d => <button key={d} onClick={() => void switchView(d)}>Revisar {DIRECTION_LABELS[d]} ✓</button>)}</div></main> : <main className="g-main">
       <div className="g-photo">
         {src ? <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -255,7 +325,10 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
         {step === 2 ? <><p>Toca únicamente los líquenes: un ejemplo de cada color o iluminación. No selecciones colores de corteza.</p><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{review.config.samples.map((s,i) => <button key={i} aria-label={`Quitar color ${i+1}`} title={`Quitar color ${i+1}`} onClick={() => edit(review.outline,{...review.config,samples:review.config.samples.filter((_,n)=>n!==i)})} style={{ width: 44, padding: 4 }}><span style={{ display:"block",width:25,height:25,borderRadius:20,background:`rgb(${s.rgb.join(",")})`,border:"1px solid #777",margin:"auto" }} /></button>)}</div><p style={{ fontSize: 12 }}>{review.config.samples.length}/6 ejemplos · toca un color para quitarlo</p><label style={{ fontSize: 13 }}>Incluir colores similares<input aria-label="Variación de color" style={{ width: "100%" }} type="range" min="3" max="35" value={review.config.tolerance} onChange={e => edit(review.outline,{...review.config,tolerance:Number(e.target.value)})} /></label></> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
-        {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible. La revisión se conserva en este navegador; el original, en tu proyecto.</p> : null}
+        {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. Después se abre la siguiente orientación.</p> : null}
+        {cloudStatus ? <p role="status" style={{ fontSize: 12 }}>{cloudStatus}</p> : null}
+        {recovery ? <button disabled={!!busy} onClick={() => { const draft = { ...recovery, savedAt: null }; persist(draft); setReview(draft); setResult(null); setRecovery(null); setSaved(s => ({ ...s, [direction]: false })); setCloudStatus("Borrador recuperado; pulsa Guardar para sincronizar"); }}>Recuperar borrador local distinto</button> : null}
+        {!busy && cloudStatus.startsWith("Sin sincronizar") ? <button onClick={() => void sync(latestReview.current).then(() => setError("")).catch(e => setError(message(e)))}>Reintentar guardado</button> : null}
         {busy ? <p role="status">{busy}</p> : null}
         {busy && step === 3 ? <button onClick={() => {
           generation.current++; controller.current?.abort(); lock.current=false; setBusy("");
@@ -276,7 +349,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
           else if(step===1){const issue=trunkOutlineError(review.outline);if(issue)setError(issue);else setStep(2);}
           else if(step===2) void analyse();
           else if(step===3) setStep(4);
-          else if(step===4) save();
+          else if(step===4) void save();
         }}>{step===4 ? direction==="W" ? "Guardar y terminar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : "Revisar sin IA" : "Continuar"}</button>
       </div> : <a href={backHref}>Volver a los árboles</a>}
     </footer>

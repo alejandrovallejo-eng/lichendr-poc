@@ -4,14 +4,24 @@ import { ensureTreeSampleForTree, findTreeSampleId, findCaptureSeriesForSample,
   getOrCreateCaptureSeries, loadSeriesViews, stageCaptureView, prepareStoredFourViewImage } from "./client";
 import type { Direction } from "./types";
 import type { GuidedContext, GuidedSession } from "./guided-flow";
+import { createGuidedCloudStore } from "./guided-cloud";
+import type { SupabaseClient } from "@supabase/supabase-js";
+const cloud = createGuidedCloudStore(supabase as SupabaseClient);
 export const guidedServices = {
+  cloud,
   async load(context: GuidedContext): Promise<GuidedSession> {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data.user) throw new Error("No se pudo recuperar tu sesión. Recarga la página.");
     const sampleId = await findTreeSampleId(context.eventId, context.treeId);
     const series = sampleId ? await findCaptureSeriesForSample(sampleId) : null;
     const views = series ? await loadSeriesViews(series.id) : [];
-    return { ownerId: data.user.id, treeSampleId: sampleId ?? "", views: Object.fromEntries(views.map(v => [v.direction, v.image_id])), completed: series?.status === "completed" };
+    const savedViews: Partial<Record<Direction, boolean>> = {};
+    if (sampleId) await Promise.all(views.map(async view => {
+      const row = await cloud.read({ ownerId: data.user!.id, treeSampleId: sampleId,
+        direction: view.direction as Direction, imageId: view.image_id });
+      savedViews[view.direction as Direction] = Boolean(row?.review.savedAt);
+    }));
+    return { ownerId: data.user.id, treeSampleId: sampleId ?? "", views: Object.fromEntries(views.map(v => [v.direction, v.image_id])), completed: series?.status === "completed", savedViews };
   },
   async upload(context: GuidedContext, direction: Direction, file: File, requestKey: string) {
     const treeSampleId = await ensureTreeSampleForTree(context.siteId, context.eventId, context.treeId);

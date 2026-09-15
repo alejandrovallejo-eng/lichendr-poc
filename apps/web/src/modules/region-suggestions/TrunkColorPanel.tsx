@@ -151,6 +151,7 @@ function ColorWorkspace({ src, viewName, points, identity, disabled }: Props) {
         <h6 className="font-semibold">Cobertura {reviewed ? "revisada por color" : "provisional por color"}</h6>
         <p className="mt-2 text-2xl font-bold text-emerald-900">Líquenes: {result ? percent(result.lichen) : "—"}</p>
         <div className="my-3 space-y-1" aria-label="Desglose por color">{COLOR_NAMES.map((name, i) => <p className="flex items-center justify-between gap-3" key={name}><span><span className="mr-2 inline-block h-3 w-3 rounded" style={{ backgroundColor: `rgb(${OVERLAY_RGB[i].join(",")})` }} />{name}</span><span>{result ? percent(result.counts[i + 1]) : "—"}</span></p>)}</div>
+        {result && result.total > 0 && result.counts[1] / result.total > .2 ? <p className="mb-3 rounded-lg bg-amber-50 p-2 text-sm text-amber-950">Queda {percent(result.counts[1])} sin clasificar. Añade ejemplos de las zonas que faltan; no asumas que son corteza. La cobertura puede estar subestimada.</p> : null}
         <p className="text-xs">Porcentaje del área visible delimitada, en una copia de hasta 1024 px. Cada píxel cuenta una sola vez; «sin clasificar» sigue en el denominador. No es superficie real, identificación de especie ni calidad del aire.</p>
         <button type="button" className={`${BUTTON} mt-3 w-full`} disabled={!result?.total || reviewed || disabled} onClick={() => {
           if (!result || !pixels) return;

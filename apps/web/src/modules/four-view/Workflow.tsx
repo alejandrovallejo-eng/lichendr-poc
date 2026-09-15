@@ -11,6 +11,8 @@ import {
 } from "react";
 import { useSearchParams } from "next/navigation";
 import PageHeader from "@/components/PageHeader";
+import { GuidedCapture } from "./GuidedCapture";
+import { guidedServices } from "./guided-service";
 import { fetchProjects } from "@/modules/projects/client";
 import { fetchSitesByProject } from "@/modules/sites/client";
 import { fetchSamplingEventsBySite } from "@/modules/sampling-events/client";
@@ -326,6 +328,7 @@ function ResultVisual({ slot, layer }: { slot: SlotState; layer: string }) {
 
 export default function FourViewWorkflow() {
   const searchParams = useSearchParams();
+  const advancedMode = searchParams?.get("mode") === "advanced";
   const urlContext = useMemo(() => {
     // Snapshot the URL context once on mount. Reading it once and using the
     // snapshot for the whole session prevents an unexpected navigation from
@@ -573,7 +576,7 @@ export default function FourViewWorkflow() {
   // The automatic start is reserved for a fresh capture: when the screen only
   // restored photographs that were already stored, the user decides when to
   // analyse them, so reopening a series never relaunches work by itself.
-  const canAutoStart = canProcess && DIRECTIONS.some((direction) => slots[direction].status === "ready");
+  const canAutoStart = advancedMode && canProcess && DIRECTIONS.some((direction) => slots[direction].status === "ready");
   const blockedReason = !contextConfirmed
     ? "Confirma primero el árbol y la jornada."
     : contextMismatchError
@@ -1126,7 +1129,7 @@ export default function FourViewWorkflow() {
   // reopened with the same link. It never falls back to another tree and never
   // creates a new series.
   useEffect(() => {
-    if (!contextConfirmed || !eventId || !treeId || contextMismatchError) return;
+    if (!advancedMode || !contextConfirmed || !eventId || !treeId || contextMismatchError) return;
     const key = `${eventId}:${treeId}`;
     if (restoredKey.current === key) return;
     restoredKey.current = key;
@@ -1155,7 +1158,7 @@ export default function FourViewWorkflow() {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextConfirmed, eventId, treeId, contextMismatchError]);
+  }, [advancedMode, contextConfirmed, eventId, treeId, contextMismatchError]);
 
   const openEvaluation = async (row: EvaluatedTreeRow) => {
     try {
@@ -1186,6 +1189,27 @@ export default function FourViewWorkflow() {
       setRestoring(false);
     }
   };
+
+  if (!advancedMode) {
+    if (contextConfirmed && !contextMismatchError) return <GuidedCapture
+      key={`${projectId}:${siteId}:${eventId}:${treeId}`}
+      context={{ projectId, siteId, eventId, treeId }}
+      contextLabel={contextEntries.map(entry => entry.value).join(" · ")}
+      backHref={jornadaTreesDestination(eventId)} services={guidedServices} />;
+    return <section className="mx-auto max-w-3xl rounded-2xl border bg-white p-6">
+      <h1 className="text-2xl font-semibold">Captura paso a paso</h1>
+      <p className="my-3">Confirma dónde trabajarás. Después completarás una foto a la vez: Norte, Este, Sur y Oeste.</p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label>Proyecto<select className="mt-1 w-full rounded border p-3" value={projectId} onChange={e => {resetCapture();setProjectId(e.target.value);setSiteId("");setEventId("");setTreeId("");setSites([]);setEvents([]);setTrees([]);}}><option value="">Elige proyecto</option>{projects.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Sitio<select className="mt-1 w-full rounded border p-3" value={siteId} onChange={e => {resetCapture();setSiteId(e.target.value);setEventId("");setTreeId("");setEvents([]);setTrees([]);}}><option value="">Elige sitio</option>{sites.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Jornada<select className="mt-1 w-full rounded border p-3" value={eventId} onChange={e => {resetCapture();setEventId(e.target.value);}}><option value="">Elige jornada</option>{events.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Árbol<select className="mt-1 w-full rounded border p-3" value={treeId} onChange={e => {resetCapture();setTreeId(e.target.value);}}><option value="">Elige árbol</option>{trees.map(item=><option key={item.id} value={item.id}>{item.code}</option>)}</select></label>
+      </div>
+      {contextMismatchError ? <p role="alert" className="my-3 text-red-800">{contextMismatchError} <Link href="/preparar-jornada" className="underline">Volver a preparar jornada</Link></p> : null}
+      <button className="mt-5 rounded-lg bg-emerald-800 px-5 py-3 text-white disabled:opacity-40" disabled={!projectId||!siteId||!eventId||!treeId||!!contextMismatchError} onClick={()=>setContextConfirmed(true)}>Empezar con Norte</button>
+      <p className="mt-3 text-sm"><Link href="/preparar-jornada" className="underline">Crear o preparar una jornada</Link></p>
+    </section>;
+  }
 
   return (
     <div className="space-y-6">

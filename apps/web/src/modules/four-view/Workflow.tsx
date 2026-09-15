@@ -1195,6 +1195,8 @@ export default function FourViewWorkflow() {
       key={`${projectId}:${siteId}:${eventId}:${treeId}`}
       context={{ projectId, siteId, eventId, treeId }}
       contextLabel={contextEntries.map(entry => entry.value).join(" · ")}
+      treeLabel={selectedTree?.code}
+      initialSummary={searchParams?.get("mode") === "summary"}
       backHref={jornadaTreesDestination(eventId)} services={guidedServices} />;
     return <section className="mx-auto max-w-3xl rounded-2xl border bg-white p-6">
       <h1 className="text-2xl font-semibold">Captura paso a paso</h1>

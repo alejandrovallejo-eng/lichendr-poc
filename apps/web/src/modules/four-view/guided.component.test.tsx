@@ -8,6 +8,8 @@ import { parseGuidedReview, type GuidedReview } from "./guided-flow.ts";
 import { orderedCloudWriter, reviewFingerprint, type CloudReview, type GuidedCloudStore } from "./guided-cloud.ts";
 import { classifyTrunkColors } from "../region-suggestions/trunk-colors.ts";
 import type { SuggestionResponse } from "../region-suggestions/client.ts";
+import { TreeSummary } from "./TreeSummary.tsx";
+import { colorWorkingSize } from "../region-suggestions/trunk-colors.ts";
 
 test("lichen-only analysis does not require bark and never calls unmatched pixels bark", async () => {
   const result = await classifyTrunkColors(new Uint8ClampedArray([80,170,80,255, 120,50,20,255]),2,1,
@@ -30,7 +32,7 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     assert.equal(revision, remote?.revision ?? 0);
     remote={review:JSON.parse(reviewFingerprint(review)),revision:revision+1};return remote;
   }};
-  const services={cloud,async load(){return {ownerId:owner,treeSampleId:tree,views:{N:image},completed:false};},async photo(_owner:string,id:string){photos.push(id);return new Blob(["photo"]);},async upload(){throw new Error("No upload expected");}};
+  const services={cloud,async load(){return {ownerId:owner,treeSampleId:tree,views:{N:image},completed:false};},async photo(_owner:string,id:string){photos.push(id);return new Blob(["photo"]);},async storedPhoto(){throw new Error("No summary expected");},async upload(){throw new Error("No upload expected");}};
   let calls=0;
   const ai={context:{imageId:image,treeSampleId:tree,direction:"N"},suggestions:[{regionId:"sample-0",ranking:[{label:"lichen"}]}]} as SuggestionResponse;
   const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
@@ -106,4 +108,67 @@ test("cloud failure never advances the revision or discards the retry", async ()
   await assert.rejects(write(draft),/offline/);fail=false;
   assert.equal((await write(draft)).revision,1);assert.deepEqual(seen,[0,0]);
   assert.equal(parseGuidedReview(JSON.stringify({...draft,analysis:{total:1}})),null);
+});
+
+const summaryReview = (lichen: number): GuidedReview => ({ version:1,
+  outline:[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}],
+  config:{version:1,tolerance:12,samples:[{x:.5,y:.5,rgb:[80,170,80],label:3}]},
+  savedAt:"2026-09-15T12:00:00Z",analysis:{width:10,height:10,total:100,lichen,counts:[0,100-lichen,0,lichen,0,0],ai:null},
+});
+test("tree summary shows each saved result and missing view, survives photo error, never writes or invokes AI", async () => {
+  const reads:string[]=[],photos:string[]=[],edits:string[]=[];
+  const services={cloud:{async read(ref:{imageId:string;ownerId:string;treeSampleId:string;direction:string}){
+    assert.equal(ref.ownerId,"owner");assert.equal(ref.treeSampleId,"sample");reads.push(`${ref.direction}:${ref.imageId}`);
+    return {revision:1,review:summaryReview(ref.direction==="N"?10:ref.direction==="E"?20:30)};
+  },async write(){throw new Error("No writes allowed");}},async storedPhoto(_owner:string,id:string){photos.push(id);if(id==="e")throw new Error("Photo offline");return new Blob([id]);},
+  async photo(){throw new Error("No preparation allowed");},async upload(){throw new Error("No upload allowed");},async load(){throw new Error("Session already loaded");}};
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  try {
+    await act(async()=>root.render(createElement(TreeSummary,{session:{ownerId:"owner",treeSampleId:"sample",views:{N:"n",E:"e",S:"s"},completed:false},services,onEdit:d=>edits.push(d)})));
+    assert.deepEqual(reads,["N:n","E:e","S:s"]);assert.deepEqual(photos,["n","e","s"]);
+    assert.equal(host.querySelectorAll("article").length,4);assert.match(host.textContent!,/3 de 4 vistas/);
+    const cards=Array.from(host.querySelectorAll("article"));
+    assert.match(cards[0].textContent!,/10.0 %/);assert.match(cards[1].textContent!,/20.0 %/);
+    assert.match(cards[1].textContent!,/Photo offline/);assert.match(cards[2].textContent!,/30.0 %/);
+    assert.match(cards[3].textContent!,/Sin fotografía/);assert.doesNotMatch(cards[3].textContent!,/0.0 %/);
+    await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="Ampliar Norte"]')!.click());
+    assert.equal(host.querySelectorAll("article").length,1);assert.equal(photos.length,3);
+    await act(async()=>Array.from(host.querySelectorAll("button")).find(b=>b.textContent==="Ver las cuatro vistas")!.click());
+    await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="Completar Oeste"]')!.click());
+    assert.deepEqual(edits,["W"]);assert.equal(reads.length,3);
+  } finally {await act(async()=>root.unmount());host.remove();}
+});
+
+test("saving the last missing direction opens all four views; summary edit/save returns there without AI", async () => {
+  localStorage.clear();
+  const oldContext=HTMLCanvasElement.prototype.getContext,oldData=HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.getContext=(()=>({drawImage(){},getImageData(_x:number,_y:number,w:number,h:number){const data=new Uint8ClampedArray(w*h*4);for(let i=0;i<data.length;i+=4)data.set([80,170,80,255],i);return {data};},createImageData(w:number,h:number){return {data:new Uint8ClampedArray(w*h*4)};},putImageData(){}})) as never;
+  HTMLCanvasElement.prototype.toDataURL=()=>"data:image/png;base64,test";
+  const {width,height}=colorWorkingSize(1200,900), total=width*height;
+  const base=summaryReview(100);base.analysis={...base.analysis!,width,height,total,lichen:total,counts:[0,0,0,total,0,0]};
+  const rows=new Map(["N","E","S","W"].map(d=>[d,{review:{...base,savedAt:d==="N"?null:base.savedAt},revision:1}]));
+  let writes=0,preparations=0,reads=0,aiCalls=0;
+  const services={cloud:{async read(ref:{direction:string}){return rows.get(ref.direction)!;},async write(ref:{direction:string},review:GuidedReview,revision:number){writes++;assert.equal(rows.get(ref.direction)!.revision,revision);const row={review,revision:revision+1};rows.set(ref.direction,row);return row;}},
+    async load(){return {ownerId:"owner",treeSampleId:"sample",views:{N:"n",E:"e",S:"s",W:"w"},completed:false,savedViews:{E:true,S:true,W:true}};},
+    async photo(){preparations++;return new Blob(["photo"]);},async storedPhoto(){reads++;return new Blob(["photo"]);},async upload(){throw new Error("No upload");}};
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  const click=async(text:string)=>{const button=Array.from(host.querySelectorAll("button")).find(b=>b.textContent===text);assert.ok(button,text);await act(async()=>button.click());};
+  const loadImage=async()=>{await act(async()=>host.querySelector("img")!.dispatchEvent(new Event("load",{bubbles:true})));for(let i=0;i<80;i++)await act(async()=>{await new Promise(r=>setTimeout(r,5));});};
+  try {
+    await act(async()=>root.render(createElement(GuidedCapture,{context:{projectId:"p",siteId:"s",eventId:"e",treeId:"t"},contextLabel:"Project / Day / Tree",backHref:"/jornada/e",services,checkSamples:async()=>{aiCalls++;return {context:{imageId:"n",treeSampleId:"sample",direction:"N"},suggestions:[{regionId:"sample-0",ranking:[{label:"lichen"}]}]} as SuggestionResponse;}})));
+    await loadImage();await click("Continuar");await click("Continuar");
+    await click("Analizar selección");
+    for(let i=0;i<80 && !host.textContent!.includes("Revisa y guarda");i++)await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+    assert.match(host.textContent!,/Revisa y guarda/);assert.equal(aiCalls,1);
+    await click("Guardar y ver árbol");
+    assert.equal(host.querySelectorAll("article").length,4);assert.match(host.textContent!,/4 de 4 vistas/);
+    assert.doesNotMatch(host.textContent!,/Listo por hoy/);assert.equal(writes,3); // estimate, AI, final confirmation
+    await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="Revisar Oeste"]')!.click());
+    await loadImage();assert.match(host.textContent!,/Revisa y guarda/);
+    await click("Guardar y ver árbol");
+    assert.equal(host.querySelectorAll("article").length,4);assert.equal(writes,4);assert.equal(aiCalls,1);
+    assert.ok(reads>=4);const before=preparations;
+    await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="Ampliar Oeste"]')!.click());
+    assert.equal(preparations,before);assert.equal(writes,4);assert.equal(aiCalls,1);
+  } finally {await act(async()=>root.unmount());host.remove();HTMLCanvasElement.prototype.getContext=oldContext;HTMLCanvasElement.prototype.toDataURL=oldData;}
 });

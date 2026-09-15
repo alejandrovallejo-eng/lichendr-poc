@@ -8,6 +8,7 @@ import { classifyTrunkColors, colorWorkingSize, initialColorConfig, OVERLAY_RGB,
   type ColorConfig, type ColorClass, type ColorResult } from "../region-suggestions/trunk-colors";
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { orderedCloudWriter, reviewFingerprint, type CloudReview } from "./guided-cloud";
+import { TreeSummary } from "./TreeSummary";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
 const STEPS = ["Foto", "Tronco", "Colores", "Análisis", "Guardar"];
@@ -15,15 +16,17 @@ type Pixels = { width: number; height: number; rgba: Uint8ClampedArray };
 interface Props {
   context: GuidedContext;
   contextLabel: string;
+  treeLabel?: string;
   backHref: string;
   services: GuidedServices;
   checkSamples?: typeof checkLichenSamples;
+  initialSummary?: boolean;
 }
 const message = (e: unknown) => e instanceof Error ? e.message : "No se pudo completar este paso. Reintenta.";
 
 // One mounted photograph and one active step. Never render four editors or
 // launch legacy four-view calibration behind this screen.
-export function GuidedCapture({ context, contextLabel, backHref, services, checkSamples = checkLichenSamples }: Props) {
+export function GuidedCapture({ context, contextLabel, treeLabel, backHref, services, checkSamples = checkLichenSamples, initialSummary = false }: Props) {
   const [session, setSession] = useState<GuidedSession | null>(null);
   const [direction, setDirection] = useState<Direction>("N");
   const [step, setStep] = useState(0);
@@ -36,7 +39,8 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
   const [busy, setBusy] = useState("Recuperando esta captura…");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState<Partial<Record<Direction, boolean>>>({});
-  const [finished, setFinished] = useState(false);
+  const [finished, setFinished] = useState(initialSummary);
+  const [editingSummary, setEditingSummary] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [cloudStatus, setCloudStatus] = useState("");
   const [recovery, setRecovery] = useState<GuidedReview | null>(null);
@@ -88,7 +92,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
   }, [contextId, services]);
 
   useEffect(() => {
-    if (!session || !imageId || !key) return;
+    if (!session || !imageId || !key || finished) return;
     let active = true, objectUrl = "";
     const current = ++generation.current;
     controller.current?.abort();
@@ -114,7 +118,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     return () => { active = false; if (draftTimer.current) clearTimeout(draftTimer.current); if (objectUrl) URL.revokeObjectURL(objectUrl); };
     // Do not reopen the photograph just because another session field changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageId, key, services, loadAttempt]);
+  }, [imageId, key, services, loadAttempt, finished]);
 
   useEffect(() => { title.current?.focus(); }, [step, direction, finished]);
   useEffect(() => {
@@ -190,8 +194,18 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     if (lock.current || busy || (d === direction && !finished)) return;
     lock.current = true; setBusy("Guardando antes de cambiar de vista…");
     try {
-      if (key && reviewFingerprint(latestReview.current) !== lastCloud.current) await sync(latestReview.current);
+      if (!finished && key && reviewFingerprint(latestReview.current) !== lastCloud.current) await sync(latestReview.current);
+      if (finished) setEditingSummary(true);
       openView(d);
+    } catch (e) { setError(message(e)); }
+    finally { lock.current = false; setBusy(""); }
+  };
+  const showSummary = async () => {
+    if (lock.current || busy) return;
+    lock.current = true; setBusy("Guardando antes de abrir el análisis…");
+    try {
+      if (key && cloudWriter.current && reviewFingerprint(latestReview.current) !== lastCloud.current) await sync(latestReview.current);
+      setFinished(true); setError("");
     } catch (e) { setError(message(e)); }
     finally { lock.current = false; setBusy(""); }
   };
@@ -260,7 +274,8 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
       await sync(next);
       const complete = { ...saved, [direction]: true }; setSaved(complete);
       const nextView = DIRECTIONS[DIRECTIONS.indexOf(direction) + 1] ?? DIRECTIONS.find(d => !complete[d]);
-      if (nextView) openView(nextView); else setFinished(true);
+      if (editingSummary || DIRECTIONS.every(d => complete[d])) setFinished(true);
+      else if (nextView) openView(nextView); else setFinished(true);
     } catch (e) { setError(`No avanzamos a la siguiente foto. ${message(e)}`); }
     finally { lock.current = false; setBusy(""); }
   };
@@ -275,17 +290,17 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     return x >= 0 && y >= 0 && x < 1 && y < 1 ? { x, y } : null;
   };
   const leave = (event: React.MouseEvent<HTMLAnchorElement>) => {
-    if (busy || (reviewFingerprint(latestReview.current) !== lastCloud.current && review.outline.length && !window.confirm("Hay cambios pendientes de sincronizar. El borrador queda aquí. ¿Volver a la jornada?"))) event.preventDefault();
+    if (busy || (!finished && reviewFingerprint(latestReview.current) !== lastCloud.current && review.outline.length && !window.confirm("Hay cambios pendientes de sincronizar. El borrador queda aquí. ¿Volver a la jornada?"))) event.preventDefault();
   };
 
   return <section ref={screen} aria-label="Captura paso a paso" className="guided-capture" style={{ position: "fixed", inset: 0, zIndex: 60, background: "#f4f7f5", color: "#172e25", display: "grid", gridTemplateRows: "auto auto minmax(0,1fr) auto", height: "100dvh" } as CSSProperties}>
     <style>{`.guided-capture *{box-sizing:border-box}.guided-capture button,.guided-capture .g-upload{min-height:44px;border:1px solid #cbd8d0;border-radius:10px;padding:8px 14px;background:white;color:#173d2d;font:inherit;cursor:pointer}.guided-capture button:disabled{opacity:.45;cursor:default}.guided-capture button:focus-visible,.guided-capture a:focus-visible,.guided-capture svg:focus-visible{outline:3px solid #e1b752;outline-offset:2px}.guided-capture .g-primary{background:#00674d;color:white;border-color:#00674d;font-weight:700}.guided-capture .g-main{display:grid;grid-template-columns:minmax(0,1fr) 290px;min-height:0;gap:16px;padding:16px}.guided-capture .g-tools{overflow:auto;min-height:0;padding:16px;border-radius:16px;background:white;display:flex;flex-direction:column;gap:14px}.guided-capture .g-photo{min-height:0;position:relative;background:#e6ece8;border-radius:16px;overflow:hidden;display:flex;align-items:center;justify-content:center}.guided-capture .g-steps{display:flex;justify-content:center;gap:6px;padding:8px}.guided-capture .g-steps span{padding:5px 12px;border-radius:20px;font-size:13px}.guided-capture p{margin:0}.guided-capture footer{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 20px;background:white;border-top:1px solid #d6e0d9}.guided-capture .g-context{max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.guided-capture .g-heading{font-size:21px;margin:0}.guided-capture .g-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}@media(max-width:700px){.guided-capture .g-main{grid-template-columns:1fr;grid-template-rows:minmax(120px,1fr) auto;padding:8px;gap:8px}.guided-capture .g-tools{max-height:210px;gap:8px;padding:12px}.guided-capture .g-steps span{padding:4px 6px;font-size:11px}.guided-capture footer{padding:8px;font-size:13px}.guided-capture .g-context{max-width:60vw}.guided-capture .g-heading{font-size:18px}}`}</style>
     <header style={{ padding: "12px 20px 4px", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-      <div><p className="g-context" title={contextLabel}>{contextLabel}</p><h1 className="g-heading" ref={title} tabIndex={-1}>{finished ? "Las cuatro vistas están guardadas" : `${name} · ${DIRECTIONS.indexOf(direction) + 1} de 4`}</h1></div>
-      <a href={backHref} onClick={leave} style={{ fontSize: 13 }}>Volver a la jornada</a>
+      <div><p className="g-context" title={contextLabel}>{contextLabel}</p><h1 className="g-heading" ref={title} tabIndex={-1}>{finished ? `Análisis del árbol${treeLabel ? ` · ${treeLabel}` : ""}` : `${name} · ${DIRECTIONS.indexOf(direction) + 1} de 4`}</h1></div>
+      <div style={{display:"flex",gap:12,alignItems:"center"}}>{!finished ? <button disabled={!!busy || !session} onClick={() => void showSummary()} style={{fontSize:13}}>Ver análisis del árbol</button> : null}<a href={backHref} onClick={leave} style={{ fontSize: 13 }}>Volver a la jornada</a></div>
     </header>
-    <nav className="g-steps" aria-label="Pasos de esta fotografía">{STEPS.map((label, i) => <span key={label} aria-current={i === step ? "step" : undefined} style={{ background: i === step ? "#d1eadc" : "transparent", fontWeight: i === step ? 700 : 400 }}>{i + 1}. {label}</span>)}</nav>
-    {finished ? <main className="g-main" style={{ display: "flex", justifyContent: "center", alignItems: "center" }}><div className="g-tools" style={{ maxWidth: 540 }}><h2>Listo por hoy</h2><p>Fotografías, contornos, colores y revisiones guardados en la nube, dentro de tu proyecto y jornada.</p><p>Estos porcentajes describen el tronco visible; no son una medición de superficie real ni de calidad del aire.</p>{DIRECTIONS.map(d => <button key={d} onClick={() => void switchView(d)}>Revisar {DIRECTION_LABELS[d]} ✓</button>)}</div></main> : <main className="g-main">
+    {finished ? <div /> : <nav className="g-steps" aria-label="Pasos de esta fotografía">{STEPS.map((label, i) => <span key={label} aria-current={i === step ? "step" : undefined} style={{ background: i === step ? "#d1eadc" : "transparent", fontWeight: i === step ? 700 : 400 }}>{i + 1}. {label}</span>)}</nav>}
+    {finished ? session ? <TreeSummary session={session} services={services} onEdit={d => void switchView(d)} /> : <main style={{padding:24}}><p role={error ? "alert" : "status"}>{error || busy}</p></main> : <main className="g-main">
       <div className="g-photo">
         {src ? <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -328,7 +343,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
         {step === 2 ? <><p>Toca únicamente los líquenes: un ejemplo de cada color o iluminación. No selecciones colores de corteza.</p><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{review.config.samples.map((s,i) => <button key={i} aria-label={`Quitar color ${i+1}`} title={`Quitar color ${i+1}`} onClick={() => edit(review.outline,{...review.config,samples:review.config.samples.filter((_,n)=>n!==i)})} style={{ width: 44, padding: 4 }}><span style={{ display:"block",width:25,height:25,borderRadius:20,background:`rgb(${s.rgb.join(",")})`,border:"1px solid #777",margin:"auto" }} /></button>)}</div><p style={{ fontSize: 12 }}>{review.config.samples.length}/6 ejemplos · toca un color para quitarlo</p><label style={{ fontSize: 13 }}>Incluir colores similares<input aria-label="Variación de color" style={{ width: "100%" }} type="range" min="3" max="35" value={review.config.tolerance} onChange={e => edit(review.outline,{...review.config,tolerance:Number(e.target.value)})} /></label></> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
-        {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. Después se abre la siguiente orientación.</p> : null}
+        {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. {editingSummary || DIRECTIONS.every(d => d === direction || saved[d]) ? "Después verás el análisis del árbol con sus cuatro vistas." : "Después se abre la siguiente orientación."}</p> : null}
         {cloudStatus ? <p role="status" style={{ fontSize: 12 }}>{cloudStatus}</p> : null}
         {recovery ? <button disabled={!!busy} onClick={() => { const draft = { ...recovery, savedAt: null }; persist(draft); setReview(draft); setResult(null); setRecovery(null); setSaved(s => ({ ...s, [direction]: false })); setCloudStatus("Borrador recuperado; pulsa Guardar para sincronizar"); }}>Recuperar borrador local distinto</button> : null}
         {!busy && cloudStatus.startsWith("Sin sincronizar") ? <button onClick={() => void sync(latestReview.current).then(() => setError("")).catch(e => setError(message(e)))}>Reintentar guardado</button> : null}
@@ -343,7 +358,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
       </aside>
     </main>}
     <footer>
-      <div style={{ display: "flex", gap: 6 }}>{DIRECTIONS.map(d=><button key={d} aria-label={`Abrir ${DIRECTION_LABELS[d]}`} aria-pressed={direction===d} disabled={!!busy} onClick={()=>switchView(d)} style={{ padding:"6px 10px",fontSize:13,background:direction===d?"#e0efe5":"white" }}>{d==="W"?"O":d}{saved[d]?" ✓":""}</button>)}</div>
+      {!finished ? <div style={{ display: "flex", gap: 6 }}>{DIRECTIONS.map(d=><button key={d} aria-label={`Abrir ${DIRECTION_LABELS[d]}`} aria-pressed={direction===d} disabled={!!busy} onClick={()=>switchView(d)} style={{ padding:"6px 10px",fontSize:13,background:direction===d?"#e0efe5":"white" }}>{d==="W"?"O":d}{saved[d]?" ✓":""}</button>)}</div> : <span style={{fontSize:13}}>Fotos y resultados agrupados en esta jornada.</span>}
       {!finished ? <div style={{ display:"flex",gap:8 }}>
         {step > 0 ? <button disabled={!!busy} onClick={()=>{setStep(step===4?2:Math.max(0,step-1));setError("");}}>Atrás</button> : null}
         <button className="g-primary" disabled={!!busy || !pixels || (step===2 && !review.config.samples.length) || (step>=3 && !a)} onClick={()=>{
@@ -353,8 +368,8 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
           else if(step===2) void analyse();
           else if(step===3) setStep(4);
           else if(step===4) void save();
-        }}>{step===4 ? direction==="W" ? "Guardar y terminar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : "Revisar sin IA" : "Continuar"}</button>
-      </div> : <a href={backHref}>Volver a los árboles</a>}
+        }}>{step===4 ? editingSummary || DIRECTIONS.every(d=>d===direction||saved[d]) ? "Guardar y ver árbol" : direction==="W" ? "Guardar y continuar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : "Revisar sin IA" : "Continuar"}</button>
+      </div> : <a href={backHref} onClick={leave} style={{fontWeight:700}}>Continuar con otro árbol →</a>}
     </footer>
   </section>;
 }

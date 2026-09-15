@@ -39,4 +39,9 @@ export const guidedServices = {
     if (error || !data) throw new Error("El original está guardado, pero no se pudo abrir su copia de análisis. Reintenta.");
     return data;
   },
+  async storedPhoto(ownerId: string, imageId: string): Promise<Blob> {
+    const { data, error } = await supabase.storage.from("lichen-images").download(`${ownerId}/analysis-proxies/${imageId}/v1.jpg`);
+    if (error || !data) throw new Error("No se pudo abrir la fotografía guardada. El análisis se conserva; puedes reintentar.");
+    return data;
+  },
 };

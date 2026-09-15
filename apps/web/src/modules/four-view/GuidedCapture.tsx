@@ -132,9 +132,12 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
         return;
       }
       setResult(restored);
+      // A completed view opens its review, not another forced trip through
+      // upload/outline/sampling and paid inference. Geometry was checked above.
+      if (review.savedAt) setStep(4);
     }).catch(e => { if (!abort.signal.aborted) setError(message(e)); });
     return () => abort.abort();
-  }, [pixels, review.analysis, review.outline, review.config, result, direction]);
+  }, [pixels, review.analysis, review.outline, review.config, review.savedAt, result, direction]);
   useEffect(() => {
     if (!result || !pixels) { setOverlay(""); return; }
     const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;

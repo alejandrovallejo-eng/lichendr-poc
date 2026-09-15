@@ -69,7 +69,11 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     assert.doesNotMatch(host.textContent!,/Recuperar borrador local distinto/);
     assert.equal(host.querySelectorAll("svg circle").length,0); // still on photo step
     await act(async()=>{host.querySelector("img")!.dispatchEvent(new Event("load",{bubbles:true}));});
-    await click("Continuar");assert.match(host.textContent!,/4 puntos/); // restored without local cache
+    for(let i=0;i<80 && !host.textContent!.includes("Revisa y guarda");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+    assert.match(host.textContent!,/Revisa y guarda/); // reopen saved review, without a new analysis
+    assert.match(host.textContent!,/100.0 %/);
+    await click("Atrás");await click("Atrás");
+    assert.match(host.textContent!,/4 puntos/); // restored without local cache
     assert.equal(calls,1); // restore never invokes AI
   } finally { await act(async()=>root.unmount());host.remove();HTMLCanvasElement.prototype.getContext=oldContext;HTMLCanvasElement.prototype.toDataURL=oldData; }
 });

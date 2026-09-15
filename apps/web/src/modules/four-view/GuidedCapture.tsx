@@ -44,10 +44,27 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
   const lock = useRef(false);
   const drag = useRef<number | null>(null);
   const title = useRef<HTMLHeadingElement>(null);
+  const screen = useRef<HTMLElement>(null);
   const imageId = session?.views[direction];
   const key = session?.treeSampleId && imageId ? guidedKey(session.ownerId, session.treeSampleId, direction, imageId) : null;
   const name = DIRECTION_LABELS[direction];
   const contextId = `${context.projectId}:${context.siteId}:${context.eventId}:${context.treeId}`;
+
+  useEffect(() => {
+    // The full-screen editor replaces (rather than sits in the tab order of)
+    // the underlying dashboard. Preserve and restore each previous inert state.
+    const previous: Array<[HTMLElement, boolean]> = [];
+    let node: HTMLElement | null = screen.current;
+    while (node?.parentElement) {
+      for (const sibling of Array.from(node.parentElement.children)) {
+        if (sibling !== node && sibling instanceof HTMLElement) { previous.push([sibling,sibling.inert]); sibling.inert=true; }
+      }
+      node=node.parentElement;
+      if (node===document.body) break;
+    }
+    const overflow=document.body.style.overflow; document.body.style.overflow="hidden";
+    return () => { previous.forEach(([element,inert])=>{element.inert=inert;});document.body.style.overflow=overflow; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -147,6 +164,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     if (!session || !pixels || !imageId || lock.current) return;
     lock.current = true; const current = ++generation.current;
     controller.current?.abort(); const abort = new AbortController(); controller.current = abort;
+    const timeout = setTimeout(() => abort.abort(), 90_000);
     setStep(3); setBusy("Calculando cobertura y consultando BioCLIP…"); setError(""); setResult(null);
     try {
       const colors = await classifyTrunkColors(pixels.rgba, pixels.width, pixels.height, review.outline, review.config, abort.signal, "lichen-only");
@@ -154,15 +172,15 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
       if (!colors.total) throw new Error("El contorno no incluye píxeles analizables.");
       setResult(colors);
       const partial = { ...review, savedAt: null, analysis: analysisRecord(colors, pixels.width, pixels.height, null) };
-      setReview(partial);
+      setReview(partial); persist(partial);
       const ai = await checkSamples({ imageId, treeSampleId: session.treeSampleId, direction }, review.outline, review.config, pixels.width, pixels.height, abort.signal);
       if (current !== generation.current) return;
       if (ai.context.imageId !== imageId || ai.context.treeSampleId !== session.treeSampleId || ai.context.direction !== direction || !ai.suggestions.length)
         throw new Error("La respuesta de IA no corresponde a esta fotografía.");
       const next = { ...partial, analysis: analysisRecord(colors, pixels.width, pixels.height, ai) };
       setReview(next); persist(next); setStep(4);
-    } catch (e) { if (current === generation.current && !abort.signal.aborted) setError(message(e)); }
-    finally { lock.current = false; if (current === generation.current) setBusy(""); }
+    } catch (e) { if (current === generation.current) setError(abort.signal.aborted ? "La IA tardó demasiado. Tus colores y la estimación se conservaron. Puedes reintentar o revisar sin IA." : message(e)); }
+    finally { clearTimeout(timeout); if (current === generation.current) { lock.current = false; setBusy(""); } }
   };
   const save = () => {
     if (!review.analysis || lock.current || busy) return;
@@ -187,7 +205,7 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
     if (busy || (review.outline.length && !review.savedAt && !window.confirm("El borrador queda en este navegador. ¿Volver a la jornada?"))) event.preventDefault();
   };
 
-  return <section aria-label="Captura paso a paso" className="guided-capture" style={{ position: "fixed", inset: 0, zIndex: 60, background: "#f4f7f5", color: "#172e25", display: "grid", gridTemplateRows: "auto auto minmax(0,1fr) auto", height: "100dvh" } as CSSProperties}>
+  return <section ref={screen} aria-label="Captura paso a paso" className="guided-capture" style={{ position: "fixed", inset: 0, zIndex: 60, background: "#f4f7f5", color: "#172e25", display: "grid", gridTemplateRows: "auto auto minmax(0,1fr) auto", height: "100dvh" } as CSSProperties}>
     <style>{`.guided-capture *{box-sizing:border-box}.guided-capture button,.guided-capture .g-upload{min-height:44px;border:1px solid #cbd8d0;border-radius:10px;padding:8px 14px;background:white;color:#173d2d;font:inherit;cursor:pointer}.guided-capture button:disabled{opacity:.45;cursor:default}.guided-capture button:focus-visible,.guided-capture a:focus-visible,.guided-capture svg:focus-visible{outline:3px solid #e1b752;outline-offset:2px}.guided-capture .g-primary{background:#00674d;color:white;border-color:#00674d;font-weight:700}.guided-capture .g-main{display:grid;grid-template-columns:minmax(0,1fr) 290px;min-height:0;gap:16px;padding:16px}.guided-capture .g-tools{overflow:auto;min-height:0;padding:16px;border-radius:16px;background:white;display:flex;flex-direction:column;gap:14px}.guided-capture .g-photo{min-height:0;position:relative;background:#e6ece8;border-radius:16px;overflow:hidden;display:flex;align-items:center;justify-content:center}.guided-capture .g-steps{display:flex;justify-content:center;gap:6px;padding:8px}.guided-capture .g-steps span{padding:5px 12px;border-radius:20px;font-size:13px}.guided-capture p{margin:0}.guided-capture footer{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 20px;background:white;border-top:1px solid #d6e0d9}.guided-capture .g-context{max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.guided-capture .g-heading{font-size:21px;margin:0}.guided-capture .g-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}@media(max-width:700px){.guided-capture .g-main{grid-template-columns:1fr;grid-template-rows:minmax(120px,1fr) auto;padding:8px;gap:8px}.guided-capture .g-tools{max-height:210px;gap:8px;padding:12px}.guided-capture .g-steps span{padding:4px 6px;font-size:11px}.guided-capture footer{padding:8px;font-size:13px}.guided-capture .g-context{max-width:60vw}.guided-capture .g-heading{font-size:18px}}`}</style>
     <header style={{ padding: "12px 20px 4px", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
       <div><p className="g-context" title={contextLabel}>{contextLabel}</p><h1 className="g-heading" ref={title} tabIndex={-1}>{finished ? "Las cuatro vistas están guardadas" : `${name} · ${DIRECTIONS.indexOf(direction) + 1} de 4`}</h1></div>
@@ -232,29 +250,34 @@ export function GuidedCapture({ context, contextLabel, backHref, services, check
         </> : <div style={{ padding: 28, textAlign: "center" }}>{busy || "Sube una fotografía para comenzar"}</div>}
       </div>
       <aside className="g-tools" aria-label="Herramientas del paso actual">
-        <h2 style={{ fontSize: 19, margin: 0 }}>{["Sube la foto", "Delimita el tronco", "Toca colores de liquen", "Analizando tu selección", "Revisa y guarda"][step]}</h2>
+        <h2 style={{ fontSize: 19, margin: 0 }}>{["Sube la foto", "Delimita el tronco", "Toca colores de liquen", busy ? "Analizando tu selección" : "Revisar estimación", "Revisa y guarda"][step]}</h2>
         {step === 0 ? <><p>Una fotografía por orientación. Empezamos con {name.toLowerCase()}.</p><label className="g-upload">{imageId ? "Reemplazar fotografía" : "Elegir fotografía"}<input aria-label={`Subir foto de ${name}`} type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" className="g-hidden" disabled={!!busy || !session || session.completed} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file); }} /></label>{imageId ? <p style={{ fontSize: 13 }}>Original guardado ✓</p> : null}{saved[direction] ? <p>Esta vista ya tiene una revisión guardada.</p> : null}</> : null}
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
         {step === 2 ? <><p>Toca únicamente los líquenes: un ejemplo de cada color o iluminación. No selecciones colores de corteza.</p><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{review.config.samples.map((s,i) => <button key={i} aria-label={`Quitar color ${i+1}`} title={`Quitar color ${i+1}`} onClick={() => edit(review.outline,{...review.config,samples:review.config.samples.filter((_,n)=>n!==i)})} style={{ width: 44, padding: 4 }}><span style={{ display:"block",width:25,height:25,borderRadius:20,background:`rgb(${s.rgb.join(",")})`,border:"1px solid #777",margin:"auto" }} /></button>)}</div><p style={{ fontSize: 12 }}>{review.config.samples.length}/6 ejemplos · toca un color para quitarlo</p><label style={{ fontSize: 13 }}>Incluir colores similares<input aria-label="Variación de color" style={{ width: "100%" }} type="range" min="3" max="35" value={review.config.tolerance} onChange={e => edit(review.outline,{...review.config,tolerance:Number(e.target.value)})} /></label></> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
         {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible. La revisión se conserva en este navegador; el original, en tu proyecto.</p> : null}
         {busy ? <p role="status">{busy}</p> : null}
+        {busy && step === 3 ? <button onClick={() => {
+          generation.current++; controller.current?.abort(); lock.current=false; setBusy("");
+          setError("Consulta de IA cancelada. La fotografía y los colores se conservaron.");
+        }}>Cancelar consulta de IA</button> : null}
         {error ? <p role="alert" style={{ color: "#a0331e", fontSize: 13 }}>{error}</p> : null}
         {!busy && error && imageId && !pixels ? <button onClick={()=>setLoadAttempt(n=>n+1)}>Reintentar abrir foto</button> : null}
-        {step === 3 && !busy && error ? <><button onClick={()=>void analyse()}>Reintentar IA</button>{a ? <button onClick={()=>setStep(4)}>Revisar sin IA</button> : null}</> : null}
+        {step === 3 && !busy && error ? <button onClick={()=>void analyse()}>Reintentar IA</button> : null}
       </aside>
     </main>}
     <footer>
       <div style={{ display: "flex", gap: 6 }}>{DIRECTIONS.map(d=><button key={d} aria-label={`Abrir ${DIRECTION_LABELS[d]}`} aria-pressed={direction===d} disabled={!!busy} onClick={()=>switchView(d)} style={{ padding:"6px 10px",fontSize:13,background:direction===d?"#e0efe5":"white" }}>{d==="W"?"O":d}{saved[d]?" ✓":""}</button>)}</div>
       {!finished ? <div style={{ display:"flex",gap:8 }}>
         {step > 0 ? <button disabled={!!busy} onClick={()=>{setStep(step===4?2:Math.max(0,step-1));setError("");}}>Atrás</button> : null}
-        <button className="g-primary" disabled={!!busy || !pixels || (step===2 && !review.config.samples.length) || step===3 || (step===4 && !a)} onClick={()=>{
+        <button className="g-primary" disabled={!!busy || !pixels || (step===2 && !review.config.samples.length) || (step>=3 && !a)} onClick={()=>{
           setError("");
           if(step===0) setStep(1);
           else if(step===1){const issue=trunkOutlineError(review.outline);if(issue)setError(issue);else setStep(2);}
           else if(step===2) void analyse();
+          else if(step===3) setStep(4);
           else if(step===4) save();
-        }}>{step===4 ? direction==="W" ? "Guardar y terminar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? "Analizando…" : "Continuar"}</button>
+        }}>{step===4 ? direction==="W" ? "Guardar y terminar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : "Revisar sin IA" : "Continuar"}</button>
       </div> : <a href={backHref}>Volver a los árboles</a>}
     </footer>
   </section>;

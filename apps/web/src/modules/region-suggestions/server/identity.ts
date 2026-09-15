@@ -18,6 +18,10 @@ export interface WorkerIdentity {
 }
 
 const HEALTH_TIMEOUT_MS = 10_000;
+export const CLOUD_RUN_STARTUP_TIMEOUT_MS = 150_000;
+export class WorkerStartupError extends Error {
+  constructor() { super("BioCLIP todavía no está listo. Tus selecciones están guardadas; reintenta en un momento."); }
+}
 
 function safeText(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 && value.length <= 120 ? value : fallback;
@@ -28,13 +32,16 @@ export async function resolveWorkerIdentity(
   authHeaders: Record<string, string>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<WorkerIdentity | null> {
+  // A sleeping Cloud Run instance needs ~100 s to load this pinned model.
+  // Wait for readiness before POST; sending both while it starts can yield 429.
+  const coldStart = new URL(workerUrl).hostname.endsWith(".run.app");
   try {
     const response = await fetchImpl(`${workerUrl.replace(/\/$/, "")}/health`, {
       headers: { ...authHeaders },
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(coldStart ? CLOUD_RUN_STARTUP_TIMEOUT_MS : HEALTH_TIMEOUT_MS),
       cache: "no-store",
     });
-    if (!response.ok) return null;
+    if (!response.ok) { if (coldStart) throw new WorkerStartupError(); return null; }
     const body = ((await response.json()) ?? {}) as Record<string, unknown>;
     if (typeof body.encoderId !== "string" || typeof body.backend !== "string") return null;
     return {
@@ -44,6 +51,7 @@ export async function resolveWorkerIdentity(
       headError: typeof body.headError === "string" ? body.headError.slice(0, 300) : null,
     };
   } catch {
+    if (coldStart) throw new WorkerStartupError();
     return null;
   }
 }

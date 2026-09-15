@@ -352,16 +352,24 @@ test("a photograph that is not that view of that tree never reaches MobileSAM", 
   assert.deepEqual(log.urls, []);
 });
 
-test("an incomplete series never reaches MobileSAM", async () => {
+test("the sequential journey can analyse North before the other photos exist", async () => {
   reset();
   const log = emptyLog();
-  const deps = await prepareDeps({ log, directions: ["N", "E", "S"] });
+  const deps = await prepareDeps({ log, directions: ["N"] });
   const result = await handleSamPrepare(
     deps,
     jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }),
   );
-  assert.equal(result.status, 409);
-  assert.deepEqual(log.urls, []);
+  assert.equal(result.status, 200);
+  assert.equal(log.forwardedImages.length, 1);
+});
+
+test("sequential readiness still rejects an inactive image and a foreign owner", async () => {
+  for (const option of [{ directions: ["E"] }, { user: OTHER_OWNER }]) {
+    reset(); const log = emptyLog(); const deps = await prepareDeps({ log, ...option });
+    const result = await handleSamPrepare(deps, jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }));
+    assert.ok(result.status >= 400); assert.deepEqual(log.urls, []);
+  }
 });
 
 test("a 24.47 MP original is segmented through its proxy, never itself", async () => {

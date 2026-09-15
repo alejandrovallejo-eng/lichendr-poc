@@ -13,6 +13,54 @@ import { colorWorkingSize } from "../region-suggestions/trunk-colors.ts";
 import { TreeOrbit } from "./TreeOrbit.tsx";
 import { cropTrunkPixels, directionRotation, normalizeRotation, orbitDirection, type OrbitTexture } from "./tree-orbit.ts";
 import { DIRECTIONS } from "./types.ts";
+import { buildOrbitWrapMap, wrapOrbitPixels, renderOrbitPixels, type OrbitSurface } from "./tree-orbit-render.ts";
+
+const solidOrbitTexture = (rgb: number[] = [100, 120, 80]): OrbitTexture => {
+  const pixels = new Uint8ClampedArray(4 * 4 * 4);
+  for (let i = 0; i < 16; i++) pixels.set([...rgb, 255], i * 4);
+  return { photo: { pixels, width: 4, height: 4 }, overlay: null, profile: new Float32Array(4).fill(1), aspect: .32, fingerprint: "same-photo", warning: "" };
+};
+
+test("orbit straightens a sloping trunk without changing photo pixels or mask alignment", () => {
+  const source: OrbitSurface = { pixels: new Uint8ClampedArray(6 * 4 * 4), width: 6, height: 4 };
+  const overlay: OrbitSurface = { ...source, pixels: source.pixels.slice() };
+  for (let y = 0; y < 4; y++) for (let x = y; x < y + 3; x++) source.pixels.set([x, y, 70, 255], (y * 6 + x) * 4);
+  overlay.pixels.set([255, 0, 200, 255], (2 * 6 + 3) * 4);
+  const before = source.pixels.slice(), map = buildOrbitWrapMap(source, 3);
+  const photo = wrapOrbitPixels(source, map), mask = wrapOrbitPixels(overlay, map);
+  assert.equal(photo.width, 3); assert.equal(photo.height, 4);
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 3; x++) assert.deepEqual(Array.from(photo.pixels.slice((y * 3 + x) * 4, (y * 3 + x + 1) * 4)), [x + y, y, 70, 255]);
+  assert.deepEqual(Array.from(mask.pixels.slice((2 * 3 + 1) * 4, (2 * 3 + 2) * 4)), [255, 0, 200, 255]);
+  assert.equal(Array.from(mask.pixels).filter((n, i) => i % 4 === 3 && n > 0).length, 1);
+  assert.deepEqual(source.pixels, before);
+});
+
+test("orbit wrapping preserves interior holes and empty rows rather than inventing bark", () => {
+  const source: OrbitSurface = { pixels: new Uint8ClampedArray(5 * 3 * 4), width: 5, height: 3 };
+  for (const i of [0, 1, 3, 4, 10, 11, 12, 13, 14]) source.pixels.set([80, 60, 40, 255], i * 4);
+  const map = buildOrbitWrapMap(source, 5), wrapped = wrapOrbitPixels(source, map);
+  assert.equal(wrapped.pixels[2 * 4 + 3], 0);
+  for (let x = 0; x < 5; x++) assert.equal(wrapped.pixels[(5 + x) * 4 + 3], 0);
+  assert.equal(wrapped.pixels[(10 + 2) * 4 + 3], 255);
+});
+
+test("orbit projection keeps cardinal faces, missing data, overlays and source arrays separate", () => {
+  const textures = { N: solidOrbitTexture([240, 0, 0]), E: solidOrbitTexture([0, 240, 0]), S: solidOrbitTexture([0, 0, 240]), W: solidOrbitTexture([240, 240, 0]) };
+  const center = (data: Uint8ClampedArray) => Array.from(data.slice((60 * 120 + 60) * 4, (60 * 120 + 61) * 4));
+  const before = textures.N.photo.pixels.slice();
+  for (const d of DIRECTIONS) {
+    const result = center(renderOrbitPixels(textures, directionRotation(d), false, 120, 120));
+    const expected = Array.from(textures[d].photo.pixels.slice(0, 3));
+    assert.equal(result[3], 255);
+    expected.forEach((value, c) => value ? assert.ok(result[c] > 220) : assert.equal(result[c], 0));
+  }
+  const missing = center(renderOrbitPixels({ ...textures, E: null }, -90, false, 120, 120));
+  assert.ok(Math.max(...missing.slice(0, 3)) - Math.min(...missing.slice(0, 3)) < 12);
+  textures.N.overlay = solidOrbitTexture([220, 30, 200]).photo;
+  assert.deepEqual(center(renderOrbitPixels(textures, 0, true, 120, 120)), [220, 30, 200, 255]);
+  assert.equal(center(renderOrbitPixels(textures, 0, false, 120, 120))[1], 0);
+  assert.deepEqual(textures.N.photo.pixels, before);
+});
 
 test("orbit directions wrap and follow N/E/S/O without exchanging photos", () => {
   for (const d of DIRECTIONS) {
@@ -36,16 +84,14 @@ test("orbit crop removes background including concave notches and never mutates 
 
 test("orbit is read-only, preserves missing sector, changes orientation/zoom/overlay without rebuilding", async () => {
   const entries={N:{src:"n",review:summaryReview(10)},E:{src:"",review:null},S:{src:"s",review:summaryReview(20)},W:{src:"w",review:summaryReview(30)}};
-  const prepared:string[]=[],opened:string[]=[],released:string[]=[];
-  const oldRevoke=URL.revokeObjectURL;URL.revokeObjectURL=url=>released.push(url);
-  const prepare=async(entry:{src:string})=>{prepared.push(entry.src);if(!entry.src)throw new Error("Falta la foto");return {photo:`blob:${entry.src}`,overlay:`blob:mask-${entry.src}`,fingerprint:"same-photo",warning:""};};
+  const prepared:string[]=[],opened:string[]=[];
+  const prepare=async(entry:{src:string})=>{prepared.push(entry.src);if(!entry.src)throw new Error("Falta la foto");return solidOrbitTexture();};
   const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
   const click=async(label:string)=>{const b=host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);assert.ok(b,label);await act(async()=>b.click());};
   try {
     await act(async()=>root.render(createElement(TreeOrbit,{entries,marked:true,onOpenPhoto:d=>opened.push(d),prepare})));
-    assert.deepEqual(prepared,["n","","s","w"]);assert.equal(host.querySelectorAll(".tree-orbit-strip").length,64);
+    assert.deepEqual(prepared,["n","","s","w"]);assert.equal(host.querySelectorAll(".tree-orbit-canvas").length,1);
     assert.match(host.textContent!,/fotografías repetidas/);
-    for(const el of host.querySelectorAll<HTMLElement>('[data-orientation="E"]'))assert.equal(el.style.backgroundImage,"none");
     await click("Ver Este en 360");assert.match(host.querySelector('[role="status"]')!.textContent!,/Este · sector sin recorte/);
     await click("Ver Oeste en 360");
     await act(async()=>Array.from(host.querySelectorAll("button")).find(b=>b.textContent==="Abrir foto de oeste")!.click());
@@ -56,23 +102,21 @@ test("orbit is read-only, preserves missing sector, changes orientation/zoom/ove
     assert.equal(host.querySelector<HTMLInputElement>('input[type="range"]')!.value,"110");
     await act(async()=>root.render(createElement(TreeOrbit,{entries,marked:false,onOpenPhoto:d=>opened.push(d),prepare})));
     assert.equal(prepared.length,4);
-    for(const el of host.querySelectorAll<HTMLElement>('[data-orientation="N"]'))assert.doesNotMatch(el.style.backgroundImage,/mask/);
-  } finally {await act(async()=>root.unmount());host.remove();URL.revokeObjectURL=oldRevoke;}
-  assert.deepEqual(released.sort(),["blob:n","blob:s","blob:w","blob:mask-n","blob:mask-s","blob:mask-w"].sort());
+    assert.equal(host.querySelector("canvas")!.getAttribute("data-marked"),"false");
+  } finally {await act(async()=>root.unmount());host.remove();}
 });
 
-test("leaving orbit cancels preparation and releases a late result without starting other views", async () => {
+test("leaving orbit cancels preparation and discards a late buffer without starting other views", async () => {
   const entries={N:{src:"n",review:summaryReview(10)},E:{src:"e",review:null},S:{src:"s",review:null},W:{src:"w",review:null}};
   let resolve!:(texture:OrbitTexture)=>void,signal:AbortSignal|undefined,calls=0;
   const prepare=async(_entry:unknown,s:AbortSignal)=>{signal=s;calls++;return new Promise<OrbitTexture>(r=>{resolve=r;});};
-  const released:string[]=[],oldRevoke=URL.revokeObjectURL;URL.revokeObjectURL=url=>released.push(url);
   const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
   try {
     await act(async()=>root.render(createElement(TreeOrbit,{entries,marked:true,onOpenPhoto:()=>{},prepare})));
     await act(async()=>root.unmount());assert.equal(signal?.aborted,true);
-    await act(async()=>{resolve({photo:"blob:late",overlay:"blob:late-mask",fingerprint:"",warning:""});});
-    assert.equal(calls,1);assert.deepEqual(released,["blob:late","blob:late-mask"]);
-  } finally {host.remove();URL.revokeObjectURL=oldRevoke;}
+    await act(async()=>{resolve(solidOrbitTexture());});
+    assert.equal(calls,1);
+  } finally {host.remove();}
 });
 
 test("lichen-only analysis does not require bark and never calls unmatched pixels bark", async () => {

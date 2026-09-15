@@ -2,9 +2,10 @@ import type { GuidedReview } from "./guided-flow";
 import { DIRECTIONS, type Direction } from "./types";
 import { rasterizeTrunk, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { classifyTrunkColors, colorWorkingSize, OVERLAY_RGB } from "../region-suggestions/trunk-colors";
+import { buildOrbitWrapMap, wrapOrbitPixels, type OrbitSkin, type OrbitSurface } from "./tree-orbit-render";
 
 export type OrbitEntry = { src: string; review: GuidedReview | null };
-export type OrbitTexture = { photo: string; overlay: string; fingerprint: string; warning: string };
+export type OrbitTexture = OrbitSkin & { fingerprint: string; warning: string };
 export const normalizeRotation = (angle: number) => ((angle % 360) + 360) % 360;
 export const orbitDirection = (rotation: number): Direction => DIRECTIONS[Math.round(normalizeRotation(-rotation) / 90) % 4];
 export const directionRotation = (direction: Direction) => -90 * DIRECTIONS.indexOf(direction);
@@ -40,24 +41,12 @@ async function decodePhoto(src: string, signal: AbortSignal): Promise<HTMLImageE
     signal.addEventListener("abort", cancel, { once: true }); image.src = src;
   });
 }
-async function pngUrl(pixels: Uint8ClampedArray, width: number, height: number, signal: AbortSignal) {
-  checkAbort(signal);
-  const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
-  try {
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Tu navegador no pudo preparar el recorte.");
-    const image = ctx.createImageData(width, height); image.data.set(pixels); ctx.putImageData(image, 0, 0);
-    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(b => b ? resolve(b) : reject(new Error("No se pudo preparar el recorte.")), "image/png"));
-    checkAbort(signal); return URL.createObjectURL(blob);
-  } finally { canvas.width = 0; canvas.height = 0; }
-}
 
 // Local rendering only: no fetch, model inference, storage writes or new
 // measurement. Overlay is reconstructed from saved settings and must match
 // every saved count before it can be displayed.
 export async function prepareOrbitTexture(entry: OrbitEntry, signal: AbortSignal): Promise<OrbitTexture> {
   if (!entry.src || !entry.review?.savedAt || !entry.review.outline.length) throw new Error("Falta una foto con contorno guardado.");
-  const urls: string[] = [];
   const photo = await decodePhoto(entry.src, signal);
   const canvas = document.createElement("canvas");
   try {
@@ -69,11 +58,12 @@ export async function prepareOrbitTexture(entry: OrbitEntry, signal: AbortSignal
     ctx.drawImage(photo, 0, 0, width, height);
     const rgba = ctx.getImageData(0, 0, width, height).data;
     const crop = cropTrunkPixels(rgba, width, height, entry.review.outline);
+    const map = buildOrbitWrapMap(crop);
     // Exact decoded-image duplicate warning, independent of different outlines.
     const hash = globalThis.crypto?.subtle ? await crypto.subtle.digest("SHA-256", new Uint8Array(rgba)) : null;
     const fingerprint = hash ? `${width}x${height}:` + Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("") : "";
-    const base = await pngUrl(crop.pixels, crop.width, crop.height, signal); urls.push(base);
-    let overlay = "", warning = "";
+    const base = wrapOrbitPixels(crop, map);
+    let overlay: OrbitSurface | null = null, warning = "";
     const a = entry.review.analysis;
     if (a) try {
       if (a.width !== width || a.height !== height) throw new Error("La selección guardada no coincide con esta copia de la foto.");
@@ -82,18 +72,13 @@ export async function prepareOrbitTexture(entry: OrbitEntry, signal: AbortSignal
       const marked = new Uint8ClampedArray(rgba.length);
       result.labels.forEach((code, i) => { if (code >= 3) marked.set([...OVERLAY_RGB[code - 1], 150], i * 4); });
       const mask = cropTrunkPixels(marked, width, height, entry.review.outline);
-      overlay = await pngUrl(mask.pixels, mask.width, mask.height, signal); urls.push(overlay);
+      overlay = wrapOrbitPixels(mask, map);
     } catch (error) {
       checkAbort(signal);
       warning = (error instanceof Error ? error.message : "No se pudo mostrar la selección.") + " Se muestra solo el tronco; el análisis guardado no cambia.";
     }
     checkAbort(signal);
-    return { photo: base, overlay, fingerprint, warning };
-  } catch (error) { urls.forEach(url => URL.revokeObjectURL(url)); throw error; }
+    return { photo: base, overlay, profile: map.profile, aspect: map.aspect, fingerprint, warning };
+  }
   finally { canvas.width = 0; canvas.height = 0; photo.src = ""; }
-}
-
-export function releaseOrbitTexture(texture: OrbitTexture) {
-  if (texture.photo) URL.revokeObjectURL(texture.photo);
-  if (texture.overlay) URL.revokeObjectURL(texture.overlay);
 }

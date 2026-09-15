@@ -470,6 +470,13 @@ export default function JornadaWorkflow({ eventId }: Props) {
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Link
+                      href={withPreservedContext("/images?mode=summary", perTreeCtx)}
+                      className="inline-flex items-center rounded border px-3 py-2 text-sm font-semibold"
+                      style={{ borderColor: "var(--ld-primary)", background: "var(--ld-primary)", color: "#fff" }}
+                    >
+                      Ver análisis del árbol
+                    </Link>
+                    <Link
                       href={withPreservedContext("/images", perTreeCtx)}
                       className="inline-flex items-center rounded border px-3 py-2 text-sm"
                       style={{

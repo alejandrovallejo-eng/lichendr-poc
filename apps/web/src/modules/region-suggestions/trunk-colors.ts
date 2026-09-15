@@ -75,13 +75,16 @@ export function sampleColor(rgba: Uint8ClampedArray, width: number, height: numb
 // Bounded and cooperative: yields every 8192 pixels; aborts obsolete slider/
 // sample/image work. No model calls, new large images, or per-sample full masks.
 export async function classifyTrunkColors(rgba: Uint8ClampedArray, width: number, height: number,
-  outline: readonly TrunkPoint[], config: ColorConfig, signal?: AbortSignal): Promise<ColorResult> {
+  outline: readonly TrunkPoint[], config: ColorConfig, signal?: AbortSignal,
+  mode: "bark-and-lichen" | "lichen-only" = "bark-and-lichen"): Promise<ColorResult> {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1
     || width > COLOR_SIDE || height > COLOR_SIDE || rgba.length !== width * height * 4)
     throw new Error("La imagen de colores excede el tamaño de trabajo seguro.");
   if (!parseColorConfig(JSON.stringify(config))) throw new Error("Las muestras de color no son válidas.");
-  if (!config.samples.some(s => s.label === 2) || !config.samples.some(s => s.label >= 3))
-    throw new Error("Marca al menos una muestra de corteza y una de liquen.");
+  if (!config.samples.some(s => s.label >= 3) || (mode === "bark-and-lichen" && !config.samples.some(s => s.label === 2)))
+    throw new Error(mode === "lichen-only" ? "Marca al menos un color de liquen." : "Marca al menos una muestra de corteza y una de liquen.");
+  if (mode === "lichen-only" && config.samples.some(s => s.label === 2))
+    throw new Error("Esta selección utiliza solamente colores de liquen.");
   const roi = rasterizeTrunk(outline, width, height);
   if (config.samples.some(s => !roi[Math.floor(s.y * height) * width + Math.floor(s.x * width)]))
     throw new Error("Una muestra está fuera del tronco. Vuelve a marcarla.");

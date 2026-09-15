@@ -12,9 +12,7 @@ import {
 } from "@/modules/prepare-day/client";
 import {
   suggestTreeCode,
-  treeStatusLabel,
   withPreservedContext,
-  type TreeEvaluationStatus,
 } from "@/modules/prepare-day/logic";
 
 interface Props {
@@ -32,15 +30,6 @@ function formatLocalDate(iso: string) {
     return iso;
   }
 }
-
-const STATUS_COLORS: Record<TreeEvaluationStatus, { background: string; color: string; border: string }> = {
-  sin_muestreo: { background: "#F1F1F1", color: "#4A4A4A", border: "#DADADA" },
-  sin_fotografias: { background: "#FFF3D6", color: "#664D03", border: "#F0D078" },
-  fotografias_pendientes: { background: "#DDEBF7", color: "#1B4B7C", border: "#A9C7E2" },
-  listo_para_revisar: { background: "#E4F1D9", color: "#2C5C1A", border: "#B7D8A0" },
-  evaluacion_completada: { background: "#D1E7DD", color: "#0F5132", border: "#BADBCC" },
-  requiere_repetir: { background: "#F9DAD6", color: "#842029", border: "#F5C2C7" },
-};
 
 export default function JornadaWorkflow({ eventId }: Props) {
   const [context, setContext] = useState<JornadaContext | null>(null);
@@ -444,7 +433,6 @@ export default function JornadaWorkflow({ eventId }: Props) {
         ) : (
           <ul className="space-y-3">
             {treesInJornada.map((row) => {
-              const style = STATUS_COLORS[row.status];
               const perTreeCtx = { ...contextQuery, treeSampleId: row.sample?.id };
               return (
                 <li
@@ -463,9 +451,11 @@ export default function JornadaWorkflow({ eventId }: Props) {
                     </div>
                     <span
                       className="inline-flex items-center gap-2 rounded px-3 py-1 text-xs font-medium"
-                      style={{ background: style.background, color: style.color, border: `1px solid ${style.border}` }}
+                      style={{ background: "#E4F1E9", color: "#17533C", border: "1px solid #C8DECF" }}
                     >
-                      {treeStatusLabel(row.status)}
+                      {/* Classic calibration status is not guided save status.
+                          Actual saved/pending counts are shown in the tree summary. */}
+                      Norte · Este · Sur · Oeste
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">

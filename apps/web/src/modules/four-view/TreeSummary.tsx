@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { DIRECTIONS, DIRECTION_LABELS, type Direction } from "./types";
 import type { GuidedReview, GuidedServices, GuidedSession } from "./guided-flow";
 import { classifyTrunkColors, colorWorkingSize, OVERLAY_RGB } from "../region-suggestions/trunk-colors";
+import { TreeOrbit } from "./TreeOrbit";
 
 type Entry = { review: GuidedReview | null; src: string; loading: boolean; error: string };
 const empty = (): Entry => ({ review: null, src: "", loading: false, error: "" });
@@ -17,6 +18,7 @@ export function TreeSummary({ session, services, onEdit }: {
   const [entries, setEntries] = useState<Record<Direction, Entry>>({ N: empty(), E: empty(), S: empty(), W: empty() });
   const [attempt, setAttempt] = useState(0);
   const [expanded, setExpanded] = useState<Direction | null>(null);
+  const [orbit, setOrbit] = useState(false);
   const [marked, setMarked] = useState(true);
   const heading = useRef<HTMLHeadingElement>(null);
   const viewsKey = JSON.stringify(session.views);
@@ -45,25 +47,26 @@ export function TreeSummary({ session, services, onEdit }: {
     // Stable view identity; changes to unrelated session flags do not reload.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.ownerId, session.treeSampleId, viewsKey, services, attempt]);
-  useEffect(() => { heading.current?.focus(); }, [expanded]);
+  useEffect(() => { heading.current?.focus(); }, [expanded, orbit]);
   const loaded = DIRECTIONS.every(d => !entries[d].loading);
   const savedCount = DIRECTIONS.filter(d => entries[d].review?.savedAt).length;
   return <main className="tree-summary" aria-label="Las cuatro vistas del árbol">
     <style>{`.tree-summary{min-height:0;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:14px}.tree-summary-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.tree-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;flex:1;min-height:0}.tree-summary-card{background:white;border:1px solid #d5e3da;border-radius:16px;overflow:hidden;display:flex;flex-direction:column;min-width:0}.tree-summary-card header{display:flex;justify-content:space-between;align-items:center;padding:12px;gap:8px}.tree-summary-card h3{font-size:19px;margin:0}.tree-summary-photo{height:clamp(160px,32vh,340px);background:#e5ece7;position:relative;display:flex;justify-content:center;align-items:center}.tree-summary-photo svg{width:100%;height:100%}.tree-summary-info{padding:12px;display:flex;flex-direction:column;gap:9px;font-size:13px}.tree-summary-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;padding:0 12px 12px}.tree-summary .tree-summary-expanded{grid-template-columns:1fr;max-width:1000px;width:100%;margin:auto}.tree-summary-expanded .tree-summary-card{display:grid;grid-template-columns:minmax(0,1fr) 270px}.tree-summary-expanded .tree-summary-card header{grid-column:1/-1}.tree-summary-expanded .tree-summary-photo{height:min(53vh,520px);grid-row:2/4}.tree-summary-expanded .tree-summary-actions{align-items:flex-end}.tree-summary-note{font-size:12px;color:#4a6156}@media(max-width:1100px){.tree-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tree-summary-photo{height:220px}}@media(max-width:600px){.tree-summary{padding:10px}.tree-summary-grid{grid-template-columns:1fr}.tree-summary-expanded .tree-summary-card{display:flex}.tree-summary-expanded .tree-summary-photo{height:40vh}}`}</style>
     <div className="tree-summary-top">
-      <div><h2 ref={heading} tabIndex={-1} style={{ margin: 0, fontSize: 20 }}>{expanded ? DIRECTION_LABELS[expanded] : "Un árbol · cuatro vistas"}</h2>
+      <div><h2 ref={heading} tabIndex={-1} style={{ margin: 0, fontSize: 20 }}>{orbit ? "Explorar el árbol · 360° aproximado" : expanded ? DIRECTION_LABELS[expanded] : "Un árbol · cuatro vistas"}</h2>
         <p style={{ fontSize: 13 }}>{loaded ? `${savedCount} de 4 vistas con análisis guardado` : "Cargando resultados guardados…"}</p></div>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <label style={{ fontSize: 13 }}><input type="checkbox" checked={marked} onChange={e => setMarked(e.target.checked)} /> Mostrar selección</label>
-        {expanded ? <button onClick={() => setExpanded(null)}>Ver las cuatro vistas</button> : null}
+        {!orbit ? <button disabled={!loaded || !DIRECTIONS.some(d => entries[d].src && entries[d].review?.savedAt && entries[d].review?.outline.length)} onClick={() => { setExpanded(null); setOrbit(true); }}>Explorar 360°</button> : null}
+        {expanded || orbit ? <button onClick={() => { setExpanded(null); setOrbit(false); }}>Ver las cuatro vistas</button> : null}
       </div>
     </div>
-    <div className={`tree-summary-grid${expanded ? " tree-summary-expanded" : ""}`}>
+    {orbit ? <TreeOrbit entries={entries} marked={marked} onOpenPhoto={d => { setOrbit(false); setExpanded(d); }} /> : <div className={`tree-summary-grid${expanded ? " tree-summary-expanded" : ""}`}>
       {(expanded ? [expanded] : DIRECTIONS).map(direction => <SummaryCard key={direction}
         direction={direction} entry={entries[direction]} imageId={session.views[direction]} treeSampleId={session.treeSampleId}
         marked={marked} expanded={expanded !== null} onExpand={() => setExpanded(direction)}
         onEdit={() => onEdit(direction)} onRetry={() => setAttempt(n => n + 1)} />)}
-    </div>
+    </div>}
     <p className="tree-summary-note">Cada porcentaje corresponde al tronco delimitado en esa foto. BioCLIP revisa ejemplos; no valida toda la selección. Las cuatro vistas no equivalen a una medición de superficie total ni de calidad del aire.</p>
   </main>;
 }

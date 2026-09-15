@@ -10,6 +10,70 @@ import { classifyTrunkColors } from "../region-suggestions/trunk-colors.ts";
 import type { SuggestionResponse } from "../region-suggestions/client.ts";
 import { TreeSummary } from "./TreeSummary.tsx";
 import { colorWorkingSize } from "../region-suggestions/trunk-colors.ts";
+import { TreeOrbit } from "./TreeOrbit.tsx";
+import { cropTrunkPixels, directionRotation, normalizeRotation, orbitDirection, type OrbitTexture } from "./tree-orbit.ts";
+import { DIRECTIONS } from "./types.ts";
+
+test("orbit directions wrap and follow N/E/S/O without exchanging photos", () => {
+  for (const d of DIRECTIONS) {
+    assert.equal(orbitDirection(directionRotation(d)),d);
+    assert.equal(orbitDirection(directionRotation(d)+720),d);
+    assert.equal(orbitDirection(directionRotation(d)-720),d);
+  }
+  assert.equal(orbitDirection(-44),"N");assert.equal(orbitDirection(-46),"E");
+  assert.equal(normalizeRotation(-361),359);
+});
+
+test("orbit crop removes background including concave notches and never mutates input", () => {
+  const pixels=new Uint8ClampedArray(8*8*4).fill(255),before=pixels.slice();
+  const crop=cropTrunkPixels(pixels,8,8,[{x:.25,y:.25},{x:.75,y:.25},{x:.75,y:.5},{x:.5,y:.5},{x:.5,y:.75},{x:.25,y:.75}]);
+  assert.equal(crop.width,4);assert.equal(crop.height,4);
+  assert.equal(crop.pixels[3],255);assert.equal(crop.pixels[(3*4+3)*4+3],0);
+  assert.equal(Array.from(crop.pixels).filter((v,i)=>i%4===3&&v===255).length,12);
+  assert.deepEqual(pixels,before);
+  assert.throws(()=>cropTrunkPixels(pixels,8,8,[]),/tres puntos/);
+});
+
+test("orbit is read-only, preserves missing sector, changes orientation/zoom/overlay without rebuilding", async () => {
+  const entries={N:{src:"n",review:summaryReview(10)},E:{src:"",review:null},S:{src:"s",review:summaryReview(20)},W:{src:"w",review:summaryReview(30)}};
+  const prepared:string[]=[],opened:string[]=[],released:string[]=[];
+  const oldRevoke=URL.revokeObjectURL;URL.revokeObjectURL=url=>released.push(url);
+  const prepare=async(entry:{src:string})=>{prepared.push(entry.src);if(!entry.src)throw new Error("Falta la foto");return {photo:`blob:${entry.src}`,overlay:`blob:mask-${entry.src}`,fingerprint:"same-photo",warning:""};};
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  const click=async(label:string)=>{const b=host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);assert.ok(b,label);await act(async()=>b.click());};
+  try {
+    await act(async()=>root.render(createElement(TreeOrbit,{entries,marked:true,onOpenPhoto:d=>opened.push(d),prepare})));
+    assert.deepEqual(prepared,["n","","s","w"]);assert.equal(host.querySelectorAll(".tree-orbit-strip").length,64);
+    assert.match(host.textContent!,/fotografías repetidas/);
+    for(const el of host.querySelectorAll<HTMLElement>('[data-orientation="E"]'))assert.equal(el.style.backgroundImage,"none");
+    await click("Ver Este en 360");assert.match(host.querySelector('[role="status"]')!.textContent!,/Este · sector sin recorte/);
+    await click("Ver Oeste en 360");
+    await act(async()=>Array.from(host.querySelectorAll("button")).find(b=>b.textContent==="Abrir foto de oeste")!.click());
+    assert.deepEqual(opened,["W"]);
+    const stage=host.querySelector<HTMLElement>(".tree-orbit-stage")!;
+    await act(async()=>stage.dispatchEvent(new KeyboardEvent("keydown",{key:"Home",bubbles:true})));
+    await act(async()=>stage.dispatchEvent(new KeyboardEvent("keydown",{key:"+",bubbles:true})));
+    assert.equal(host.querySelector<HTMLInputElement>('input[type="range"]')!.value,"110");
+    await act(async()=>root.render(createElement(TreeOrbit,{entries,marked:false,onOpenPhoto:d=>opened.push(d),prepare})));
+    assert.equal(prepared.length,4);
+    for(const el of host.querySelectorAll<HTMLElement>('[data-orientation="N"]'))assert.doesNotMatch(el.style.backgroundImage,/mask/);
+  } finally {await act(async()=>root.unmount());host.remove();URL.revokeObjectURL=oldRevoke;}
+  assert.deepEqual(released.sort(),["blob:n","blob:s","blob:w","blob:mask-n","blob:mask-s","blob:mask-w"].sort());
+});
+
+test("leaving orbit cancels preparation and releases a late result without starting other views", async () => {
+  const entries={N:{src:"n",review:summaryReview(10)},E:{src:"e",review:null},S:{src:"s",review:null},W:{src:"w",review:null}};
+  let resolve!:(texture:OrbitTexture)=>void,signal:AbortSignal|undefined,calls=0;
+  const prepare=async(_entry:unknown,s:AbortSignal)=>{signal=s;calls++;return new Promise<OrbitTexture>(r=>{resolve=r;});};
+  const released:string[]=[],oldRevoke=URL.revokeObjectURL;URL.revokeObjectURL=url=>released.push(url);
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  try {
+    await act(async()=>root.render(createElement(TreeOrbit,{entries,marked:true,onOpenPhoto:()=>{},prepare})));
+    await act(async()=>root.unmount());assert.equal(signal?.aborted,true);
+    await act(async()=>{resolve({photo:"blob:late",overlay:"blob:late-mask",fingerprint:"",warning:""});});
+    assert.equal(calls,1);assert.deepEqual(released,["blob:late","blob:late-mask"]);
+  } finally {host.remove();URL.revokeObjectURL=oldRevoke;}
+});
 
 test("lichen-only analysis does not require bark and never calls unmatched pixels bark", async () => {
   const result = await classifyTrunkColors(new Uint8ClampedArray([80,170,80,255, 120,50,20,255]),2,1,

@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.component-tests.json",
   "compilerOptions": { "outDir": "/tmp/lichendr-guided-results-tests" },
-  "include": ["src/modules/four-view/guided-results.test.tsx", "src/modules/four-view/guided.component.test.tsx"]
+  "include": ["src/modules/four-view/guided-results.test.tsx", "src/modules/four-view/guided.component.test.tsx", "src/modules/four-view/accepted-colors.test.tsx", "src/modules/region-suggestions/trunk-colors.test.ts"]
 }

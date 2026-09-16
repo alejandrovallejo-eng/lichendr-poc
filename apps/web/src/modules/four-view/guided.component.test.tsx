@@ -200,8 +200,13 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     assert.equal(button("Analizar selección").disabled,true);
     for(let i=0;i<100 && host.textContent!.includes("Preparando selección");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
     await point(200,150);assert.equal(button("Analizar selección").disabled,true);
-    for(let i=0;i<160 && button("Añadir a Liquen A").disabled;i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
-    await click("Añadir a Liquen A");assert.equal(button("Analizar selección").disabled,false);
+    for(let i=0;i<160 && button("Aceptar este tono").disabled;i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+    assert.ok(host.querySelector('[aria-label="Punto del color elegido"]'));
+    await click("Ver foto sin marcas");
+    assert.equal(host.querySelector('[aria-label="Punto del color elegido"]'),null);
+    await click("Volver a la selección");
+    assert.ok(host.querySelector('[aria-label="Punto del color elegido"]'));
+    await click("Aceptar este tono");assert.equal(button("Analizar selección").disabled,false);
     await click("Analizar selección");
     for(let i=0;i<80 && !host.textContent!.includes(aiUnavailable?"Worker unavailable":"Revisa y guarda");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
     if(aiUnavailable){assert.match(host.textContent!,/Sin revisión de IA/);await click("Revisar sin IA");}

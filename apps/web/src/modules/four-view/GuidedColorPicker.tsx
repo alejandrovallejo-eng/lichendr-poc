@@ -8,6 +8,30 @@ import { rasterizeTrunk, type TrunkPoint } from "../region-suggestions/trunk-out
 type Pixels = { width: number; height: number; rgba: Uint8ClampedArray };
 type Proposal = Awaited<ReturnType<typeof proposeColorAddition>>;
 const detail = (e: unknown) => e instanceof Error ? e.message : "No se pudo preparar el tono.";
+export const PROPOSAL_RGB = [255, 0, 212] as const;
+const rgb = (sample: ColorSample) => `rgb(${sample.rgb.join(",")})`;
+
+// Display only: the magenta mask is NOT the sampled colour or a class label.
+// A dark edge remains visible on pale lichen, without changing any mask pixels.
+export function proposalDisplayPixels(mask: Uint8Array, width: number, height: number) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    const edge = i % width === 0 || i % width === width - 1 || i < width || i >= width * (height - 1)
+      || !mask[i - 1] || !mask[i + 1] || !mask[i - width] || !mask[i + width];
+    data.set(edge ? [71, 0, 61, 245] : [...PROPOSAL_RGB, 185], i * 4);
+  }
+  return data;
+}
+
+export function GuidedToneMarker({ sample, width, height }: { sample: ColorSample; width: number; height: number }) {
+  return <g aria-label="Punto del color elegido" pointerEvents="none" transform={`translate(${sample.x * width} ${sample.y * height})`}>
+    <circle r="14" fill="none" stroke="white" strokeWidth="4" />
+    <circle r="12" fill="none" stroke="#790064" strokeWidth="3" />
+    <circle r="7" fill={rgb(sample)} stroke="white" strokeWidth="2" />
+    <path d="M-21 0h5 M16 0h5 M0-21v5 M0 16v5" stroke="#790064" strokeWidth="3" />
+  </g>;
+}
 
 // A proposal is ephemeral. Only explicit acceptance is written to the existing
 // guided review. Group identity is independent of the sampled RGB.
@@ -52,7 +76,7 @@ export function useGuidedColorPicker(pixels: Pixels | null, outline: TrunkPoint[
     if (pending && removing) {
       if (!proposal) return;
       const seed = Math.floor(point.y * pixels.height) * pixels.width + Math.floor(point.x * pixels.width);
-      if (!proposal.mask[seed]) { setNotice("Toca una zona blanca de la propuesta, no la selección aceptada."); return; }
+      if (!proposal.mask[seed]) { setNotice("Toca una zona fucsia de la propuesta, no la selección aceptada."); return; }
       if ((pending.excluded?.length ?? 0) >= 64) { setError("Esta propuesta ya tiene 64 exclusiones. Descártala y elige un tono más preciso."); return; }
       setProposal(null); setPending({ ...pending, excluded: [...pending.excluded ?? [], seed] }); return;
     }
@@ -94,10 +118,11 @@ export function useGuidedColorPicker(pixels: Pixels | null, outline: TrunkPoint[
     canUndo: working.samples.length > working.confirmed!.legacyCount, legacyCount: working.confirmed!.legacyCount };
 }
 
-export function GuidedColorControls({ picker: p, config }: {
-  picker: ReturnType<typeof useGuidedColorPicker>; config: ColorConfig;
+export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
+  picker: ReturnType<typeof useGuidedColorPicker>; config: ColorConfig; onFocusPhoto?: () => void;
 }) {
   const group = p.groups.find(g => g.label === p.label)!;
+  const tones = config.samples.filter(s => s.label === p.label);
   return <>
     <label style={{ fontSize: 13 }}>Estoy marcando
       <select aria-label="Liquen activo" value={p.label} disabled={!!p.pending} onChange={e => p.setTarget(Number(e.target.value) as ColorClass)}
@@ -105,14 +130,20 @@ export function GuidedColorControls({ picker: p, config }: {
         {p.groups.map(g => <option key={g.id} value={g.label}>{g.name}</option>)}
       </select>
     </label>
-    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-      {config.samples.filter(s => s.label === p.label).map((s, i) => <span key={i} title="Tono aceptado" aria-label={`Tono aceptado ${i + 1}`}
-        style={{ width: 20, height: 20, borderRadius: "50%", background: `rgb(${s.rgb.join(",")})`, border: "1px solid #69796d" }} />)}
-      <span style={{ fontSize: 12 }}>{config.samples.filter(s => s.label === p.label).length} tonos</span>
-      <span style={{ marginLeft: "auto", width: 16, height: 16, borderRadius: 3, background: `rgb(${OVERLAY_RGB[p.label - 1].join(",")})` }} title="Color de la selección aceptada" />
+    <div aria-label={`Tonos aceptados de ${group.name}`} style={{ border: "1px solid #d9e4dd", borderRadius: 10, padding: 10 }}>
+      <p style={{ fontSize: 12, marginBottom: 6 }}><strong>{tones.length} {tones.length === 1 ? "tono aceptado" : "tonos aceptados"}</strong> · {group.name}</p>
+      <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap", maxHeight: 76, overflowY: "auto" }}>
+        {tones.map((s, i) => <span key={i} title={`Tono ${i + 1}: RGB ${s.rgb.join(", ")}`} aria-label={`Tono aceptado ${i + 1}`}
+          style={{ display: "inline-flex", gap: 3, alignItems: "center", fontSize: 11 }}>
+          <span style={{ width: 26, height: 26, borderRadius: 6, background: rgb(s), border: "1px solid #69796d" }} />{i + 1} ✓
+        </span>)}
+        {!tones.length ? <span style={{ fontSize: 12 }}>Aún no has aceptado ningún color.</span> : null}
+      </div>
     </div>
     {!p.pending ? <>
-      <p style={{ fontSize: 13 }}>Toca un tono del liquen en la foto. No selecciones colores de corteza.</p>
+      <p role="status" style={{ fontSize: 13 }}>{tones.length ? `Los tonos aceptados forman una sola selección: ${group.name}. Toca otro tono de ese mismo liquen para ampliarla.` : `Toca en la foto el primer color de ${group.name}. Verás las zonas parecidas antes de aceptarlas.`}</p>
+      <p style={{ fontSize: 11 }}>No selecciones colores de corteza.</p>
+      <button className="g-primary" disabled={!p.accepted} onClick={onFocusPhoto} style={{ fontSize: 13 }}>{tones.length ? `+ Otro tono de ${group.name}` : `Elegir color de ${group.name}`}</button>
       <div style={{ display: "flex", gap: 6 }}><button disabled={p.groups.length >= 8 || !p.accepted} onClick={p.addGroup} style={{ flex: 1, fontSize: 13 }}>+ Otro liquen</button>
         <button disabled={!p.canUndo || !p.accepted} onClick={p.undo} style={{ fontSize: 13 }}>Deshacer añadido</button></div>
       <details><summary style={{ cursor: "pointer", fontSize: 13 }}>Nombre / identificación</summary>
@@ -125,21 +156,27 @@ export function GuidedColorControls({ picker: p, config }: {
       </details>
       {p.legacyCount ? <p style={{ fontSize: 11 }}>Selección anterior conservada. Los tonos nuevos no la reemplazan.</p> : null}
     </> : <>
-      <p style={{ fontSize: 13 }}>Blanco = propuesta. Color = aceptado.</p>
-      <label style={{ fontSize: 13 }}>Similitud de este tono
+      <div aria-label="Color capturado" style={{ display: "flex", gap: 10, alignItems: "center", padding: 10, border: "2px solid #b50096", borderRadius: 10, background: "#fff6fd" }}>
+        <span role="img" aria-label={`Color elegido: RGB ${p.pending.rgb.join(", ")}`} style={{ width: 42, height: 42, flexShrink: 0, borderRadius: 8, background: rgb(p.pending), border: "1px solid #526057" }} />
+        <div style={{ fontSize: 12 }}><strong>Color capturado ✓</strong><br />Tono {tones.length + 1} para {group.name}<br /><span>Aún no está aceptado.</span></div>
+      </div>
+      <p role="status" style={{ fontSize: 13 }}>{p.proposal && p.accepted
+        ? `En fucsia: ${(100 * p.proposal.added / Math.max(1, p.accepted.total)).toFixed(1)} % nuevo del tronco para ${group.name}.`
+        : `Color capturado. Buscando zonas de tonos parecidos para ${group.name}…`}</p>
+      <p style={{ fontSize: 11 }}>El fucsia solo destaca la propuesta; no es el color del liquen. Nada cambia hasta que aceptes.</p>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button className="g-primary" disabled={!p.proposal?.added} onClick={p.accept} style={{ flex: 1, fontSize: 13 }}>Aceptar este tono</button>
+        <button onClick={p.discard} style={{ fontSize: 13 }}>Descartar</button>
+      </div>
+      <label style={{ fontSize: 13 }}>Gama de tonos parecidos
         <input aria-label="Variación de color" style={{ width: "100%" }} type="range" min="3" max="35" value={p.tolerance}
           onChange={e => p.setSimilarity(Number(e.target.value))} />
         <span style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}><span>Más preciso</span><span>Más amplio</span></span>
       </label>
-      <p role="status" style={{ fontSize: 12 }}>{p.proposal && p.accepted
-        ? `Añadiría ${(100 * p.proposal.added / Math.max(1, p.accepted.total)).toFixed(1)} % del tronco.`
-        : "Buscando tonos similares…"}</p>
       {p.proposal?.conflicts ? <p style={{ fontSize: 12 }}>Hay coincidencias con otro liquen. Se conserva lo ya aceptado; esas zonas no se añadirán.</p> : null}
       {p.proposal && !p.proposal.added ? <p style={{ fontSize: 12 }}>No hay áreas nuevas. Ajusta la similitud o descarta este tono.</p> : null}
-      <div style={{ display: "flex", gap: 6 }}><button aria-pressed={p.removing} disabled={!p.proposal?.added} onClick={() => p.setRemoving(!p.removing)} style={{ flex: 1, fontSize: 13 }}>{p.removing ? "Quitar zonas: activo" : "Quitar zona"}</button>
-        <button onClick={p.discard} style={{ fontSize: 13 }}>Descartar</button></div>
-      {p.removing ? <p style={{ fontSize: 11 }}>Toca una zona blanca para excluirla de esta propuesta.</p> : null}
-      <button className="g-primary" disabled={!p.proposal?.added} onClick={p.accept}>Añadir a {group.name}</button>
+      <button aria-pressed={p.removing} disabled={!p.proposal?.added} onClick={() => p.setRemoving(!p.removing)} style={{ fontSize: 13 }}>{p.removing ? "Quitar zonas: activo" : "Quitar zona"}</button>
+      {p.removing ? <p style={{ fontSize: 11 }}>Toca una zona fucsia para excluirla de esta propuesta.</p> : null}
     </>}
     {!p.accepted ? <p role="status" style={{ fontSize: 12 }}>Preparando selección…</p> : null}
     {p.error || p.notice ? <p role={p.error ? "alert" : "status"} style={{ fontSize: 12, color: p.error ? "#a0331e" : "inherit" }}>{p.error || p.notice}</p> : null}

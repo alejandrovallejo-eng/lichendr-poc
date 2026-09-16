@@ -9,7 +9,7 @@ import { classifyTrunkColors, colorWorkingSize, initialColorConfig, OVERLAY_RGB,
 import { trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { orderedCloudWriter, reviewFingerprint, type CloudReview } from "./guided-cloud";
 import { TreeSummary } from "./TreeSummary";
-import { GuidedColorControls, GuidedGroupCoverage, useGuidedColorPicker } from "./GuidedColorPicker";
+import { GuidedColorControls, GuidedGroupCoverage, GuidedToneMarker, proposalDisplayPixels, useGuidedColorPicker } from "./GuidedColorPicker";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
 const STEPS = ["Foto", "Tronco", "Colores", "Análisis", "Guardar"];
@@ -38,6 +38,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const [overlay, setOverlay] = useState("");
   const [proposalOverlay, setProposalOverlay] = useState("");
   const [showOverlay, setShowOverlay] = useState(true);
+  const [compareOriginal, setCompareOriginal] = useState(false);
   const [busy, setBusy] = useState("Recuperando esta captura…");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState<Partial<Record<Direction, boolean>>>({});
@@ -54,6 +55,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const drag = useRef<number | null>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const screen = useRef<HTMLElement>(null);
+  const photo = useRef<SVGSVGElement>(null);
   const cloudWriter = useRef<((value: GuidedReview) => Promise<CloudReview>) | null>(null);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCloud = useRef("");
@@ -193,7 +195,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
     const ctx = canvas.getContext("2d"); if (!ctx) return;
     const data = ctx.createImageData(pixels.width, pixels.height);
-    picker.proposal.mask.forEach((code, i) => { if (code) data.data.set([255, 255, 255, 180], i * 4); });
+    data.data.set(proposalDisplayPixels(picker.proposal.mask, pixels.width, pixels.height));
     ctx.putImageData(data, 0, 0); setProposalOverlay(canvas.toDataURL());
   }, [picker.proposal, pixels]);
   const openView = (d: Direction) => {
@@ -241,6 +243,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       if (review.outline.length >= 64) { setError("Ya hay 64 puntos. Deshaz uno antes de añadir otro."); return; }
       edit([...review.outline, point], initialColorConfig());
     } else if (step === 2) {
+      setCompareOriginal(false); setShowOverlay(true);
       picker.pick(point);
     }
   };
@@ -318,7 +321,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
               ctx.drawImage(image, 0, 0, size.width, size.height); setPixels({ ...size, rgba: ctx.getImageData(0, 0, size.width, size.height).data });
             } catch (e) { setError(message(e)); }
           }} />
-          <svg role="group" aria-label={`Fotografía de ${name}: ${step === 1 ? "delimitar tronco" : step === 2 ? "elegir colores de liquen" : "vista previa"}`} tabIndex={0} viewBox={`0 0 ${photoWidth} ${photoHeight}`} style={{ width: "100%", height: "100%", touchAction: "none", cursor: step === 1 || step === 2 ? "crosshair" : "default" }}
+          <svg ref={photo} role="group" aria-label={`Fotografía de ${name}: ${step === 1 ? "delimitar tronco" : step === 2 ? "elegir colores de liquen" : "vista previa"}`} tabIndex={0} viewBox={`0 0 ${photoWidth} ${photoHeight}`} style={{ width: "100%", height: "100%", touchAction: "none", cursor: step === 1 || step === 2 ? "crosshair" : "default" }}
             onPointerDown={event => {
               if (busy || (step !== 1 && step !== 2)) return;
               const p = pointFromEvent(event); if (!p) return; setKeyboard(false); setCursor(p);
@@ -337,13 +340,22 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
               if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(cursor); }
             }}>
             <image href={src} width={photoWidth} height={photoHeight} />
-            {showOverlay && overlay && step >= 2 ? <image href={overlay} width={photoWidth} height={photoHeight} /> : null}
-            {step === 2 && proposalOverlay ? <image href={proposalOverlay} width={photoWidth} height={photoHeight} /> : null}
+            {showOverlay && overlay && step >= 2 && !(step === 2 && compareOriginal) ? <image href={overlay} width={photoWidth} height={photoHeight} opacity={step === 2 && picker.pending ? .3 : 1} /> : null}
+            {step === 2 && !compareOriginal && proposalOverlay ? <image aria-label="Zonas propuestas en fucsia" href={proposalOverlay} width={photoWidth} height={photoHeight} /> : null}
             {review.outline.length ? <polygon points={review.outline.map(p => `${p.x*photoWidth},${p.y*photoHeight}`).join(" ")} fill={step === 1 ? "#009cda22" : "none"} stroke="#00b8ff" strokeWidth="2" vectorEffect="non-scaling-stroke" /> : null}
             {step === 1 ? review.outline.map((p,i) => <circle key={i} cx={p.x*photoWidth} cy={p.y*photoHeight} r="6" fill="#00b8ff" stroke="white" strokeWidth="2" />) : null}
-            {step >= 2 ? review.config.samples.map((s,i) => <circle key={i} cx={s.x*photoWidth} cy={s.y*photoHeight} r="7" fill={`rgb(${s.rgb.join(",")})`} stroke="#00ffff" strokeWidth="3" />) : null}
+            {step >= 2 && !(step === 2 && compareOriginal) ? review.config.samples.map((s,i) => <circle key={i} cx={s.x*photoWidth} cy={s.y*photoHeight} r="7" fill={`rgb(${s.rgb.join(",")})`} stroke="#00ffff" strokeWidth="3" />) : null}
+            {step === 2 && picker.pending && !compareOriginal ? <GuidedToneMarker sample={picker.pending} width={photoWidth} height={photoHeight} /> : null}
             {keyboard ? <circle cx={cursor.x*photoWidth} cy={cursor.y*photoHeight} r="10" fill="none" stroke="yellow" strokeWidth="2" /> : null}
           </svg>
+          {step === 2 ? <>
+            <button aria-pressed={compareOriginal} onClick={() => setCompareOriginal(v => !v)} style={{ position: "absolute", left: 12, top: 12, fontSize: 12, boxShadow: "0 1px 6px #0003" }}>{compareOriginal ? "Volver a la selección" : "Ver foto sin marcas"}</button>
+            <div role="status" style={{ position: "absolute", bottom: 12, left: 12, maxWidth: "calc(100% - 24px)", padding: "9px 12px", borderRadius: 10, background: "#173126ee", color: "white", fontSize: 13, pointerEvents: "none" }}>
+              {compareOriginal ? "Foto sin marcas · vuelve a la selección para revisar las zonas." : picker.pending
+                ? <><strong>{picker.proposal ? "Fucsia = zonas nuevas propuestas" : "Color capturado · buscando coincidencias…"}</strong><br />{picker.removing ? "Toca una zona fucsia para quitarla." : "Revisa la foto y pulsa «Aceptar este tono»."}</>
+                : <>Toca {review.config.samples.some(s => s.label === picker.label) ? "otro tono" : "el primer color"} de <strong>{picker.groups.find(g => g.label === picker.label)?.name}</strong>. Verás aquí las zonas parecidas.</>}
+            </div>
+          </> : null}
           {step === 2 ? <svg aria-label="Lupa del gotero" width="100" height="100" viewBox={`${cursor.x * photoWidth - 18} ${cursor.y * photoHeight - 18} 36 36`}
             style={{ position: "absolute", right: 12, top: 12, border: "2px solid white", borderRadius: 12, background: "#183d2d", pointerEvents: "none", boxShadow: "0 2px 8px #0006" }}>
             <image href={src} width={photoWidth} height={photoHeight} />
@@ -351,11 +363,11 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
           </svg> : null}
         </> : <div style={{ padding: 28, textAlign: "center" }}>{busy || "Sube una fotografía para comenzar"}</div>}
       </div>
-      <aside className="g-tools" aria-label="Herramientas del paso actual">
+      <aside className="g-tools" aria-label="Herramientas del paso actual" style={step === 2 ? { gap: 10 } : undefined}>
         <h2 style={{ fontSize: 19, margin: 0 }}>{["Sube la foto", "Delimita el tronco", "Toca colores de liquen", busy ? "Analizando tu selección" : "Revisar estimación", "Revisa y guarda"][step]}</h2>
         {step === 0 ? <><p>Una fotografía por orientación. Empezamos con {name.toLowerCase()}.</p><label className="g-upload">{imageId ? "Reemplazar fotografía" : "Elegir fotografía"}<input aria-label={`Subir foto de ${name}`} type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" className="g-hidden" disabled={!!busy || !session || session.completed} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file); }} /></label>{imageId ? <p style={{ fontSize: 13 }}>Original guardado ✓</p> : null}{saved[direction] ? <p>Esta vista ya tiene una revisión guardada.</p> : null}</> : null}
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
-        {step === 2 ? <GuidedColorControls picker={picker} config={review.config} /> : null}
+        {step === 2 ? <GuidedColorControls picker={picker} config={review.config} onFocusPhoto={() => { setCompareOriginal(false); setShowOverlay(true); photo.current?.focus(); }} /> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
         {step >= 3 && a ? <GuidedGroupCoverage config={review.config} counts={a.counts} total={a.total} /> : null}
         {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. {editingSummary || DIRECTIONS.every(d => d === direction || saved[d]) ? "Después verás el análisis del árbol con sus cuatro vistas." : "Después se abre la siguiente orientación."}</p> : null}

@@ -5,7 +5,7 @@ import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { acceptColorAddition, classifyTrunkColors, confirmedColorConfig, countColorLabels, initialColorConfig,
   parseColorConfig, proposeColorAddition, type ColorConfig, type ColorSample } from "../region-suggestions/trunk-colors.ts";
-import { GuidedColorControls, useGuidedColorPicker } from "./GuidedColorPicker.tsx";
+import { GuidedColorControls, GuidedToneMarker, proposalDisplayPixels, useGuidedColorPicker } from "./GuidedColorPicker.tsx";
 import { parseGuidedReview, analysisRecord } from "./guided-flow.ts";
 
 const outline = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
@@ -113,15 +113,52 @@ test("picker requires explicit acceptance, keeps A active, discards without writ
     await act(async()=>root.render(createElement(Harness)));await settle();
     await act(async()=>current().pick({x:.1,y:.5}));await settle();assert.equal(writes,0);
     await click("Descartar");assert.equal(writes,0);assert.equal(stored.samples.length,0);
-    await act(async()=>current().pick({x:.1,y:.5}));await settle();await click("Añadir a Liquen A");
+    await act(async()=>current().pick({x:.1,y:.5}));await settle();
+    assert.ok(host.querySelector('[aria-label="Color capturado"]'));
+    assert.match(host.textContent!, /Tono 1 para Liquen A/);
+    assert.match(host.textContent!, /En fucsia:/);
+    assert.match(host.textContent!, /Aún no está aceptado/);
+    await click("Aceptar este tono");
     const first=current().accepted!.labels.slice();assert.equal(stored.samples.length,1);assert.equal(current().label,3);
-    await act(async()=>current().pick({x:.45,y:.5}));await settle();await click("Añadir a Liquen A");
+    assert.match(host.textContent!, /Otro tono de Liquen A/);
+    await act(async()=>current().pick({x:.45,y:.5}));await settle();
+    assert.match(host.textContent!, /Tono 2 para Liquen A/);
+    assert.ok(host.querySelector('[aria-label="Tono aceptado 1"]'));
+    await click("Aceptar este tono");
     assert.equal(stored.samples.length,2);assert.equal(current().label,3);
     for(let i=0;i<first.length;i++)if(first[i]===3)assert.equal(current().accepted!.labels[i],3);
     await click("Deshacer añadido");assert.deepEqual(current().accepted!.labels,first);
     await click("+ Otro liquen");assert.equal(current().label,4);
+    await act(async()=>current().pick({x:.45,y:.5}));await settle();
+    assert.match(host.textContent!, /Tono 1 para Liquen B/);
+    assert.ok(host.querySelector('[aria-label="Color capturado"]'));
+    await click("Descartar");assert.equal(stored.samples.length,1);
     await act(async()=>current().rename("Liquen amarillo"));await settle();
     assert.equal(stored.confirmed!.groups[1].name,"Liquen amarillo");
     assert.equal(parseGuidedReview(JSON.stringify({version:1,outline,config:stored,analysis:null,savedAt:null}))!.config.confirmed!.groups[1].name,"Liquen amarillo");
+  }finally{await act(async()=>root.unmount());host.remove();}
+});
+
+test("proposal feedback is high contrast without changing the coverage mask", () => {
+  const mask=new Uint8Array([0,0,0,0,0, 0,1,1,1,0, 0,1,1,1,0, 0,1,1,1,0, 0,0,0,0,0]);
+  const before=mask.slice(), display=proposalDisplayPixels(mask,5,5);
+  assert.deepEqual(mask,before);
+  assert.deepEqual([...display.slice(12*4,13*4)],[255,0,212,185]);
+  assert.deepEqual([...display.slice(6*4,7*4)],[71,0,61,245]);
+  for(let i=0;i<mask.length;i++)assert.equal(display[i*4+3]>0,!!mask[i]);
+});
+
+test("captured tone and point are visible before matching completes", async () => {
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  const config=blank(), pending=tone(red);
+  const picker={groups:config.confirmed!.groups,label:3,pending,proposal:null,accepted:countColorLabels(new Uint8Array([1])),
+    tolerance:3,legacyCount:0,canUndo:false,error:"",notice:"",removing:false} as unknown as ReturnType<typeof useGuidedColorPicker>;
+  try{
+    await act(async()=>root.render(createElement("div",null,createElement(GuidedColorControls,{picker,config}),createElement("svg",null,createElement(GuidedToneMarker,{sample:pending,width:100,height:200})))));
+    assert.ok(host.querySelector('[aria-label="Color elegido: RGB 210, 30, 30"]'));
+    assert.match(host.textContent!,/Buscando zonas de tonos parecidos/);
+    assert.equal(host.querySelector('[aria-label="Punto del color elegido"]')?.getAttribute("transform"),"translate(10 100)");
+    const accept=Array.from(host.querySelectorAll("button")).find(b=>b.textContent==="Aceptar este tono");
+    assert.ok(accept?.disabled);
   }finally{await act(async()=>root.unmount());host.remove();}
 });

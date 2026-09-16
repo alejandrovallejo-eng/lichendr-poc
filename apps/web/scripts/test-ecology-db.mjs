@@ -27,6 +27,7 @@ try{
     insert into public.capture_series(id,tree_sample_id) values('${series}','${tree}');
     insert into public.capture_views values('${image}','${series}','N',true);`);
   await db.exec(await readFile(process.argv[2],'utf8'));
+  for(const migration of process.argv.slice(3))await db.exec(await readFile(migration,'utf8'));
   const outline=[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
   const source={outline,savedAt:'2026-09-16T12:00:00Z',analysis:{width:10,height:10}};
   await db.query(`insert into public.guided_capture_reviews values($1,$2,$3,'N',$4)`,[image,tree,owner,JSON.stringify(source)]);
@@ -39,6 +40,26 @@ try{
   const review={version:1,scale:'uncalibrated',sourceOutline:outline,quadrat:{x:2,y:2,width:4,height:4},width:10,height:10,config,counts:[0,8,0,8,0,0,0,0,0,0,0],total:16,savedAt:'2026-09-16T12:30:00Z'};
   const save=async(r,rev=0,ev=event,dir='N')=>(await db.query('select * from public.save_ecological_quadrat($1,$2,$3,$4,$5,$6)',[image,ev,tree,dir,JSON.stringify(r),rev])).rows[0];
   const first=await save(review);assert.equal(first.revision,1);assert.equal((await save(review)).revision,1);
+  if(process.argv[3]){
+    const rename=async(name,rev=1,e=event,m=a.id)=>(await db.query('select * from public.rename_jornada_morphospecies($1,$2,$3,$4)',[e,m,name,rev])).rows[0];
+    assert.equal(a.custom_name,null);assert.equal(a.name_revision,1);
+    const named=await rename('  Liquen gris  ');assert.equal(named.custom_name,'Liquen gris');assert.equal(named.id,a.id);assert.equal(named.ordinal,1);assert.equal(named.name_revision,2);
+    assert.equal((await rename('Liquen gris')).name_revision,2,'lost response retry is idempotent');
+    await assert.rejects(rename('Nombre obsoleto'),e=>e.code==='40001');
+    await assert.rejects(rename('x'.repeat(81),2),e=>e.code==='22023');await assert.rejects(rename('A\nB',2),e=>e.code==='22023');
+    await assert.rejects(rename('Nombre',null),e=>e.code==='22023');
+    await assert.rejects(rename('Nombre',2,event2),e=>e.code==='42501');
+    await assert.rejects(rename('Nombre',2,foreignEvent),e=>e.code==='42501');
+    await assert.rejects(db.query("update public.jornada_morphospecies set custom_name='No autorizado'"),e=>e.code==='42501');
+    await db.exec(`set request.jwt.claim.sub='${other}';`);await assert.rejects(rename('Nombre',2),e=>e.code==='42501');
+    await db.exec(`reset role;set role anon;`);await assert.rejects(rename('Nombre',2),e=>e.code==='42501');
+    await db.exec(`reset role;set role authenticated;set request.jwt.claim.sub='${owner}';`);
+    const reset=await rename('   ',2);assert.equal(reset.custom_name,null);assert.equal(reset.name_revision,3);
+    assert.equal((await rename(null,2)).name_revision,3);
+    assert.deepEqual((await db.query('select * from public.ecological_quadrat_reviews where image_id=$1',[image])).rows[0],first,'renaming never rewrites quadrat data or revision');
+    assert.equal((await create(event,id(24))).custom_name,null,'new entries still work after migration');
+    console.log('PASS catalogue names: default/custom/reset, validation, CAS, idempotency, owner/event/anon/direct-write isolation, unchanged measurements.');
+  }
   const changed={...review,savedAt:'2026-09-16T12:35:00Z'};assert.equal((await save(changed,1)).revision,2);
   await assert.rejects(save(review,1),e=>e.code==='40001');
   await assert.rejects(save(review,2,event2),e=>e.code==='42501');

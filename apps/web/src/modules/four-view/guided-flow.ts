@@ -31,7 +31,7 @@ export function parseGuidedReview(raw: string | null): GuidedReview | null {
   try {
     if (!raw || raw.length > 200_000) return null;
     const value = JSON.parse(raw), config = parseColorConfig(JSON.stringify(value.config));
-    if (value.version !== GUIDED_VERSION || !config || config.samples.length > 6 || config.samples.some(s => s.label === 2)
+    if (value.version !== GUIDED_VERSION || !config || (config.version === 1 && config.samples.length > 6) || config.samples.some(s => s.label === 2)
       || !Array.isArray(value.outline) || value.outline.length > 64
       || (value.outline.length >= 3 && trunkOutlineError(value.outline))) return null;
     if (value.outline.some((p: TrunkPoint) => !p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1)) return null;
@@ -39,10 +39,10 @@ export function parseGuidedReview(raw: string | null): GuidedReview | null {
     if (a && (trunkOutlineError(value.outline) || !config.samples.length
       || !Number.isSafeInteger(a.total) || a.total < 1 || !Number.isSafeInteger(a.lichen) || a.lichen < 0 || a.lichen > a.total
       || !Number.isSafeInteger(a.width) || !Number.isSafeInteger(a.height) || a.width < 1 || a.height < 1 || a.width > 1024 || a.height > 1024
-      || !Array.isArray(a.counts) || a.counts.length !== 6 || a.counts.some((n: number) => !Number.isSafeInteger(n) || n < 0)
+      || !Array.isArray(a.counts) || a.counts.length !== (config.version === 2 ? 11 : 6) || a.counts.some((n: number) => !Number.isSafeInteger(n) || n < 0)
       || a.total > a.width * a.height || a.counts[0] !== 0 || a.counts[2] !== 0
       || a.counts.reduce((x: number, y: number) => x + y, 0) !== a.total
-      || a.lichen !== a.counts[3] + a.counts[4] + a.counts[5]
+      || a.lichen !== a.counts.slice(3).reduce((x: number, y: number) => x + y, 0)
       || (a.ai && !Array.isArray(a.ai.suggestions)))) return null;
     return { version: 1, outline: value.outline, config, analysis: a ?? null,
       savedAt: a && typeof value.savedAt === "string" && Number.isFinite(Date.parse(value.savedAt)) ? value.savedAt : null };

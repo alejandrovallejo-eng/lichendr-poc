@@ -4,11 +4,12 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { DIRECTIONS, DIRECTION_LABELS, type Direction } from "./types";
 import type { GuidedContext, GuidedSession, GuidedServices } from "./guided-flow";
 import { analysisRecord, checkLichenSamples, guidedKey, parseGuidedReview, type GuidedReview } from "./guided-flow";
-import { classifyTrunkColors, colorWorkingSize, initialColorConfig, OVERLAY_RGB, rgbToLab, sampleColor,
-  type ColorConfig, type ColorClass, type ColorResult } from "../region-suggestions/trunk-colors";
-import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
+import { classifyTrunkColors, colorWorkingSize, initialColorConfig, OVERLAY_RGB,
+  type ColorConfig, type ColorResult } from "../region-suggestions/trunk-colors";
+import { trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { orderedCloudWriter, reviewFingerprint, type CloudReview } from "./guided-cloud";
 import { TreeSummary } from "./TreeSummary";
+import { GuidedColorControls, GuidedGroupCoverage, useGuidedColorPicker } from "./GuidedColorPicker";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
 const STEPS = ["Foto", "Tronco", "Colores", "Análisis", "Guardar"];
@@ -35,6 +36,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const [pixels, setPixels] = useState<Pixels | null>(null);
   const [result, setResult] = useState<ColorResult | null>(null);
   const [overlay, setOverlay] = useState("");
+  const [proposalOverlay, setProposalOverlay] = useState("");
   const [showOverlay, setShowOverlay] = useState(true);
   const [busy, setBusy] = useState("Recuperando esta captura…");
   const [error, setError] = useState("");
@@ -142,17 +144,6 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     }).catch(e => { if (!abort.signal.aborted) setError(message(e)); });
     return () => abort.abort();
   }, [pixels, review.analysis, review.outline, review.config, review.savedAt, result, direction]);
-  useEffect(() => {
-    if (!result || !pixels) { setOverlay(""); return; }
-    const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
-    const ctx = canvas.getContext("2d"); if (!ctx) return;
-    const data = ctx.createImageData(pixels.width, pixels.height);
-    result.labels.forEach((code, i) => {
-      if (code < 3) return;
-      const color = OVERLAY_RGB[code - 1]; data.data.set([...color, 125], i * 4);
-    });
-    ctx.putImageData(data, 0, 0); setOverlay(canvas.toDataURL());
-  }, [result, pixels]);
 
   const persist = (next: GuidedReview) => {
     if (!key) throw new Error("La fotografía debe terminar de guardarse primero.");
@@ -184,6 +175,27 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     if (draftTimer.current) clearTimeout(draftTimer.current);
     draftTimer.current = setTimeout(() => { void sync(next).catch(e => setError(message(e))); }, 750);
   };
+  const picker = useGuidedColorPicker(pixels, review.outline, review.config, step === 2 && !finished,
+    config => edit(review.outline, config));
+  const displayed = step === 2 ? picker.accepted : result;
+  useEffect(() => {
+    if (!displayed || !pixels) { setOverlay(""); return; }
+    const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
+    const ctx = canvas.getContext("2d"); if (!ctx) return;
+    const data = ctx.createImageData(pixels.width, pixels.height);
+    displayed.labels.forEach((code, i) => {
+      if (code >= 3) data.data.set([...OVERLAY_RGB[code - 1], 125], i * 4);
+    });
+    ctx.putImageData(data, 0, 0); setOverlay(canvas.toDataURL());
+  }, [displayed, pixels]);
+  useEffect(() => {
+    if (!picker.proposal || !pixels) { setProposalOverlay(""); return; }
+    const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
+    const ctx = canvas.getContext("2d"); if (!ctx) return;
+    const data = ctx.createImageData(pixels.width, pixels.height);
+    picker.proposal.mask.forEach((code, i) => { if (code) data.data.set([255, 255, 255, 180], i * 4); });
+    ctx.putImageData(data, 0, 0); setProposalOverlay(canvas.toDataURL());
+  }, [picker.proposal, pixels]);
   const openView = (d: Direction) => {
     if (d === direction && !finished) return;
     if (d === direction) setLoadAttempt(n => n + 1);
@@ -191,7 +203,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     setDirection(d); setStep(0); setFinished(false); setReview(fresh()); setResult(null); setPixels(null); setSrc(""); setError("");
   };
   const switchView = async (d: Direction) => {
-    if (lock.current || busy || (d === direction && !finished)) return;
+    if (lock.current || busy || picker.pending || (d === direction && !finished)) return;
     lock.current = true; setBusy("Guardando antes de cambiar de vista…");
     try {
       if (!finished && key && reviewFingerprint(latestReview.current) !== lastCloud.current) await sync(latestReview.current);
@@ -201,7 +213,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     finally { lock.current = false; setBusy(""); }
   };
   const showSummary = async () => {
-    if (lock.current || busy) return;
+    if (lock.current || busy || picker.pending) return;
     lock.current = true; setBusy("Guardando antes de abrir el análisis…");
     try {
       if (key && cloudWriter.current && reviewFingerprint(latestReview.current) !== lastCloud.current) await sync(latestReview.current);
@@ -229,14 +241,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       if (review.outline.length >= 64) { setError("Ya hay 64 puntos. Deshaz uno antes de añadir otro."); return; }
       edit([...review.outline, point], initialColorConfig());
     } else if (step === 2) {
-      if (review.config.samples.length >= 6) { setError("Seis ejemplos son suficientes para esta pasada. Puedes quitar uno tocando su color."); return; }
-      const roi = rasterizeTrunk(review.outline, pixels.width, pixels.height);
-      const sample = sampleColor(pixels.rgba, pixels.width, pixels.height, roi, point.x, point.y, 3);
-      if (!sample) { setError("Toca un liquen dentro del contorno del tronco."); return; }
-      const lab = rgbToLab(sample.rgb);
-      const closest = review.config.samples.map(s => ({ label: s.label, distance: Math.hypot(...rgbToLab(s.rgb).map((v, i) => v - lab[i])) })).sort((a, b) => a.distance - b.distance)[0];
-      sample.label = closest?.distance < 12 ? closest.label : Math.min(5, 3 + new Set(review.config.samples.map(s => s.label)).size) as ColorClass;
-      edit(review.outline, { ...review.config, samples: [...review.config.samples, sample] });
+      picker.pick(point);
     }
   };
   const analyse = async () => {
@@ -290,14 +295,15 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     return x >= 0 && y >= 0 && x < 1 && y < 1 ? { x, y } : null;
   };
   const leave = (event: React.MouseEvent<HTMLAnchorElement>) => {
-    if (busy || (!finished && reviewFingerprint(latestReview.current) !== lastCloud.current && review.outline.length && !window.confirm("Hay cambios pendientes de sincronizar. El borrador queda aquí. ¿Volver a la jornada?"))) event.preventDefault();
+    if (busy || (picker.pending && !window.confirm("Esta propuesta todavía no está aceptada. ¿Salir y descartarla?"))
+      || (!finished && reviewFingerprint(latestReview.current) !== lastCloud.current && review.outline.length && !window.confirm("Hay cambios pendientes de sincronizar. El borrador queda aquí. ¿Volver a la jornada?"))) event.preventDefault();
   };
 
   return <section ref={screen} aria-label="Captura paso a paso" className="guided-capture" style={{ position: "fixed", inset: 0, zIndex: 60, background: "#f4f7f5", color: "#172e25", display: "grid", gridTemplateRows: "auto auto minmax(0,1fr) auto", height: "100dvh" } as CSSProperties}>
     <style>{`.guided-capture *{box-sizing:border-box}.guided-capture button,.guided-capture .g-upload{min-height:44px;border:1px solid #cbd8d0;border-radius:10px;padding:8px 14px;background:white;color:#173d2d;font:inherit;cursor:pointer}.guided-capture button:disabled{opacity:.45;cursor:default}.guided-capture button:focus-visible,.guided-capture a:focus-visible,.guided-capture svg:focus-visible{outline:3px solid #e1b752;outline-offset:2px}.guided-capture .g-primary{background:#00674d;color:white;border-color:#00674d;font-weight:700}.guided-capture .g-main{display:grid;grid-template-columns:minmax(0,1fr) 290px;min-height:0;gap:16px;padding:16px}.guided-capture .g-tools{overflow:auto;min-height:0;padding:16px;border-radius:16px;background:white;display:flex;flex-direction:column;gap:14px}.guided-capture .g-photo{min-height:0;position:relative;background:#e6ece8;border-radius:16px;overflow:hidden;display:flex;align-items:center;justify-content:center}.guided-capture .g-steps{display:flex;justify-content:center;gap:6px;padding:8px}.guided-capture .g-steps span{padding:5px 12px;border-radius:20px;font-size:13px}.guided-capture p{margin:0}.guided-capture footer{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 20px;background:white;border-top:1px solid #d6e0d9}.guided-capture .g-context{max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.guided-capture .g-heading{font-size:21px;margin:0}.guided-capture .g-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}@media(max-width:700px){.guided-capture .g-main{grid-template-columns:1fr;grid-template-rows:minmax(120px,1fr) auto;padding:8px;gap:8px}.guided-capture .g-tools{max-height:210px;gap:8px;padding:12px}.guided-capture .g-steps span{padding:4px 6px;font-size:11px}.guided-capture footer{padding:8px;font-size:13px}.guided-capture .g-context{max-width:60vw}.guided-capture .g-heading{font-size:18px}}`}</style>
     <header style={{ padding: "12px 20px 4px", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
       <div><p className="g-context" title={contextLabel}>{contextLabel}</p><h1 className="g-heading" ref={title} tabIndex={-1}>{finished ? `Análisis del árbol${treeLabel ? ` · ${treeLabel}` : ""}` : `${name} · ${DIRECTIONS.indexOf(direction) + 1} de 4`}</h1></div>
-      <div style={{display:"flex",gap:12,alignItems:"center"}}>{!finished ? <button disabled={!!busy || !session} onClick={() => void showSummary()} style={{fontSize:13}}>Ver análisis del árbol</button> : null}<a href={backHref} onClick={leave} style={{ fontSize: 13 }}>Volver a la jornada</a></div>
+      <div style={{display:"flex",gap:12,alignItems:"center"}}>{!finished ? <button disabled={!!busy || !session || !!picker.pending} onClick={() => void showSummary()} style={{fontSize:13}}>Ver análisis del árbol</button> : null}<a href={backHref} onClick={leave} style={{ fontSize: 13 }}>Volver a la jornada</a></div>
     </header>
     {finished ? <div /> : <nav className="g-steps" aria-label="Pasos de esta fotografía">{STEPS.map((label, i) => <span key={label} aria-current={i === step ? "step" : undefined} style={{ background: i === step ? "#d1eadc" : "transparent", fontWeight: i === step ? 700 : 400 }}>{i + 1}. {label}</span>)}</nav>}
     {finished ? session ? <TreeSummary session={session} services={services} onEdit={d => void switchView(d)} /> : <main style={{padding:24}}><p role={error ? "alert" : "status"}>{error || busy}</p></main> : <main className="g-main">
@@ -315,12 +321,14 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
           <svg role="group" aria-label={`Fotografía de ${name}: ${step === 1 ? "delimitar tronco" : step === 2 ? "elegir colores de liquen" : "vista previa"}`} tabIndex={0} viewBox={`0 0 ${photoWidth} ${photoHeight}`} style={{ width: "100%", height: "100%", touchAction: "none", cursor: step === 1 || step === 2 ? "crosshair" : "default" }}
             onPointerDown={event => {
               if (busy || (step !== 1 && step !== 2)) return;
-              const p = pointFromEvent(event); if (!p) return; setKeyboard(false);
+              const p = pointFromEvent(event); if (!p) return; setKeyboard(false); setCursor(p);
               const found = step === 1 ? review.outline.findIndex(v => Math.hypot((p.x-v.x)*photoWidth,(p.y-v.y)*photoHeight) < 13) : -1;
               if (found >= 0) { drag.current = found; event.currentTarget.setPointerCapture(event.pointerId); } else pick(p);
             }} onPointerMove={event => {
+              const p = pointFromEvent(event);
+              if (p && step === 2 && !busy) setCursor(p);
               if (drag.current === null || busy || step !== 1) return;
-              const p = pointFromEvent(event); if (p) edit(review.outline.map((v, i) => i === drag.current ? p : v), initialColorConfig());
+              if (p) edit(review.outline.map((v, i) => i === drag.current ? p : v), initialColorConfig());
             }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}
             onKeyDown={event => {
               if (busy || (step !== 1 && step !== 2)) return;
@@ -329,20 +337,27 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
               if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(cursor); }
             }}>
             <image href={src} width={photoWidth} height={photoHeight} />
-            {showOverlay && overlay && step >= 3 ? <image href={overlay} width={photoWidth} height={photoHeight} /> : null}
+            {showOverlay && overlay && step >= 2 ? <image href={overlay} width={photoWidth} height={photoHeight} /> : null}
+            {step === 2 && proposalOverlay ? <image href={proposalOverlay} width={photoWidth} height={photoHeight} /> : null}
             {review.outline.length ? <polygon points={review.outline.map(p => `${p.x*photoWidth},${p.y*photoHeight}`).join(" ")} fill={step === 1 ? "#009cda22" : "none"} stroke="#00b8ff" strokeWidth="2" vectorEffect="non-scaling-stroke" /> : null}
             {step === 1 ? review.outline.map((p,i) => <circle key={i} cx={p.x*photoWidth} cy={p.y*photoHeight} r="6" fill="#00b8ff" stroke="white" strokeWidth="2" />) : null}
             {step >= 2 ? review.config.samples.map((s,i) => <circle key={i} cx={s.x*photoWidth} cy={s.y*photoHeight} r="7" fill={`rgb(${s.rgb.join(",")})`} stroke="#00ffff" strokeWidth="3" />) : null}
             {keyboard ? <circle cx={cursor.x*photoWidth} cy={cursor.y*photoHeight} r="10" fill="none" stroke="yellow" strokeWidth="2" /> : null}
           </svg>
+          {step === 2 ? <svg aria-label="Lupa del gotero" width="100" height="100" viewBox={`${cursor.x * photoWidth - 18} ${cursor.y * photoHeight - 18} 36 36`}
+            style={{ position: "absolute", right: 12, top: 12, border: "2px solid white", borderRadius: 12, background: "#183d2d", pointerEvents: "none", boxShadow: "0 2px 8px #0006" }}>
+            <image href={src} width={photoWidth} height={photoHeight} />
+            <path d={`M${cursor.x * photoWidth - 4} ${cursor.y * photoHeight}h8 M${cursor.x * photoWidth} ${cursor.y * photoHeight - 4}v8`} stroke="white" strokeWidth=".7" />
+          </svg> : null}
         </> : <div style={{ padding: 28, textAlign: "center" }}>{busy || "Sube una fotografía para comenzar"}</div>}
       </div>
       <aside className="g-tools" aria-label="Herramientas del paso actual">
         <h2 style={{ fontSize: 19, margin: 0 }}>{["Sube la foto", "Delimita el tronco", "Toca colores de liquen", busy ? "Analizando tu selección" : "Revisar estimación", "Revisa y guarda"][step]}</h2>
         {step === 0 ? <><p>Una fotografía por orientación. Empezamos con {name.toLowerCase()}.</p><label className="g-upload">{imageId ? "Reemplazar fotografía" : "Elegir fotografía"}<input aria-label={`Subir foto de ${name}`} type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" className="g-hidden" disabled={!!busy || !session || session.completed} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file); }} /></label>{imageId ? <p style={{ fontSize: 13 }}>Original guardado ✓</p> : null}{saved[direction] ? <p>Esta vista ya tiene una revisión guardada.</p> : null}</> : null}
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
-        {step === 2 ? <><p>Toca únicamente los líquenes: un ejemplo de cada color o iluminación. No selecciones colores de corteza.</p><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{review.config.samples.map((s,i) => <button key={i} aria-label={`Quitar color ${i+1}`} title={`Quitar color ${i+1}`} onClick={() => edit(review.outline,{...review.config,samples:review.config.samples.filter((_,n)=>n!==i)})} style={{ width: 44, padding: 4 }}><span style={{ display:"block",width:25,height:25,borderRadius:20,background:`rgb(${s.rgb.join(",")})`,border:"1px solid #777",margin:"auto" }} /></button>)}</div><p style={{ fontSize: 12 }}>{review.config.samples.length}/6 ejemplos · toca un color para quitarlo</p><label style={{ fontSize: 13 }}>Incluir colores similares<input aria-label="Variación de color" style={{ width: "100%" }} type="range" min="3" max="35" value={review.config.tolerance} onChange={e => edit(review.outline,{...review.config,tolerance:Number(e.target.value)})} /></label></> : null}
+        {step === 2 ? <GuidedColorControls picker={picker} config={review.config} /> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
+        {step >= 3 && a ? <GuidedGroupCoverage config={review.config} counts={a.counts} total={a.total} /> : null}
         {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. {editingSummary || DIRECTIONS.every(d => d === direction || saved[d]) ? "Después verás el análisis del árbol con sus cuatro vistas." : "Después se abre la siguiente orientación."}</p> : null}
         {cloudStatus ? <p role="status" style={{ fontSize: 12 }}>{cloudStatus}</p> : null}
         {recovery ? <button disabled={!!busy} onClick={() => { const draft = { ...recovery, savedAt: null }; persist(draft); setReview(draft); setResult(null); setRecovery(null); setSaved(s => ({ ...s, [direction]: false })); setCloudStatus("Borrador recuperado; pulsa Guardar para sincronizar"); }}>Recuperar borrador local distinto</button> : null}
@@ -358,10 +373,10 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       </aside>
     </main>}
     <footer>
-      {!finished ? <div style={{ display: "flex", gap: 6 }}>{DIRECTIONS.map(d=><button key={d} aria-label={`Abrir ${DIRECTION_LABELS[d]}`} aria-pressed={direction===d} disabled={!!busy} onClick={()=>switchView(d)} style={{ padding:"6px 10px",fontSize:13,background:direction===d?"#e0efe5":"white" }}>{d==="W"?"O":d}{saved[d]?" ✓":""}</button>)}</div> : <span style={{fontSize:13}}>Fotos y resultados agrupados en esta jornada.</span>}
+      {!finished ? <div style={{ display: "flex", gap: 6 }}>{DIRECTIONS.map(d=><button key={d} aria-label={`Abrir ${DIRECTION_LABELS[d]}`} aria-pressed={direction===d} disabled={!!busy || !!picker.pending} onClick={()=>switchView(d)} style={{ padding:"6px 10px",fontSize:13,background:direction===d?"#e0efe5":"white" }}>{d==="W"?"O":d}{saved[d]?" ✓":""}</button>)}</div> : <span style={{fontSize:13}}>Fotos y resultados agrupados en esta jornada.</span>}
       {!finished ? <div style={{ display:"flex",gap:8 }}>
-        {step > 0 ? <button disabled={!!busy} onClick={()=>{setStep(step===4?2:Math.max(0,step-1));setError("");}}>Atrás</button> : null}
-        <button className="g-primary" disabled={!!busy || !pixels || (step===2 && !review.config.samples.length) || (step>=3 && !a)} onClick={()=>{
+        {step > 0 ? <button disabled={!!busy || !!picker.pending} onClick={()=>{setStep(step===4?2:Math.max(0,step-1));setError("");}}>Atrás</button> : null}
+        <button className="g-primary" disabled={!!busy || !pixels || (step===2 && (!review.config.samples.length || !!picker.pending || !picker.accepted)) || (step>=3 && !a)} onClick={()=>{
           setError("");
           if(step===0) setStep(1);
           else if(step===1){const issue=trunkOutlineError(review.outline);if(issue)setError(issue);else setStep(2);}

@@ -197,7 +197,11 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     await click("Continuar");await click("Continuar");assert.match(host.textContent!,/Añade al menos tres puntos/);
     for(const [x,y] of [[40,30],[360,30],[360,270],[40,270]])await point(x,y);
     await click("Continuar");assert.match(host.textContent!,/No selecciones colores de corteza/);
-    assert.equal(button("Analizar selección").disabled,true);await point(200,150);assert.equal(button("Analizar selección").disabled,false);
+    assert.equal(button("Analizar selección").disabled,true);
+    for(let i=0;i<100 && host.textContent!.includes("Preparando selección");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+    await point(200,150);assert.equal(button("Analizar selección").disabled,true);
+    for(let i=0;i<160 && button("Añadir a Liquen A").disabled;i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+    await click("Añadir a Liquen A");assert.equal(button("Analizar selección").disabled,false);
     await click("Analizar selección");
     for(let i=0;i<80 && !host.textContent!.includes(aiUnavailable?"Worker unavailable":"Revisa y guarda");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
     if(aiUnavailable){assert.match(host.textContent!,/Sin revisión de IA/);await click("Revisar sin IA");}
@@ -317,6 +321,7 @@ test("saving the last missing direction opens all four views; summary edit/save 
   try {
     await act(async()=>root.render(createElement(GuidedCapture,{context:{projectId:"p",siteId:"s",eventId:"e",treeId:"t"},contextLabel:"Project / Day / Tree",backHref:"/jornada/e",services,checkSamples:async()=>{aiCalls++;return {context:{imageId:"n",treeSampleId:"sample",direction:"N"},suggestions:[{regionId:"sample-0",ranking:[{label:"lichen"}]}]} as SuggestionResponse;}})));
     await loadImage();await click("Continuar");await click("Continuar");
+    for(let i=0;i<160 && host.textContent!.includes("Preparando selección");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
     await click("Analizar selección");
     for(let i=0;i<80 && !host.textContent!.includes("Revisa y guarda");i++)await act(async()=>{await new Promise(r=>setTimeout(r,10));});
     assert.match(host.textContent!,/Revisa y guarda/);assert.equal(aiCalls,1);

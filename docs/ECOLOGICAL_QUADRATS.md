@@ -10,6 +10,11 @@ quadrat; matching and the denominator are restricted to its pixels.
 
 - A jornada owns a catalogue of stable UUID identities, named Morfoespecie A,
   B… AA. No confidence or certainty input. No taxonomic identification claim.
+- **Editar nombre** opens an optional name field (80 characters) with explicit
+  Save/Cancel, both in results and the editor catalogue. Blank restores A/B/C.
+  Names come from the current catalogue in every view, dropper and summary;
+  saved review names are snapshots, never identifiers. Renaming does not touch
+  accepted colours, coverage, review revisions or observed-morphospecies counts.
 - The catalogue can be toggled while sampling. Selecting an existing identity
   on another view does not copy colours, coordinates, masks or percentages.
 - Reference swatches come from saved reviews. New local tones are sampled from
@@ -32,6 +37,9 @@ check project ownership, jornada/site/sample/image/direction, latest active
 capture and the saved trunk outline/dimensions. Catalogue creation is serialized
 per jornada and accepts an idempotency UUID. Review saves use optimistic revisions
 and idempotent retry; stale tabs cannot overwrite current documents silently.
+Then apply `202609160003_morphospecies_names.sql` for nullable custom names and
+a separate name revision. Its rename RPC checks event ownership, locks one
+catalogue entry and uses CAS/idempotent retry; it grants no direct table writes.
 
 The editor saves only on explicit Save. Navigation warns about unsaved work;
 proposals never count as saved. A failed save leaves the mounted editor intact.
@@ -56,4 +64,5 @@ protocol remain separate future work.
 Run generated `ecology.test.js` with Node's test runner and the existing test
 dependencies. `scripts/test-ecology-db.mjs` runs the migration in isolated PGlite
 PostgreSQL and never connects to Supabase. Pass the migration path as its argument.
+Pass the names migration as a second argument to include renaming regressions.
 Keep the existing guided/results/360/accepted-colour regression suite green.

@@ -118,14 +118,15 @@ export function useGuidedColorPicker(pixels: Pixels | null, outline: TrunkPoint[
     canUndo: working.samples.length > working.confirmed!.legacyCount, legacyCount: working.confirmed!.legacyCount };
 }
 
-export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
+export function GuidedColorControls({ picker: p, config, onFocusPhoto, catalogue = false }: {
   picker: ReturnType<typeof useGuidedColorPicker>; config: ColorConfig; onFocusPhoto?: () => void;
+  catalogue?: boolean;
 }) {
   const group = p.groups.find(g => g.label === p.label)!;
   const tones = config.samples.filter(s => s.label === p.label);
   return <>
     <label style={{ fontSize: 13 }}>Estoy marcando
-      <select aria-label="Liquen activo" value={p.label} disabled={!!p.pending} onChange={e => p.setTarget(Number(e.target.value) as ColorClass)}
+      <select aria-label={catalogue ? "Morfoespecie activa" : "Liquen activo"} value={p.label} disabled={!!p.pending} onChange={e => p.setTarget(Number(e.target.value) as ColorClass)}
         style={{ display: "block", width: "100%", minHeight: 44, borderRadius: 8, border: "1px solid #b5cbbc", marginTop: 4, padding: 8, font: "inherit" }}>
         {p.groups.map(g => <option key={g.id} value={g.label}>{g.name}</option>)}
       </select>
@@ -144,16 +145,16 @@ export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
       <p role="status" style={{ fontSize: 13 }}>{tones.length ? `Los tonos aceptados forman una sola selección: ${group.name}. Toca otro tono de ese mismo liquen para ampliarla.` : `Toca en la foto el primer color de ${group.name}. Verás las zonas parecidas antes de aceptarlas.`}</p>
       <p style={{ fontSize: 11 }}>No selecciones colores de corteza.</p>
       <button className="g-primary" disabled={!p.accepted} onClick={onFocusPhoto} style={{ fontSize: 13 }}>{tones.length ? `+ Otro tono de ${group.name}` : `Elegir color de ${group.name}`}</button>
-      <div style={{ display: "flex", gap: 6 }}><button disabled={p.groups.length >= 8 || !p.accepted} onClick={p.addGroup} style={{ flex: 1, fontSize: 13 }}>+ Otro liquen</button>
+      <div style={{ display: "flex", gap: 6 }}>{!catalogue ? <button disabled={p.groups.length >= 8 || !p.accepted} onClick={p.addGroup} style={{ flex: 1, fontSize: 13 }}>+ Otro liquen</button> : null}
         <button disabled={!p.canUndo || !p.accepted} onClick={p.undo} style={{ fontSize: 13 }}>Deshacer añadido</button></div>
-      <details><summary style={{ cursor: "pointer", fontSize: 13 }}>Nombre / identificación</summary>
+      {!catalogue ? <details><summary style={{ cursor: "pointer", fontSize: 13 }}>Nombre / identificación</summary>
         <label style={{ fontSize: 12 }}>Nombre de este grupo
           <input key={group.id + group.name} aria-label="Nombre del liquen" defaultValue={group.name} maxLength={80}
             onBlur={e => { if (e.target.value.trim() !== group.name) p.rename(e.target.value); }}
             onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
             style={{ width: "100%", minHeight: 44, padding: 8 }} />
         </label><p style={{ fontSize: 11 }}>Nombre aportado por ti; no confirma una especie. Los grupos son propios de esta foto.</p>
-      </details>
+      </details> : null}
       {p.legacyCount ? <p style={{ fontSize: 11 }}>Selección anterior conservada. Los tonos nuevos no la reemplazan.</p> : null}
     </> : <>
       <div aria-label="Color capturado" style={{ display: "flex", gap: 10, alignItems: "center", padding: 10, border: "2px solid #b50096", borderRadius: 10, background: "#fff6fd" }}>
@@ -161,7 +162,7 @@ export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
         <div style={{ fontSize: 12, minWidth: 0 }}><strong>Color capturado ✓</strong><div title={`Tono ${tones.length + 1} para ${group.name}`} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Tono {tones.length + 1} para {group.name}</div><span>Aún no está aceptado.</span></div>
       </div>
       <p role="status" style={{ fontSize: 13 }}>{p.proposal && p.accepted
-        ? `En fucsia: ${(100 * p.proposal.added / Math.max(1, p.accepted.total)).toFixed(1)} % nuevo del tronco.`
+        ? `En fucsia: ${(100 * p.proposal.added / Math.max(1, p.accepted.total)).toFixed(1)} % nuevo del ${catalogue ? "cuadrante" : "tronco"}.`
         : "Color capturado. Buscando zonas de tonos parecidos…"}</p>
       <p style={{ fontSize: 11 }}>Fucsia = propuesta, no color real. Solo se añade al aceptar.</p>
       <div style={{ display: "flex", gap: 6 }}>

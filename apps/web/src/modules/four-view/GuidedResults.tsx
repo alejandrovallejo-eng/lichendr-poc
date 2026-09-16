@@ -4,6 +4,7 @@ import { useState } from "react";
 import { DIRECTIONS, DIRECTION_LABELS } from "./types";
 import { filterGuidedResults, guidedProgress, guidedResultHref, type GuidedTreeResult, type ResultFilters, type SavedViewResult } from "./guided-results";
 import { useGuidedResults } from "./use-guided-results";
+import { ecologyHref } from "./ecology";
 
 export function savedViewLabel(view: SavedViewResult) {
   if (view.state === "saved") return `${view.coverage!.toFixed(1)}%`;
@@ -69,6 +70,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
           <dt className="text-sm">{DIRECTION_LABELS[d]}</dt><dd className="text-lg font-semibold">{savedViewLabel(row.views[d])}</dd>
         </div>)}</dl>
         <div className="flex flex-wrap gap-3"><a className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }} href={guidedResultHref(row)}>Ver las 4 vistas y el 360°</a>
+          <a className="rounded border px-4 py-2" href={ecologyHref(row.event.id,row.sampleId)}>Análisis de diversidad</a>
           {!row.complete ? <a className="rounded border px-4 py-2" href={guidedResultHref(row, false)}>Continuar captura</a> : null}</div>
         {row.lastSavedAt ? <p className="mt-3 text-xs text-stone-600">Último guardado: {new Date(row.lastSavedAt).toLocaleString("es-DO")}</p> : null}
       </article>)}</div>}

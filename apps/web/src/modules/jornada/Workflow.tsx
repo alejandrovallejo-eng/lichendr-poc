@@ -258,6 +258,9 @@ export default function JornadaWorkflow({ eventId }: Props) {
         <Link href={withPreservedContext("/analysis", contextQuery)} className="inline-block rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }}>
           Ver resultados de esta jornada →
         </Link>
+        <Link href={`/analysis?mode=ecology&eventId=${encodeURIComponent(context.event.id)}`} className="ml-3 inline-block rounded border px-4 py-2 font-semibold">
+          Análisis de diversidad
+        </Link>
         <p className="text-xs">Las cuatro vistas cuentan como un árbol. Estos resultados son descriptivos; no clasifican la calidad del aire.</p>
       </section>
 

@@ -190,11 +190,12 @@ export async function handleRegionSuggestions(
     // backend "pending", head null) would let a zero-shot batch answer a request
     // served by a trained head, and connecting or changing a head would not
     // invalidate anything.
-    const declaredIdentity = await resolveWorkerIdentity(
-      deps.workerUrl,
-      deps.authHeaders,
-      fetchImpl,
-    );
+    let declaredIdentity: WorkerIdentity | null;
+    try {
+      declaredIdentity = await resolveWorkerIdentity(deps.workerUrl, deps.authHeaders, fetchImpl);
+    } catch {
+      return { status: 503, body: { error: "BioCLIP todavía no está listo. Tus selecciones están guardadas; reintenta en un momento." } };
+    }
     const cacheKey = declaredIdentity
       ? suggestionCacheKey({ ...identityBase, ...identityOf(declaredIdentity) })
       : null;

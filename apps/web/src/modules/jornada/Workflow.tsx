@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import PageHeader from "@/components/PageHeader";
+import { useGuidedResults } from "../four-view/use-guided-results";
+import { GuidedProgress } from "../four-view/GuidedResults";
 import { createTree, createTreeSample } from "@/modules/trees/client";
 import {
   fetchJornadaContext,
@@ -12,9 +14,7 @@ import {
 } from "@/modules/prepare-day/client";
 import {
   suggestTreeCode,
-  treeStatusLabel,
   withPreservedContext,
-  type TreeEvaluationStatus,
 } from "@/modules/prepare-day/logic";
 
 interface Props {
@@ -33,15 +33,6 @@ function formatLocalDate(iso: string) {
   }
 }
 
-const STATUS_COLORS: Record<TreeEvaluationStatus, { background: string; color: string; border: string }> = {
-  sin_muestreo: { background: "#F1F1F1", color: "#4A4A4A", border: "#DADADA" },
-  sin_fotografias: { background: "#FFF3D6", color: "#664D03", border: "#F0D078" },
-  fotografias_pendientes: { background: "#DDEBF7", color: "#1B4B7C", border: "#A9C7E2" },
-  listo_para_revisar: { background: "#E4F1D9", color: "#2C5C1A", border: "#B7D8A0" },
-  evaluacion_completada: { background: "#D1E7DD", color: "#0F5132", border: "#BADBCC" },
-  requiere_repetir: { background: "#F9DAD6", color: "#842029", border: "#F5C2C7" },
-};
-
 export default function JornadaWorkflow({ eventId }: Props) {
   const [context, setContext] = useState<JornadaContext | null>(null);
   const [treeRows, setTreeRows] = useState<JornadaTreeRow[]>([]);
@@ -49,6 +40,8 @@ export default function JornadaWorkflow({ eventId }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [resultsRevision, setResultsRevision] = useState(0);
+  const guided = useGuidedResults(eventId, resultsRevision);
 
   // Add-tree form state.
   const [showAddNewTree, setShowAddNewTree] = useState(false);
@@ -75,6 +68,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
       setContext(ctx);
       const rows = await fetchJornadaTreesWithStatus(ctx.site.id, ctx.event.id);
       setTreeRows(rows);
+      setResultsRevision(value => value + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cargar la jornada.");
     }
@@ -258,6 +252,18 @@ export default function JornadaWorkflow({ eventId }: Props) {
         </p>
       </section>
 
+      <section className="mb-6 space-y-3" aria-label="Resultados de esta jornada">
+        {guided.error ? <p role="alert">{guided.error} <button className="underline" onClick={guided.retry}>Reintentar lectura</button></p>
+          : guided.rows ? <GuidedProgress rows={guided.rows} /> : <p role="status">Consultando vistas guardadas…</p>}
+        <Link href={withPreservedContext("/analysis", contextQuery)} className="inline-block rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }}>
+          Ver resultados de esta jornada →
+        </Link>
+        <Link href={`/analysis?mode=ecology&eventId=${encodeURIComponent(context.event.id)}`} className="ml-3 inline-block rounded border px-4 py-2 font-semibold">
+          Análisis de diversidad
+        </Link>
+        <p className="text-xs">Las cuatro vistas cuentan como un árbol. Estos resultados son descriptivos; no clasifican la calidad del aire.</p>
+      </section>
+
       {error ? (
         <div
           role="alert"
@@ -303,7 +309,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
         <Link
           href="/preparar-jornada"
           className="px-4 py-2 rounded border text-sm"
-          style={{ color: "var(--ld-primary)", borderColor: "var(--ld-border)", background: "#fff" }}
+          style={{ color: "var(--ld-sidebar, #173D35)", borderColor: "var(--ld-border)", background: "#fff" }}
         >
           Cambiar de jornada
         </Link>
@@ -444,7 +450,6 @@ export default function JornadaWorkflow({ eventId }: Props) {
         ) : (
           <ul className="space-y-3">
             {treesInJornada.map((row) => {
-              const style = STATUS_COLORS[row.status];
               const perTreeCtx = { ...contextQuery, treeSampleId: row.sample?.id };
               return (
                 <li
@@ -463,12 +468,19 @@ export default function JornadaWorkflow({ eventId }: Props) {
                     </div>
                     <span
                       className="inline-flex items-center gap-2 rounded px-3 py-1 text-xs font-medium"
-                      style={{ background: style.background, color: style.color, border: `1px solid ${style.border}` }}
+                      style={{ background: "#E4F1E9", color: "#17533C", border: "1px solid #C8DECF" }}
                     >
-                      {treeStatusLabel(row.status)}
+                      {guided.error ? "Guardado no disponible" : guided.rows ? `${guided.rows.find(result => result.sampleId === row.sample?.id)?.savedCount ?? 0}/4 vistas guardadas` : "Consultando guardado…"}
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
+                    <Link
+                      href={withPreservedContext("/images?mode=summary", perTreeCtx)}
+                      className="inline-flex items-center rounded border px-3 py-2 text-sm font-semibold"
+                      style={{ borderColor: "var(--ld-sidebar, #173D35)", background: "var(--ld-sidebar, #173D35)", color: "#fff" }}
+                    >
+                      Ver análisis del árbol
+                    </Link>
                     <Link
                       href={withPreservedContext("/images", perTreeCtx)}
                       className="inline-flex items-center rounded border px-3 py-2 text-sm"

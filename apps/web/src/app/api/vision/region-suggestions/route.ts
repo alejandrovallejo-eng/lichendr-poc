@@ -4,6 +4,7 @@ import {
   BIOCLIP_WORKER_TIMEOUT_MS,
   BIOCLIP_WORKER_URL,
   bioclipAuthHeaders,
+  createBioclipFetch,
 } from "@/lib/bioclip";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
@@ -33,6 +34,7 @@ export async function POST(request: NextRequest) {
       enabled: regionSuggestionsEnabled() && regionSuggestionsWorkerConfigured(),
       workerUrl: BIOCLIP_WORKER_URL,
       authHeaders: bioclipAuthHeaders(),
+      fetchImpl: createBioclipFetch(request),
       preprocessMode: BIOCLIP_PREPROCESS_MODE,
       timeoutMs: BIOCLIP_WORKER_TIMEOUT_MS,
     },

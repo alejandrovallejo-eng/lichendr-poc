@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.component-tests.json",
+  "compilerOptions": { "outDir": "/tmp/lichendr-ecology-tests" },
+  "include": ["src/modules/four-view/ecology.test.tsx", "src/modules/four-view/EcologyJourney.tsx"]
+}

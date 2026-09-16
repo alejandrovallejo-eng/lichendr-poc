@@ -3,8 +3,15 @@
 import { useSearchParams } from "next/navigation";
 import AnalysisDashboard from "./AnalysisDashboard";
 import FourViewTreeResults from "./FourViewTreeResults";
+import GuidedResults from "../four-view/GuidedResults";
+import EcologyJourney from "../four-view/EcologyJourney";
 
 export default function AnalysisEntry() {
-  const seriesId = useSearchParams().get("captureSeriesId");
-  return seriesId ? <FourViewTreeResults seriesId={seriesId} /> : <AnalysisDashboard />;
+  const params = useSearchParams();
+  const seriesId = params.get("captureSeriesId");
+  if (params.get("mode") === "ecology") return <EcologyJourney eventId={params.get("eventId") || undefined} initialSampleId={params.get("treeSampleId") || undefined} />;
+  if (seriesId) return <FourViewTreeResults seriesId={seriesId} />;
+  if (params.get("mode") === "classic") return <><p className="mb-4 text-sm">Flujo anterior · <a href="/analysis" className="underline">Ver resultados de captura guiada</a></p><AnalysisDashboard /></>;
+  return <GuidedResults filters={{ projectId: params.get("projectId") || undefined, siteId: params.get("siteId") || undefined,
+    eventId: params.get("eventId") || params.get("samplingEventId") || undefined, treeSampleId: params.get("treeSampleId") || undefined }} />;
 }

@@ -5,8 +5,9 @@
 //
 // 1. the caller is the owner of the photograph (session-based, never a prop);
 // 2. the image really belongs to that view of that tree sample;
-// 3. the four originals (N, E, S, O) exist and satisfy the storage rules, and
-//    the four analysis proxies are ready.
+// 3. this original satisfies storage rules and its private proxy is ready.
+// Capture is now sequential: N can be analysed before E/S/W are uploaded.
+// This does NOT complete a series or relax image ownership checks.
 //
 // Only then is any model touched. Previously these checks lived in the
 // suggestion route alone, so MobileSAM was already being fed a photograph
@@ -72,6 +73,7 @@ export async function authorizeViewContext(
     supabase,
     ownerId,
     (view as { capture_series_id: string }).capture_series_id,
+    reference,
   );
   if ("error" in readiness) return readiness;
 
@@ -90,6 +92,7 @@ async function ensureSeriesReady(
   supabase: SupabaseClient,
   ownerId: string,
   seriesId: string,
+  reference: ViewReference,
 ): Promise<{ proxies: Map<string, AnalysisProxyManifest> } | ContextFailure> {
   const { data: views, error } = await supabase
     .from("capture_views")
@@ -103,15 +106,16 @@ async function ensureSeriesReady(
   for (const row of views as Array<{ direction: string; image_id: string }>) {
     byDirection.set(row.direction, row.image_id);
   }
-  if (DIRECTIONS.some((direction) => !byDirection.get(direction))) {
+  if (!DIRECTIONS.includes(reference.direction as Direction)
+    || byDirection.get(reference.direction) !== reference.imageId) {
     return {
-      error: "Faltan vistas: la asistencia necesita las cuatro fotografías (N, E, S, O).",
+      error: "La fotografía ya no es la vista activa de este árbol. Vuelve a abrirla.",
       status: 409,
     };
   }
 
   const proxies = new Map<string, AnalysisProxyManifest>();
-  for (const direction of DIRECTIONS) {
+  for (const direction of [reference.direction]) {
     const currentImageId = byDirection.get(direction)!;
     const { data: image, error: imageError } = await supabase
       .from("images")

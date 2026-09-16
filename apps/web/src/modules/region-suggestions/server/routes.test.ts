@@ -352,16 +352,24 @@ test("a photograph that is not that view of that tree never reaches MobileSAM", 
   assert.deepEqual(log.urls, []);
 });
 
-test("an incomplete series never reaches MobileSAM", async () => {
+test("the sequential journey can analyse North before the other photos exist", async () => {
   reset();
   const log = emptyLog();
-  const deps = await prepareDeps({ log, directions: ["N", "E", "S"] });
+  const deps = await prepareDeps({ log, directions: ["N"] });
   const result = await handleSamPrepare(
     deps,
     jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }),
   );
-  assert.equal(result.status, 409);
-  assert.deepEqual(log.urls, []);
+  assert.equal(result.status, 200);
+  assert.equal(log.forwardedImages.length, 1);
+});
+
+test("sequential readiness still rejects an inactive image and a foreign owner", async () => {
+  for (const option of [{ directions: ["E"] }, { user: OTHER_OWNER }]) {
+    reset(); const log = emptyLog(); const deps = await prepareDeps({ log, ...option });
+    const result = await handleSamPrepare(deps, jsonRequest({ imageId: IMAGE_IDS.N, treeSampleId: TREE, direction: "N" }));
+    assert.ok(result.status >= 400); assert.deepEqual(log.urls, []);
+  }
 });
 
 test("a 24.47 MP original is segmented through its proxy, never itself", async () => {
@@ -846,4 +854,45 @@ test("suggestions are refused before authorisation and with the flag off", async
   };
   assert.equal((await handleRegionSuggestions(anonymous, suggestRequest())).status, 401);
   assert.deepEqual(log.urls, []);
+});
+
+test("Cloud Run waits for startup before inference and allows the observed 100-second cold start", async () => {
+  reset(); const log=emptyLog(); const deps=await suggestDeps(log);
+  deps.workerUrl="https://test-bioclip.run.app";
+  const realTimeout=AbortSignal.timeout, budgets:number[]=[];
+  AbortSignal.timeout=(ms:number)=>{budgets.push(ms);return realTimeout(ms);};
+  let release!:()=>void, started!:()=>void;
+  const healthStarted=new Promise<void>(r=>{started=r;});
+  const healthReady=new Promise<void>(r=>{release=r;});
+  const originalFetch=deps.fetchImpl;
+  deps.fetchImpl=(async(input,init)=>{
+    if(String(input).endsWith('/health')){started();await healthReady;}
+    return originalFetch(input,init);
+  }) as typeof fetch;
+  try {
+    const pending=handleRegionSuggestions(deps,suggestRequest());
+    await healthStarted;
+    assert.equal(budgets.at(-1),150_000);
+    assert.equal(log.urls.some(url=>url.endsWith('/suggest-regions')),false);
+    release(); assert.equal((await pending).status,200);
+    assert.equal(log.urls.filter(url=>url.endsWith('/suggest-regions')).length,1);
+  } finally {release();AbortSignal.timeout=realTimeout;}
+});
+
+test("Cloud Run startup failures do not send crops to an unavailable instance", async () => {
+  for(const failure of ['unavailable','timeout']) {
+    reset(); const log=emptyLog(); const deps=await suggestDeps(log,null);
+    deps.workerUrl="https://test-bioclip.run.app";
+    if(failure==='timeout'){
+      const originalFetch=deps.fetchImpl;
+      deps.fetchImpl=(async(input,init)=>{
+        if(String(input).endsWith('/health')) throw new Error('timeout');
+        return originalFetch(input,init);
+      }) as typeof fetch;
+    }
+    const result=await handleRegionSuggestions(deps,suggestRequest());
+    assert.equal(result.status,503);
+    assert.match(String(result.body.error),/selecciones están guardadas/);
+    assert.equal(log.urls.some(url=>url.endsWith('/suggest-regions')),false);
+  }
 });

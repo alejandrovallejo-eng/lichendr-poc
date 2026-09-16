@@ -2,7 +2,7 @@ import { parseColorConfig, type ColorConfig, type ColorClass } from "../region-s
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { reviewFingerprint } from "./guided-cloud";
 
-export interface Morphospecies { id: string; event_id: string; ordinal: number }
+export interface Morphospecies { id: string; event_id: string; ordinal: number; custom_name?: string | null; name_revision?: number }
 export interface Quadrat { x: number; y: number; width: number; height: number }
 export interface EcologyReview {
   version: 1; scale: "uncalibrated"; sourceOutline: TrunkPoint[];
@@ -14,6 +14,12 @@ export function morphName(ordinal: number) {
   let letters = "", n = ordinal;
   while (n > 0) { n--; letters = String.fromCharCode(65 + n % 26) + letters; n = Math.floor(n / 26); }
   return `Morfoespecie ${letters}`;
+}
+export const morphDisplayName = (m: Morphospecies) => m.custom_name?.trim() || morphName(m.ordinal);
+export function normalizeMorphName(value: string): string | null {
+  const name = value.trim();
+  if (name.length > 80 || [...name].some(c=>c.charCodeAt(0)<32||c.charCodeAt(0)===127)) throw new Error("Usa un nombre de hasta 80 caracteres, en una sola línea.");
+  return name || null;
 }
 export function emptyEcologyConfig(): ColorConfig {
   return { version: 2, tolerance: 12, samples: [], confirmed: { legacyCount: 0, legacyTolerance: 12,

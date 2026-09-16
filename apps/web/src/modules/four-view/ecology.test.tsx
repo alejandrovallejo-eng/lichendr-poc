@@ -2,8 +2,12 @@ import "../region-suggestions/component-test-env";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, useState } from "react";
+import { createRoot } from "react-dom/client";
+import MorphNameEditor from "./MorphNameEditor";
+import { GuidedColorControls, useGuidedColorPicker } from "./GuidedColorPicker";
 import { MorphCatalogue } from "./EcologyEditor";
-import { emptyEcologyConfig, morphName, selectMorph, validQuadrat, quadratOutline, parseEcologyReview, observedMorphs, referenceTones, sameEcologySource, type EcologyRow } from "./ecology";
+import { emptyEcologyConfig, morphName, morphDisplayName, normalizeMorphName, selectMorph, validQuadrat, quadratOutline, parseEcologyReview, observedMorphs, referenceTones, sameEcologySource, type EcologyRow, type Morphospecies } from "./ecology";
 import { classifyTrunkColors, proposeColorAddition, acceptColorAddition } from "../region-suggestions/trunk-colors";
 const outline=[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}],q={x:2,y:2,width:4,height:4};
 const a={id:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",event_id:"event-one",ordinal:1};
@@ -49,4 +53,40 @@ test("catalogue shows references and explicit reuse without certainty or auto-tr
   assert.match(html,/Morfoespecie A/);assert.match(html,/Los tonos son referencias/);assert.match(html,/Nueva morfoespecie/);
   assert.doesNotMatch(html,/certeza|confidence|Nombre del liquen/);
   const disabled=renderToStaticMarkup(<MorphCatalogue catalog={[a]} reviews={[]} disabled busy={false} onSelect={()=>{}} onCreate={()=>{}}/>);assert.match(disabled,/disabled/);
+});
+test("custom display name keeps the default identity and measurement configuration unchanged",()=>{
+  assert.equal(morphDisplayName(a),"Morfoespecie A");
+  const renamed={...a,custom_name:"Liquen gris",name_revision:2};
+  assert.equal(morphDisplayName(renamed),"Liquen gris");
+  assert.equal(morphDisplayName({...renamed,custom_name:null}),"Morfoespecie A");
+  assert.equal(normalizeMorphName("  Liquen gris  "),"Liquen gris");assert.equal(normalizeMorphName("   "),null);
+  assert.throws(()=>normalizeMorphName("x".repeat(81)));assert.throws(()=>normalizeMorphName("Liquen\nA"));
+  const config=selectMorph(emptyEcologyConfig(),a).config;
+  assert.equal(selectMorph(config,renamed).config,config);
+  assert.deepEqual(selectMorph(emptyEcologyConfig(),renamed).config,config);
+  const html=renderToStaticMarkup(<MorphCatalogue catalog={[renamed]} reviews={[]} disabled={false} busy={false} onSelect={()=>{}} onCreate={()=>{}} onRename={async()=>{}}/>);
+  assert.match(html,/Liquen gris/);assert.match(html,/Editar nombre/);
+});
+test("name editor saves explicitly, preserves text on failure, cancels, and restores the default",async()=>{
+  const host=globalThis.document.createElement("div");globalThis.document.body.append(host);const root=createRoot(host);
+  let writes=0,fail=true;let saved:Morphospecies=a;
+  function Harness(){const[m,setM]=useState<Morphospecies>(a);return <><strong>{morphDisplayName(m)}</strong><MorphNameEditor morph={m} onSave={async(base,name)=>{
+    writes++;assert.equal(base.id,a.id);if(fail)throw new Error("Fallo de prueba: reintenta.");
+    saved={...base,custom_name:normalizeMorphName(name),name_revision:(base.name_revision??1)+1};setM(saved);
+  }}/></>;}
+  const click=async(text:string)=>{const b=Array.from(host.querySelectorAll("button")).find(b=>b.textContent===text);assert.ok(b,text);await act(async()=>b.click());};
+  const type=async(value:string)=>{const input=host.querySelector("input")!;await act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value")!.set!.call(input,value);input.dispatchEvent(new window.Event("input",{bubbles:true}));});};
+  try{
+    await act(async()=>root.render(<Harness/>));await click("Editar nombre");await type("Liquen gris");assert.equal(writes,0);
+    await click("Cancelar");assert.equal(writes,0);assert.equal(host.querySelector("input"),null);
+    await click("Editar nombre");await type("Liquen gris");await click("Guardar nombre");
+    assert.match(host.textContent!,/Fallo de prueba/);assert.equal(host.querySelector("input")!.value,"Liquen gris");
+    fail=false;await click("Guardar nombre");assert.equal(saved.custom_name,"Liquen gris");assert.equal(host.querySelector("input"),null);
+    await click("Editar nombre");await type("");await click("Guardar nombre");assert.equal(saved.custom_name,null);assert.match(host.textContent!,/Morfoespecie A/);
+  }finally{await act(async()=>root.unmount());host.remove();}
+});
+test("current catalogue name is shown by the dropper without rewriting the accepted config",()=>{
+  const config=selectMorph(emptyEcologyConfig(),a).config,before=JSON.stringify(config);
+  function Harness(){const picker=useGuidedColorPicker(null,outline,config,false,()=>{throw new Error("No measurement write allowed");});return <GuidedColorControls catalogue groupNames={{[a.id]:"Liquen amarillo"}} picker={picker} config={config}/>;}
+  const html=renderToStaticMarkup(<Harness/>);assert.match(html,/Elegir color de Liquen amarillo/);assert.doesNotMatch(html,/Morfoespecie A/);assert.equal(JSON.stringify(config),before);
 });

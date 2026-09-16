@@ -118,17 +118,19 @@ export function useGuidedColorPicker(pixels: Pixels | null, outline: TrunkPoint[
     canUndo: working.samples.length > working.confirmed!.legacyCount, legacyCount: working.confirmed!.legacyCount };
 }
 
-export function GuidedColorControls({ picker: p, config, onFocusPhoto, catalogue = false }: {
+export function GuidedColorControls({ picker: p, config, onFocusPhoto, catalogue = false, groupNames }: {
   picker: ReturnType<typeof useGuidedColorPicker>; config: ColorConfig; onFocusPhoto?: () => void;
   catalogue?: boolean;
+  groupNames?: Record<string,string>;
 }) {
-  const group = p.groups.find(g => g.label === p.label)!;
+  const groups = p.groups.map(g=>({...g,name:groupNames?.[g.id]??g.name}));
+  const group = groups.find(g => g.label === p.label)!;
   const tones = config.samples.filter(s => s.label === p.label);
   return <>
     <label style={{ fontSize: 13 }}>Estoy marcando
       <select aria-label={catalogue ? "Morfoespecie activa" : "Liquen activo"} value={p.label} disabled={!!p.pending} onChange={e => p.setTarget(Number(e.target.value) as ColorClass)}
         style={{ display: "block", width: "100%", minHeight: 44, borderRadius: 8, border: "1px solid #b5cbbc", marginTop: 4, padding: 8, font: "inherit" }}>
-        {p.groups.map(g => <option key={g.id} value={g.label}>{g.name}</option>)}
+        {groups.map(g => <option key={g.id} value={g.label}>{g.name}</option>)}
       </select>
     </label>
     <div aria-label={`Tonos aceptados de ${group.name}`} style={{ border: "1px solid #d9e4dd", borderRadius: 10, padding: 10 }}>

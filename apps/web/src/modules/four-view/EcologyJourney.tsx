@@ -2,7 +2,8 @@
 import { useEffect, useState } from "react";
 import EcologyEditor from "./EcologyEditor";
 import { ecologyServices, type EcologyData } from "./ecology-client";
-import { observedMorphs, morphName, sameEcologySource, type EcologyRow } from "./ecology";
+import { observedMorphs, morphDisplayName, sameEcologySource, type EcologyRow, type Morphospecies } from "./ecology";
+import MorphNameEditor from "./MorphNameEditor";
 import { DIRECTIONS, DIRECTION_LABELS, type Direction } from "./types";
 import { guidedResultHref } from "./guided-results";
 
@@ -23,13 +24,14 @@ export default function EcologyJourney({eventId,initialSampleId}:{eventId?:strin
   if(!eventId)return <section><h1>Análisis de diversidad</h1><p>Abre una jornada para usar su catálogo de morfoespecies.</p><a className="underline" href="/analysis">Elegir jornada</a></section>;
   if(error)return <section><h1>Análisis de diversidad</h1><p role="alert">{error}</p><button className="underline" onClick={()=>setAttempt(attempt+1)}>Reintentar lectura</button><p><a className="underline" href={`/analysis?eventId=${encodeURIComponent(eventId)}`}>Volver a resultados</a></p></section>;
   if(!data)return <p role="status">Abriendo cuadrantes y catálogo de la jornada…</p>;
+  const updateCatalog=(m:Morphospecies)=>setData(prev=>prev?{...prev,catalog:[...prev.catalog.filter(c=>c.id!==m.id),m].sort((a,b)=>a.ordinal-b.ordinal)}:prev);
   const tree=active&&data.rows.find(r=>r.sampleId===active.sampleId),imageId=tree&&tree.views[active!.direction].imageId;
   if(tree&&imageId&&active){
     const source=data.sources[imageId];
     return <EcologyEditor key={imageId} ownerId={tree.project.owner_id} eventId={eventId} sampleId={tree.sampleId} imageId={imageId}
       direction={active.direction} treeName={tree.tree.code} source={source} catalog={data.catalog} reviews={data.reviews}
       existing={data.reviews.find(r=>r.image_id===imageId)} services={ecologyServices}
-      onCatalog={m=>setData(prev=>prev?{...prev,catalog:[...prev.catalog.filter(c=>c.id!==m.id),m].sort((a,b)=>a.ordinal-b.ordinal)}:prev)}
+      onCatalog={updateCatalog}
       onSaved={r=>{setData(prev=>prev?{...prev,reviews:[...prev.reviews.filter(s=>s.image_id!==r.image_id),r]}:prev);setNotice(`${tree.tree.code} · ${DIRECTION_LABELS[active.direction]}: cuadrante guardado.`);setActive(null);}}
       onClose={()=>setActive(null)}/>;
   }
@@ -45,7 +47,8 @@ export default function EcologyJourney({eventId,initialSampleId}:{eventId?:strin
     <p className="rounded bg-amber-50 p-3 text-sm">Exploratorio: cobertura relativa dentro de cada cuadrante sin escala física. Los colores ayudan a delimitar grupos; no confirman especies ni calidad del aire. No sumamos porcentajes de fotos distintas ni tratamos vistas pendientes como cero.</p>
     <details className="rounded border bg-white p-4"><summary className="cursor-pointer font-semibold">Catálogo de la jornada · {data.catalog.length} morfoespecies</summary>
       <p className="my-2 text-sm">Puedes abrir este mismo catálogo al marcar colores en cualquier vista. Crear una entrada no significa haberla observado.</p>
-      <ul>{data.catalog.map(m=><li key={m.id} className="my-1 text-sm">{morphName(m.ordinal)} · {new Set(valid.filter(r=>observedMorphs(r.review).includes(m.id)).map(r=>r.tree_sample_id)).size} árbol(es) · {valid.filter(r=>observedMorphs(r.review).includes(m.id)).length} cuadrante(s)</li>)}</ul>
+      <ul>{data.catalog.map(m=><li key={m.id} className="my-3 text-sm" style={{overflowWrap:"anywhere"}}><strong>{morphDisplayName(m)}</strong> · {new Set(valid.filter(r=>observedMorphs(r.review).includes(m.id)).map(r=>r.tree_sample_id)).size} árbol(es) · {valid.filter(r=>observedMorphs(r.review).includes(m.id)).length} cuadrante(s)
+        <MorphNameEditor morph={m} onSave={async(m,name)=>updateCatalog(await ecologyServices.renameMorph(m,name))}/></li>)}</ul>
     </details>
     {!sorted.length?<p>No hay árboles en esta jornada. <a href={`/jornada/${encodeURIComponent(eventId)}`} className="underline">Volver a la jornada</a></p>:null}
     {sorted.map(r=>{const treeMorphs=new Set(valid.filter(v=>v.tree_sample_id===r.sampleId).flatMap(v=>observedMorphs(v.review)));
@@ -53,7 +56,7 @@ export default function EcologyJourney({eventId,initialSampleId}:{eventId?:strin
         <div className="grid gap-3 md:grid-cols-4">{DIRECTIONS.map(d=>{const q=currentQuadrat(data,r.sampleId,d),review=q.state==="saved"?q.row!.review:null;
           return <div key={d} className="rounded-lg border p-3"><h3 className="font-bold">{DIRECTION_LABELS[d]}</h3>
             {review?<><p className="my-2 text-sm text-emerald-800">Cuadrante guardado</p>
-              {review.config.confirmed!.groups.filter(g=>g.id!=="unassigned"&&review.counts[g.label]>0).map(g=><p key={g.id} className="text-sm">{morphName(data.catalog.find(m=>m.id===g.id)!.ordinal)}: {(100*review.counts[g.label]/review.total).toFixed(1)} %</p>)}
+              {review.config.confirmed!.groups.filter(g=>g.id!=="unassigned"&&review.counts[g.label]>0).map(g=><p key={g.id} className="text-sm" style={{overflowWrap:"anywhere"}}>{morphDisplayName(data.catalog.find(m=>m.id===g.id)!)}: {(100*review.counts[g.label]/review.total).toFixed(1)} %</p>)}
               <p className="text-sm">Sin clasificar: {(100*review.counts[1]/review.total).toFixed(1)} %</p>
               {!observedMorphs(review).length?<p className="text-sm">Revisado sin morfoespecies marcadas.</p>:null}
             </>:<p className="my-2 text-sm">{q.state==="changed"?"El tronco cambió: revisar cuadrante.":q.state==="unavailable"?"Guarda primero la vista y su tronco.":"Cuadrante pendiente."}</p>}

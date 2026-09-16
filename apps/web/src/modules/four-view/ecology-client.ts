@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase/client";
 import { loadGuidedResults, readResultPages } from "./guided-results-client";
 import { parseGuidedReview, type GuidedReview } from "./guided-flow";
-import { parseEcologyReview, type EcologyReview, type EcologyRow, type Morphospecies } from "./ecology";
+import { normalizeMorphName, parseEcologyReview, type EcologyReview, type EcologyRow, type Morphospecies } from "./ecology";
 import { guidedServices } from "./guided-service";
 import type { Direction } from "./types";
 const db = supabase as SupabaseClient;
@@ -20,7 +20,7 @@ export const ecologyServices = {
   async load(eventId: string, signal?: AbortSignal) {
     const rows = await loadGuidedResults(db, eventId, signal);
     const catalog = await readResultPages<Morphospecies>(async (from,to) => {
-      let query = db.from("jornada_morphospecies").select("id,event_id,ordinal").eq("event_id",eventId).order("ordinal").range(from,to);
+      let query = db.from("jornada_morphospecies").select("id,event_id,ordinal,custom_name,name_revision").eq("event_id",eventId).order("ordinal").range(from,to);
       if (signal) query=query.abortSignal(signal); return await query;
     },signal);
     if (catalog.some(m => m.event_id!==eventId || !Number.isInteger(m.ordinal) || m.ordinal<1 || m.ordinal>64)) throw new Error("El catálogo no es válido.");
@@ -51,6 +51,17 @@ export const ecologyServices = {
     const valid=parseEcologyReview(review);if(!valid)throw new Error("El cuadrante no es válido y no se guardó.");
     const{data,error}=await db.rpc("save_ecological_quadrat",{p_event_id:eventId,p_tree_sample_id:sampleId,p_image_id:imageId,p_direction:direction,p_review:valid,p_expected_revision:revision}).single();
     if(error)throw new Error(message(error.code));return parseEcologyRow(data);
+  },
+  async renameMorph(morph:Morphospecies,name:string):Promise<Morphospecies>{
+    const customName=normalizeMorphName(name);
+    const {data,error}=await db.rpc("rename_jornada_morphospecies",{p_event_id:morph.event_id,p_id:morph.id,p_name:customName,p_expected_revision:morph.name_revision??1}).single();
+    if(error)throw new Error(error.code==="40001"?"El nombre cambió en otra pestaña. Vuelve a abrir los resultados para ver el nombre actual antes de editarlo."
+      :error.code==="22023"?"Usa un nombre de hasta 80 caracteres, en una sola línea."
+      :error.code==="42501"?"No tienes acceso para editar este catálogo.":"No se pudo confirmar el nombre. Conserva este texto y reintenta guardar.");
+    const m=data as Morphospecies;
+    if(m?.id!==morph.id||m.event_id!==morph.event_id||m.ordinal!==morph.ordinal||m.custom_name!==customName||!Number.isSafeInteger(m.name_revision))
+      throw new Error("No se pudo confirmar el nombre guardado. Reintenta.");
+    return m;
   },
 };
 export type EcologyServices=typeof ecologyServices;

@@ -5,21 +5,23 @@ import { colorWorkingSize, OVERLAY_RGB, type ColorConfig } from "../region-sugge
 import type { TrunkPoint } from "../region-suggestions/trunk-outline";
 import type { GuidedReview } from "./guided-flow";
 import type { EcologyServices } from "./ecology-client";
-import { emptyEcologyConfig, morphName, parseEcologyReview, quadratFromPoints, quadratOutline, referenceTones, sameEcologySource, selectMorph, validQuadrat,
+import { emptyEcologyConfig, morphDisplayName, parseEcologyReview, quadratFromPoints, quadratOutline, referenceTones, sameEcologySource, selectMorph, validQuadrat,
   type EcologyRow, type Morphospecies, type Quadrat } from "./ecology";
 import { DIRECTION_LABELS, type Direction } from "./types";
 import { reviewFingerprint } from "./guided-cloud";
+import MorphNameEditor from "./MorphNameEditor";
 
-export function MorphCatalogue({ catalog, reviews, selectedId, disabled, busy, onSelect, onCreate }: {
+export function MorphCatalogue({ catalog, reviews, selectedId, disabled, busy, onSelect, onCreate, onRename }: {
   catalog:Morphospecies[]; reviews:EcologyRow[]; selectedId?:string; disabled:boolean; busy:boolean;
   onSelect:(m:Morphospecies)=>void; onCreate:()=>void;
+  onRename?:(m:Morphospecies,name:string)=>Promise<void>;
 }) {
   return <div id="morph-catalogue" aria-label="Catálogo de morfoespecies" className="eco-catalogue">
     <p className="eco-small">Compartido por esta jornada. Los tonos son referencias: elige los de esta fotografía antes de aceptar.</p>
-    {catalog.map(m=><button key={m.id} aria-pressed={selectedId===m.id} disabled={disabled||busy} onClick={()=>onSelect(m)} className="eco-morph">
-      <strong>{morphName(m.ordinal)}</strong><span className="eco-swatches">{referenceTones(reviews,m.id).map((c,i)=><span key={i} title={`Referencia RGB ${c.join(", ")}`} style={{background:`rgb(${c.join(",")})`}} />)}</span>
+    {catalog.map(m=><div key={m.id}><button aria-pressed={selectedId===m.id} disabled={disabled||busy} onClick={()=>onSelect(m)} className="eco-morph" style={{width:"100%",overflowWrap:"anywhere"}}>
+      <strong>{morphDisplayName(m)}</strong><span className="eco-swatches">{referenceTones(reviews,m.id).map((c,i)=><span key={i} title={`Referencia RGB ${c.join(", ")}`} style={{background:`rgb(${c.join(",")})`}} />)}</span>
       <small>{selectedId===m.id?"Seleccionada en esta vista":"También está en este cuadrante →"}</small>
-    </button>)}
+    </button>{onRename?<MorphNameEditor morph={m} disabled={disabled||busy} onSave={onRename}/>:null}</div>)}
     {!catalog.length?<p className="eco-small">Todavía no hay morfoespecies. Crea la primera.</p>:null}
     <button onClick={onCreate} disabled={disabled||busy||catalog.length>=64}>{busy?"Creando…":"+ Nueva morfoespecie"}</button>
   </div>;
@@ -46,6 +48,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const edit=(next:ColorConfig)=>{setConfig(next);setDirty(true);setZero(false);};
   const picker=useGuidedColorPicker(pixels,outline,config,!!quadrat&&!saving,edit);
   const selectedId=picker.groups.find(g=>g.label===picker.label)?.id;
+  const groupNames=Object.fromEntries(catalog.map(m=>[m.id,morphDisplayName(m)]));
   const assigned=selectedId!=="unassigned";
   useEffect(()=>{alive.current=true;let url="";const abort=new AbortController();
     void services.photo(ownerId,imageId).then(blob=>{if(!abort.signal.aborted){url=URL.createObjectURL(blob);setSrc(url);}}).catch(e=>{if(!abort.signal.aborted)setError(detail(e));});
@@ -142,11 +145,11 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         {quadrat?<button onClick={()=>{setQuadrat(null);setFirst(null);setConfig(emptyEcologyConfig());setDirty(true);setZero(false);}}>Elegir otro cuadrante</button>:null}
       </>:step===1?<>
         <button aria-expanded={open} aria-controls="morph-catalogue" disabled={!!picker.pending||saving||creating} onClick={()=>setOpen(!open)}>{open?"Cerrar catálogo":"Abrir catálogo de la jornada"}</button>
-        {open?<MorphCatalogue catalog={catalog} reviews={reviews} selectedId={selectedId} disabled={!!picker.pending||saving} busy={creating} onSelect={choose} onCreate={()=>void create()}/>:null}
-        {assigned?<GuidedColorControls catalogue picker={picker} config={config} onFocusPhoto={()=>photo.current?.focus()}/>:<p>Elige una morfoespecie del catálogo o crea una nueva. Después toca sus colores en la foto.</p>}
+        {open?<MorphCatalogue catalog={catalog} reviews={reviews} selectedId={selectedId} disabled={!!picker.pending||saving} busy={creating} onSelect={choose} onCreate={()=>void create()} onRename={async(m,name)=>onCatalog(await services.renameMorph(m,name))}/>:null}
+        {assigned?<GuidedColorControls catalogue groupNames={groupNames} picker={picker} config={config} onFocusPhoto={()=>photo.current?.focus()}/>:<p>Elige una morfoespecie del catálogo o crea una nueva. Después toca sus colores en la foto.</p>}
         {!config.samples.length?<label className="eco-small"><input type="checkbox" checked={zero} disabled={!!picker.pending} onChange={e=>{setZero(e.target.checked);setDirty(true);}}/> Revisé el cuadrante y no marqué ninguna morfoespecie.</label>:null}
       </>:<><h2 style={{margin:0}}>Resumen del cuadrante</h2>
-        {config.confirmed!.groups.filter(g=>g.id!=="unassigned"&&(picker.accepted?.counts[g.label]??0)>0).map(g=><p key={g.id}>{g.name}: <strong>{pct(picker.accepted!.counts[g.label])}</strong></p>)}
+        {config.confirmed!.groups.filter(g=>g.id!=="unassigned"&&(picker.accepted?.counts[g.label]??0)>0).map(g=><p key={g.id} style={{overflowWrap:"anywhere"}}>{groupNames[g.id]??g.name}: <strong>{pct(picker.accepted!.counts[g.label])}</strong></p>)}
         <p>Sin clasificar: <strong>{pct(picker.accepted?.counts[1]??0)}</strong></p><p className="eco-small">Sin clasificar no significa corteza. Las áreas aceptadas no se cuentan dos veces.</p>
         <p className="eco-small">Morfoespecies reconocidas por ti; no son identificaciones taxonómicas verificadas. El resultado se vincula a este árbol, vista y jornada.</p>
       </>}

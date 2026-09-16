@@ -4,7 +4,12 @@ Reuses the current five-step GuidedCapture screen and the existing bounded
 CIELAB colour engine; the old Annotation Studio's candidate/acceptance model
 is brought into the guided flow, not its complex screen.
 
-Choose a group, click a tone, inspect the white proposal, accept or discard.
+Choose a group, click a tone, inspect the magenta proposal, accept or discard.
+The captured RGB swatch and a target on the photograph appear before matching
+finishes. Magenta plus a dark edge is only a high-contrast proposal overlay,
+not a sampled colour, model inference or group label. A photo-without-marks
+comparison never discards the pending selection. Accepted swatches are numbered;
+"another tone" keeps the active group, while "another lichen" creates a group.
 Accept stays in the same group; further tones extend it. Exclude a connected
 island by clicking it. Undo removes the last accepted addition only. Up to eight
 photo-local groups and 24 tones. Names do not certify taxonomic identity.

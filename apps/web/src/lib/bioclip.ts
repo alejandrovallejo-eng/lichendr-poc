@@ -1,14 +1,10 @@
 /**
- * Server-side configuration of the local BioCLIP worker.
+ * Server-side configuration of the BioCLIP worker.
  *
- * SECURITY: `BIOCLIP_WORKER_URL` and `BIOCLIP_WORKER_TOKEN` are read only on the
- * server. The token has no NEXT_PUBLIC_ prefix, never reaches the browser
- * bundle and is never echoed in a response, in a UI string or in a log line.
- *
- * The worker is expected to run on the reviewer's own machine
- * (http://127.0.0.1:8500 by default when configured). No tunnel is opened here
- * and no hosting is provisioned: where this worker will live is still an open
- * decision, documented in services/bioclip/README.md.
+ * SECURITY: worker credentials never reach the browser or response/log output.
+ * The existing private Cloud Run service is shared by this project's explicitly
+ * authorized Preview and Production environments. Its historical resource names
+ * retain "preview"; neither public access nor a service-account key is needed.
  */
 
 
@@ -25,8 +21,8 @@ export function bioclipAuthHeaders(): Record<string, string> {
 /** Preprocessing pipeline requested from the worker. */
 export const BIOCLIP_PREPROCESS_MODE = process.env.BIOCLIP_PREPROCESS_MODE ?? "whole_crop_pad";
 
-// Preview pilot only. These are resource identifiers, not credentials. Google
-// validates Vercel's signature, project ID and Preview subject in the provider.
+// Resource identifiers, not credentials. Google validates Vercel's signature,
+// exact project ID and the explicitly authorized Preview/Production subjects.
 const CLOUD_RUN_ORIGIN = "https://lichendr-bioclip-preview-5ccbk3mcba-ue.a.run.app";
 const WIF_AUDIENCE = "//iam.googleapis.com/projects/838586175073/locations/global/workloadIdentityPools/lichendr-vercel-preview/providers/vercel";
 const CALLER = "lichendr-vercel-preview@lichendr.iam.gserviceaccount.com";
@@ -53,7 +49,7 @@ export function createBioclipFetch(
 
   async function identityToken(signal: AbortSignal): Promise<string> {
     const oidc = request.headers.get("x-vercel-oidc-token");
-    if (!oidc) throw new Error("BioCLIP Preview identity unavailable");
+    if (!oidc) throw new Error("BioCLIP invocation identity unavailable");
     // Only the fresh invocation token is used; never fall back to a build token.
     const exchange = await fetchImpl("https://sts.googleapis.com/v1/token", {
       method: "POST", redirect: "error", cache: "no-store", signal,
@@ -67,10 +63,10 @@ export function createBioclipFetch(
         subjectTokenType: "urn:ietf:params:oauth:token-type:jwt",
       }),
     });
-    if (!exchange.ok) throw new Error("BioCLIP Preview identity exchange failed");
+    if (!exchange.ok) throw new Error("BioCLIP identity exchange failed");
     const data = await exchange.json() as { access_token?: unknown };
     if (typeof data.access_token !== "string" || !data.access_token)
-      throw new Error("BioCLIP Preview identity exchange invalid");
+      throw new Error("BioCLIP identity exchange invalid");
     const identity = await fetchImpl(
       "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/" + CALLER + ":generateIdToken",
       {
@@ -79,10 +75,10 @@ export function createBioclipFetch(
         body: JSON.stringify({ audience: CLOUD_RUN_ORIGIN, includeEmail: true }),
       },
     );
-    if (!identity.ok) throw new Error("BioCLIP Preview identity issuance failed");
+    if (!identity.ok) throw new Error("BioCLIP identity issuance failed");
     const result = await identity.json() as { token?: unknown };
     if (typeof result.token !== "string" || !result.token)
-      throw new Error("BioCLIP Preview identity issuance invalid");
+      throw new Error("BioCLIP identity issuance invalid");
     return result.token;
   }
 
@@ -90,8 +86,8 @@ export function createBioclipFetch(
     const url = new URL(input instanceof Request ? input.url : String(input));
     const configured = new URL(workerUrl);
     if (url.origin !== configured.origin) return fetchImpl(input, init);
-    if (environment !== "preview" || configured.href.replace(/\/$/, "") !== CLOUD_RUN_ORIGIN)
-      throw new Error("BioCLIP Google identity is restricted to the Preview pilot");
+    if ((environment !== "preview" && environment !== "production") || configured.href.replace(/\/$/, "") !== CLOUD_RUN_ORIGIN)
+      throw new Error("BioCLIP Google identity is restricted to the approved Preview and Production service");
     if (url.pathname !== "/health" && url.pathname !== "/suggest-regions")
       throw new Error("BioCLIP Google identity path not allowed");
     const incomingSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);

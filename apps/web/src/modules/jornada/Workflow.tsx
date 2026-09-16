@@ -5,6 +5,10 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import PageHeader from "@/components/PageHeader";
 import { useGuidedResults } from "../four-view/use-guided-results";
 import { GuidedProgress } from "../four-view/GuidedResults";
+import { supabase } from "@/lib/supabase/client";
+import ClosureReview from "./ClosureReview";
+import { readClosure, changeClosure } from "./closure-client";
+import type { ClosureEvent, ClosureSnapshot } from "./closure";
 import { createTree, createTreeSample } from "@/modules/trees/client";
 import {
   fetchJornadaContext,
@@ -21,6 +25,10 @@ interface Props {
   eventId: string;
 }
 
+const loadClosure = (eventId: string) => readClosure(supabase, eventId);
+const saveClosure = (snapshot: ClosureSnapshot, target: ClosureEvent["status"], acknowledged: boolean) =>
+  changeClosure(supabase, snapshot, target, acknowledged);
+
 function formatLocalDate(iso: string) {
   try {
     return new Date(iso).toLocaleDateString("es-DO", {
@@ -34,6 +42,7 @@ function formatLocalDate(iso: string) {
 }
 
 export default function JornadaWorkflow({ eventId }: Props) {
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [context, setContext] = useState<JornadaContext | null>(null);
   const [treeRows, setTreeRows] = useState<JornadaTreeRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -204,6 +213,9 @@ export default function JornadaWorkflow({ eventId }: Props) {
     setRefreshing(false);
   };
 
+  if (reviewOpen) return <ClosureReview key={eventId} eventId={eventId} load={loadClosure} change={saveClosure}
+    onBack={() => { setReviewOpen(false); void reload(); }} />;
+
   if (loading) {
     return (
       <div>
@@ -240,6 +252,14 @@ export default function JornadaWorkflow({ eventId }: Props) {
         title="Árboles de esta jornada"
         subtitle={`${context.project.name} · ${context.site.name} · ${formatLocalDate(context.event.sampledAt)}`}
       />
+
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}>
+        <div><p className="font-semibold">Jornada {context.event.status === "completed" ? "cerrada" : "abierta"}</p>
+          <p className="text-sm">Revisa los árboles y sus cuatro vistas antes de finalizar.</p></div>
+        <button type="button" className="rounded-lg px-4 py-2 font-semibold text-white disabled:opacity-50"
+          style={{ background: "var(--ld-sidebar, #173D35)" }} disabled={savingNewTree || savingExisting || refreshing}
+          onClick={() => setReviewOpen(true)}>{context.event.status === "completed" ? "Revisar o reabrir jornada" : "Revisar y cerrar jornada"}</button>
+      </div>
 
       <section
         className="mb-6 p-4 rounded border text-sm"

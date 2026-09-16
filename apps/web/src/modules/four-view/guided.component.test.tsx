@@ -283,6 +283,10 @@ test("tree summary shows each saved result and missing view, survives photo erro
     assert.deepEqual(reads,["N:n","E:e","S:s"]);assert.deepEqual(photos,["n","e","s"]);
     assert.equal(host.querySelectorAll("article").length,4);assert.match(host.textContent!,/3 de 4 vistas/);
     const cards=Array.from(host.querySelectorAll("article"));
+    // The expandable group list may scroll, but cannot push actions out of its card.
+    const info=cards[0].querySelector<HTMLElement>(".tree-summary-info")!;
+    assert.equal(info.style.minHeight,"0px");assert.equal(info.style.overflowY,"auto");
+    assert.equal(cards[0].querySelector<HTMLElement>(".tree-summary-actions")!.style.flexShrink,"0");
     assert.match(cards[0].textContent!,/10.0 %/);assert.match(cards[1].textContent!,/20.0 %/);
     assert.match(cards[1].textContent!,/Photo offline/);assert.match(cards[2].textContent!,/30.0 %/);
     assert.match(cards[3].textContent!,/Sin fotografía/);assert.doesNotMatch(cards[3].textContent!,/0.0 %/);

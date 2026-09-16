@@ -123,7 +123,7 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
         </svg>
       </> : <p style={{ padding: 18, fontSize: 13 }}>{entry.loading ? "Abriendo foto…" : imageId ? "Fotografía no disponible" : `Falta la foto de ${name.toLowerCase()}`}</p>}
     </div>
-    <div className="tree-summary-info">
+    <div className="tree-summary-info" style={{ minHeight: 0, overflowY: "auto" }}>
       {a ? <><p>Cobertura estimada por color</p><p style={{ fontSize: 30, fontWeight: 750 }}>{(100 * a.lichen / a.total).toFixed(1)} %</p>
         <p>{(100 * (a.total - a.lichen) / a.total).toFixed(1)} % sin clasificar</p>
         <p>{ai?.suggestions.length ? `BioCLIP: sugiere liquen en ${matches}/${ai.suggestions.length} ejemplos.` : "Sin revisión de IA guardada."}</p>
@@ -131,7 +131,7 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
       </> : <p>{imageId ? "La foto está guardada; falta confirmar su análisis en este flujo." : "Completa esta orientación para añadir su análisis."}</p>}
       {entry.error || maskError ? <p role="alert" style={{ color: "#9c341f" }}>{entry.error || maskError}</p> : null}
     </div>
-    <div className="tree-summary-actions">
+    <div className="tree-summary-actions" style={{ flexShrink: 0 }}>
       {!expanded && entry.src ? <button onClick={onExpand} aria-label={`Ampliar ${name}`}>Ampliar</button> : null}
       <button className="g-primary" disabled={entry.loading} onClick={onEdit} aria-label={`${a ? "Revisar" : "Completar"} ${name}`}>{a ? "Revisar / editar" : "Completar vista"}</button>
       {entry.error ? <button onClick={onRetry}>Reintentar lectura</button> : null}

@@ -46,7 +46,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
     <form action="/analysis" method="get" className="grid items-end gap-3 rounded-lg border p-4 md:grid-cols-4" style={{ borderColor: "var(--ld-border)" }}>
       {selector("projectId", "Proyecto", projects)}{selector("siteId", "Sitio / zona", sites)}{selector("eventId", "Jornada", events)}
       {draft.treeSampleId ? <input type="hidden" name="treeSampleId" value={draft.treeSampleId} /> : null}
-      <button type="submit" className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-primary)" }}>Ver resultados</button>
+      <button type="submit" className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }}>Ver resultados</button>
     </form>
     <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
       <p>{guidedProgress(selected).trees} árbol(es) · {selected.length} evaluación(es) en {new Set(selected.map(r => r.event.id)).size} jornada(s)</p>
@@ -68,7 +68,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
         <dl className="my-4 grid grid-cols-2 gap-2 md:grid-cols-4">{DIRECTIONS.map(d => <div key={d} className="rounded-lg bg-stone-50 p-3">
           <dt className="text-sm">{DIRECTION_LABELS[d]}</dt><dd className="text-lg font-semibold">{savedViewLabel(row.views[d])}</dd>
         </div>)}</dl>
-        <div className="flex flex-wrap gap-3"><a className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-primary)" }} href={guidedResultHref(row)}>Ver las 4 vistas y el 360°</a>
+        <div className="flex flex-wrap gap-3"><a className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }} href={guidedResultHref(row)}>Ver las 4 vistas y el 360°</a>
           {!row.complete ? <a className="rounded border px-4 py-2" href={guidedResultHref(row, false)}>Continuar captura</a> : null}</div>
         {row.lastSavedAt ? <p className="mt-3 text-xs text-stone-600">Último guardado: {new Date(row.lastSavedAt).toLocaleString("es-DO")}</p> : null}
       </article>)}</div>}

@@ -52,7 +52,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
     <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
       <p>{guidedProgress(selected).trees} árbol(es) · {selected.length} evaluación(es) en {new Set(selected.map(r => r.event.id)).size} jornada(s)</p>
       <div className="flex flex-wrap gap-4"><a href="/analysis" className="underline">Ver todas las jornadas</a>
-        {filters.eventId && selected.length ? <a href={`/jornada/${encodeURIComponent(filters.eventId)}`} className="underline">Volver a la jornada</a> : null}
+        {filters.eventId ? <a href={`/jornada/${encodeURIComponent(filters.eventId)}`} className="underline">Revisar / cerrar jornada</a> : null}
         <button type="button" onClick={onRefresh} className="underline">Actualizar</button></div>
     </div>
     <GuidedProgress rows={selected} />

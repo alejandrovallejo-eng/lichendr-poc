@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.component-tests.json",
+  "compilerOptions": { "rootDir": "./src", "outDir": "/tmp/lichendr-jornada-closure-tests" },
+  "include": ["src/modules/jornada/closure.test.tsx"]
+}

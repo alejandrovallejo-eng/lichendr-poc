@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import PageHeader from "@/components/PageHeader";
+import { useGuidedResults } from "../four-view/use-guided-results";
+import { GuidedProgress } from "../four-view/GuidedResults";
 import { createTree, createTreeSample } from "@/modules/trees/client";
 import {
   fetchJornadaContext,
@@ -38,6 +40,8 @@ export default function JornadaWorkflow({ eventId }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [resultsRevision, setResultsRevision] = useState(0);
+  const guided = useGuidedResults(eventId, resultsRevision);
 
   // Add-tree form state.
   const [showAddNewTree, setShowAddNewTree] = useState(false);
@@ -64,6 +68,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
       setContext(ctx);
       const rows = await fetchJornadaTreesWithStatus(ctx.site.id, ctx.event.id);
       setTreeRows(rows);
+      setResultsRevision(value => value + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cargar la jornada.");
     }
@@ -245,6 +250,15 @@ export default function JornadaWorkflow({ eventId }: Props) {
           árboles nuevos o evalúa árboles existentes del sitio dentro de esta jornada. Un mismo árbol
           puede evaluarse en jornadas distintas sin perder su identidad.
         </p>
+      </section>
+
+      <section className="mb-6 space-y-3" aria-label="Resultados de esta jornada">
+        {guided.error ? <p role="alert">{guided.error} <button className="underline" onClick={guided.retry}>Reintentar lectura</button></p>
+          : guided.rows ? <GuidedProgress rows={guided.rows} /> : <p role="status">Consultando vistas guardadas…</p>}
+        <Link href={withPreservedContext("/analysis", contextQuery)} className="inline-block rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-primary)" }}>
+          Ver resultados de esta jornada →
+        </Link>
+        <p className="text-xs">Las cuatro vistas cuentan como un árbol. Estos resultados son descriptivos; no clasifican la calidad del aire.</p>
       </section>
 
       {error ? (
@@ -453,9 +467,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
                       className="inline-flex items-center gap-2 rounded px-3 py-1 text-xs font-medium"
                       style={{ background: "#E4F1E9", color: "#17533C", border: "1px solid #C8DECF" }}
                     >
-                      {/* Classic calibration status is not guided save status.
-                          Actual saved/pending counts are shown in the tree summary. */}
-                      Norte · Este · Sur · Oeste
+                      {guided.error ? "Guardado no disponible" : guided.rows ? `${guided.rows.find(result => result.sampleId === row.sample?.id)?.savedCount ?? 0}/4 vistas guardadas` : "Consultando guardado…"}
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">

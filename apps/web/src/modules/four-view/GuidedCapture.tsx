@@ -369,7 +369,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
           else if(step===3) setStep(4);
           else if(step===4) void save();
         }}>{step===4 ? editingSummary || DIRECTIONS.every(d=>d===direction||saved[d]) ? "Guardar y ver árbol" : direction==="W" ? "Guardar y continuar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : "Revisar sin IA" : "Continuar"}</button>
-      </div> : <a href={backHref} onClick={leave} style={{fontWeight:700}}>Continuar con otro árbol →</a>}
+      </div> : <div style={{display:"flex",gap:16,flexWrap:"wrap"}}><a href={`/analysis?${new URLSearchParams({projectId:context.projectId,siteId:context.siteId,eventId:context.eventId})}`} onClick={leave} style={{fontWeight:700}}>Ver resultados de la jornada</a><a href={backHref} onClick={leave} style={{fontWeight:700}}>Continuar con otro árbol →</a></div>}
     </footer>
   </section>;
 }

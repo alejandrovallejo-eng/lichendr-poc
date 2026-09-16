@@ -98,6 +98,7 @@ export default function ClosureReview({ eventId, load, change, onBack }: Closure
             {closed ? "Reabrir jornada" : summary.pending ? "Cerrar con pendientes" : "Confirmar cierre de jornada"}</button>
           <button type="button" className={button} disabled={busy} onClick={refresh}>Actualizar revisión</button>
           <a className={button} href={`/analysis?${new URLSearchParams({ eventId })}`}>Ver resultados de la jornada</a>
+          <a className={button} href={`/analysis?${new URLSearchParams({ mode: "ecology", eventId })}`}>Ver resumen ecológico</a>
         </div>
         {block && !closed ? <p className="text-sm text-stone-600">{block}</p> : null}
       </div>

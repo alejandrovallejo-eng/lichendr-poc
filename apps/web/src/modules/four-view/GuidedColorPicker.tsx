@@ -131,7 +131,7 @@ export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
       </select>
     </label>
     <div aria-label={`Tonos aceptados de ${group.name}`} style={{ border: "1px solid #d9e4dd", borderRadius: 10, padding: 10 }}>
-      <p style={{ fontSize: 12, marginBottom: 6 }}><strong>{tones.length} {tones.length === 1 ? "tono aceptado" : "tonos aceptados"}</strong> · {group.name}</p>
+      <p style={{ fontSize: 12, marginBottom: 6 }}><strong>{tones.length} {tones.length === 1 ? "tono aceptado" : "tonos aceptados"}</strong></p>
       <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap", maxHeight: 76, overflowY: "auto" }}>
         {tones.map((s, i) => <span key={i} title={`Tono ${i + 1}: RGB ${s.rgb.join(", ")}`} aria-label={`Tono aceptado ${i + 1}`}
           style={{ display: "inline-flex", gap: 3, alignItems: "center", fontSize: 11 }}>
@@ -158,12 +158,12 @@ export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
     </> : <>
       <div aria-label="Color capturado" style={{ display: "flex", gap: 10, alignItems: "center", padding: 10, border: "2px solid #b50096", borderRadius: 10, background: "#fff6fd" }}>
         <span role="img" aria-label={`Color elegido: RGB ${p.pending.rgb.join(", ")}`} style={{ width: 42, height: 42, flexShrink: 0, borderRadius: 8, background: rgb(p.pending), border: "1px solid #526057" }} />
-        <div style={{ fontSize: 12 }}><strong>Color capturado ✓</strong><br />Tono {tones.length + 1} para {group.name}<br /><span>Aún no está aceptado.</span></div>
+        <div style={{ fontSize: 12, minWidth: 0 }}><strong>Color capturado ✓</strong><div title={`Tono ${tones.length + 1} para ${group.name}`} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Tono {tones.length + 1} para {group.name}</div><span>Aún no está aceptado.</span></div>
       </div>
       <p role="status" style={{ fontSize: 13 }}>{p.proposal && p.accepted
-        ? `En fucsia: ${(100 * p.proposal.added / Math.max(1, p.accepted.total)).toFixed(1)} % nuevo del tronco para ${group.name}.`
-        : `Color capturado. Buscando zonas de tonos parecidos para ${group.name}…`}</p>
-      <p style={{ fontSize: 11 }}>El fucsia solo destaca la propuesta; no es el color del liquen. Nada cambia hasta que aceptes.</p>
+        ? `En fucsia: ${(100 * p.proposal.added / Math.max(1, p.accepted.total)).toFixed(1)} % nuevo del tronco.`
+        : "Color capturado. Buscando zonas de tonos parecidos…"}</p>
+      <p style={{ fontSize: 11 }}>Fucsia = propuesta, no color real. Solo se añade al aceptar.</p>
       <div style={{ display: "flex", gap: 6 }}>
         <button className="g-primary" disabled={!p.proposal?.added} onClick={p.accept} style={{ flex: 1, fontSize: 13 }}>Aceptar este tono</button>
         <button onClick={p.discard} style={{ fontSize: 13 }}>Descartar</button>
@@ -173,9 +173,9 @@ export function GuidedColorControls({ picker: p, config, onFocusPhoto }: {
           onChange={e => p.setSimilarity(Number(e.target.value))} />
         <span style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}><span>Más preciso</span><span>Más amplio</span></span>
       </label>
-      {p.proposal?.conflicts ? <p style={{ fontSize: 12 }}>Hay coincidencias con otro liquen. Se conserva lo ya aceptado; esas zonas no se añadirán.</p> : null}
-      {p.proposal && !p.proposal.added ? <p style={{ fontSize: 12 }}>No hay áreas nuevas. Ajusta la similitud o descarta este tono.</p> : null}
       <button aria-pressed={p.removing} disabled={!p.proposal?.added} onClick={() => p.setRemoving(!p.removing)} style={{ fontSize: 13 }}>{p.removing ? "Quitar zonas: activo" : "Quitar zona"}</button>
+      {p.proposal?.conflicts ? <p style={{ fontSize: 11 }}>Las zonas de otro liquen se conservan; no se añadirán a este.</p> : null}
+      {p.proposal && !p.proposal.added ? <p style={{ fontSize: 12 }}>No hay áreas nuevas. Ajusta la similitud o descarta este tono.</p> : null}
       {p.removing ? <p style={{ fontSize: 11 }}>Toca una zona fucsia para excluirla de esta propuesta.</p> : null}
     </>}
     {!p.accepted ? <p role="status" style={{ fontSize: 12 }}>Preparando selección…</p> : null}

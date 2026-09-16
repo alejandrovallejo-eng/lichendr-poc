@@ -255,7 +255,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
       <section className="mb-6 space-y-3" aria-label="Resultados de esta jornada">
         {guided.error ? <p role="alert">{guided.error} <button className="underline" onClick={guided.retry}>Reintentar lectura</button></p>
           : guided.rows ? <GuidedProgress rows={guided.rows} /> : <p role="status">Consultando vistas guardadas…</p>}
-        <Link href={withPreservedContext("/analysis", contextQuery)} className="inline-block rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-primary)" }}>
+        <Link href={withPreservedContext("/analysis", contextQuery)} className="inline-block rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }}>
           Ver resultados de esta jornada →
         </Link>
         <p className="text-xs">Las cuatro vistas cuentan como un árbol. Estos resultados son descriptivos; no clasifican la calidad del aire.</p>
@@ -306,7 +306,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
         <Link
           href="/preparar-jornada"
           className="px-4 py-2 rounded border text-sm"
-          style={{ color: "var(--ld-primary)", borderColor: "var(--ld-border)", background: "#fff" }}
+          style={{ color: "var(--ld-sidebar, #173D35)", borderColor: "var(--ld-border)", background: "#fff" }}
         >
           Cambiar de jornada
         </Link>
@@ -474,7 +474,7 @@ export default function JornadaWorkflow({ eventId }: Props) {
                     <Link
                       href={withPreservedContext("/images?mode=summary", perTreeCtx)}
                       className="inline-flex items-center rounded border px-3 py-2 text-sm font-semibold"
-                      style={{ borderColor: "var(--ld-primary)", background: "var(--ld-primary)", color: "#fff" }}
+                      style={{ borderColor: "var(--ld-sidebar, #173D35)", background: "var(--ld-sidebar, #173D35)", color: "#fff" }}
                     >
                       Ver análisis del árbol
                     </Link>

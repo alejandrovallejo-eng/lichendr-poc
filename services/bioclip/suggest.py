@@ -25,6 +25,7 @@ from constants import (
 )
 from encoder import LoadedEncoder, encode_images, encode_texts
 from head import TrainedHead
+from experimental import ExperimentalHead, ENCODER_SHA, encode_experimental
 from zeroshot import aggregate_prompt_embeddings, build_prompts, cosine_scores, rank_scores
 
 
@@ -48,6 +49,7 @@ class SuggestionBatch:
     preprocess_mode: str
     head_sha256: str | None = None
     versions: dict = field(default_factory=dict)
+    experimental: dict | None = None
 
 
 _text_cache: dict[str, np.ndarray] = {}
@@ -71,6 +73,7 @@ def suggest(
     *,
     preprocess_mode: str,
     trained_head: TrainedHead | None = None,
+    experimental_head: ExperimentalHead | None = None,
 ) -> SuggestionBatch:
     if len(crops) != len(region_ids):
         raise ValueError("Cada recorte necesita su identificador de región.")
@@ -84,6 +87,8 @@ def suggest(
             versions=_versions(),
         )
 
+    if experimental_head is not None and (preprocess_mode != "standard_center_crop" or encoder.weights_sha256 != ENCODER_SHA):
+        raise ValueError("Experimental comparison requires its verified encoder and preprocessing")
     embeddings = encode_images(encoder, list(crops), preprocess_mode)
 
     if trained_head is not None:
@@ -127,6 +132,7 @@ def suggest(
         preprocess_mode=preprocess_mode,
         head_sha256=head_sha256,
         versions=_versions(),
+        experimental=experimental_head.compare(encode_experimental(encoder, crops), list(region_ids)) if experimental_head is not None else None,
     )
 
 

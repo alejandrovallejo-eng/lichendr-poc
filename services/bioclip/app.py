@@ -45,6 +45,7 @@ from constants import (
 from encoder import PREPROCESS_MODES, EncoderUnavailable, load_encoder
 from head import HeadValidationError, load_trained_head
 from suggest import suggest
+from experimental import load_experimental
 
 Image.MAX_IMAGE_PIXELS = MAX_CROP_PIXELS
 
@@ -53,6 +54,7 @@ MODEL_DIR = os.environ.get("BIOCLIP_MODEL_DIR", "")
 HEAD_PATH = os.environ.get("BIOCLIP_HEAD_PATH", "")
 HEAD_SHA256 = os.environ.get("BIOCLIP_HEAD_SHA256", "")
 WORKER_TOKEN = os.environ.get("BIOCLIP_WORKER_TOKEN", "")
+EXPERIMENTAL_DIR = os.environ.get("BIOCLIP_EXPERIMENTAL_DIR", "")
 
 _inference_gate = asyncio.Semaphore(1)
 _queue_depth = 0
@@ -67,6 +69,7 @@ class RegionInput(BaseModel):
 class SuggestRequest(BaseModel):
     regions: list[RegionInput] = Field(min_length=1, max_length=MAX_REGIONS_PER_REQUEST)
     preprocess: str = "whole_crop_pad"
+    experimental: bool = Field(default=False, strict=True)
 
 
 @asynccontextmanager
@@ -87,6 +90,11 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
                 # An invalid head must never silently downgrade to zero-shot
                 # without saying so: the reason is reported by /health.
                 _state["head_error"] = str(error)
+        if EXPERIMENTAL_DIR:
+            try:
+                _state["experimental"] = load_experimental(EXPERIMENTAL_DIR)
+            except HeadValidationError:
+                _state["experimental"] = None
     yield
 
 
@@ -186,6 +194,7 @@ async def health() -> dict:
         "queueDepth": _queue_depth,
         "maxQueueDepth": MAX_QUEUE_DEPTH,
         "maxRegionsPerRequest": MAX_REGIONS_PER_REQUEST,
+        "experimentalAvailable": _state.get("experimental") is not None,
     }
 
 
@@ -203,6 +212,8 @@ async def suggest_regions(
         raise HTTPException(status_code=503, detail="encoder_unavailable")
     if payload.preprocess not in PREPROCESS_MODES:
         raise HTTPException(status_code=400, detail="invalid_preprocess")
+    if payload.experimental and (_state.get("experimental") is None or payload.preprocess != "standard_center_crop"):
+        raise HTTPException(status_code=503, detail="experimental_unavailable")
     # A head that was configured but failed validation must NOT silently fall
     # back to zero-shot: the caller asked for the trained head, so the request
     # is rejected with an explicit reason that the route forwards to the UI.
@@ -237,11 +248,13 @@ async def suggest_regions(
             admitted,
             region_ids,
             preprocess_mode=payload.preprocess,
+            experimental=payload.experimental,
         )
     finally:
         _queue_depth -= 1
 
     return {
+        **({"experimental": batch.experimental} if batch.experimental is not None else {}),
         "backend": batch.backend,
         "encoderId": batch.encoder_id,
         "encoderSha256": batch.encoder_sha256,
@@ -273,6 +286,7 @@ async def _run_inference(
     region_ids: list[str],
     *,
     preprocess_mode: str,
+    experimental: bool = False,
 ):
     """Run exactly one inference at a time, timeouts included.
 
@@ -304,6 +318,7 @@ async def _run_inference(
             region_ids,
             preprocess_mode,
             _state["head"],
+            *([_state["experimental"]] if experimental else []),
         )
     )
     # Released when the work actually ends, never when a caller gives up.
@@ -320,7 +335,7 @@ async def _run_inference(
         raise HTTPException(status_code=422, detail="inference_rejected") from None
 
 
-def _decode_and_suggest(encoder, admitted, region_ids, preprocess_mode, head):  # noqa: ANN001
+def _decode_and_suggest(encoder, admitted, region_ids, preprocess_mode, head, experimental_head=None):  # noqa: ANN001
     """Decode inside the worker thread and hand the crops to the encoder."""
 
     crops = [_decode_admitted(item) for item in admitted]
@@ -330,6 +345,7 @@ def _decode_and_suggest(encoder, admitted, region_ids, preprocess_mode, head):  
         region_ids,
         preprocess_mode=preprocess_mode,
         trained_head=head,
+        experimental_head=experimental_head,
     )
 
 

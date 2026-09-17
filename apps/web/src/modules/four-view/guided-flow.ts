@@ -53,7 +53,7 @@ export function parseGuidedReview(raw: string | null): GuidedReview | null {
 // It does not create or validate the colour mask. Keep that distinction in UI.
 // Every patch is clipped to the trunk; cap cost to six distinct sample points.
 export async function checkLichenSamples(reference: { imageId: string; treeSampleId: string; direction: Direction },
-  outline: TrunkPoint[], config: ColorConfig, width: number, height: number, signal: AbortSignal) {
+  outline: TrunkPoint[], config: ColorConfig, width: number, height: number, signal: AbortSignal, experimental = false) {
   const roi = rasterizeTrunk(outline, width, height);
   const grid = { width, height, originalWidth: width, originalHeight: height, orientationAppliedUpstream: true, rectified: false };
   const seen = new Set<string>();
@@ -68,7 +68,7 @@ export async function checkLichenSamples(reference: { imageId: string; treeSampl
       for (let x = Math.max(0, cx - radius); x < Math.min(width, cx + radius + 1); x++) mask[y * width + x] = roi[y * width + x];
     return applyEditedMask(manualRegion(`sample-${index}`, grid), mask, width, height);
   });
-  return requestRegionSuggestions({ ...reference, requestToken: crypto.randomUUID() }, regions, grid, signal);
+  return requestRegionSuggestions({ ...reference, requestToken: crypto.randomUUID(), ...(experimental ? { experimental: true } : {}) }, regions, grid, signal);
 }
 export function analysisRecord(result: ColorResult, width: number, height: number, ai: SuggestionResponse | null) {
   return { counts: result.counts, total: result.total, lichen: result.lichen, width, height, ai };

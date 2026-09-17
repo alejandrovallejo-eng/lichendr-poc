@@ -4,9 +4,27 @@ import test from "node:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { BioClipEvidence, evidenceItems } from "./BioClipEvidence.tsx";
+import { ExperimentalComparison } from "./ExperimentalComparison.tsx";
 import type { SuggestionResponse } from "../region-suggestions/client.ts";
 
 const reference = { imageId: "photo-n", treeSampleId: "tree-1", direction: "N" };
+test("second opinion uses plain language without turning undecided examples into absence", async () => {
+  const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+  const comparison=response().experimental!, before=JSON.stringify(comparison);
+  try {
+    await act(async()=>root.render(createElement(ExperimentalComparison,{comparison})));
+    assert.equal(host.querySelector("details")?.open,false);
+    assert.match(host.querySelector("summary")!.textContent!,/Segunda opinión de IA · 1\/2 ejemplos sugieren liquen · 1 para revisar/);
+    assert.match(host.textContent!,/Revisar manualmente/);
+    assert.match(host.textContent!,/no que falte liquen/);
+    assert.match(host.textContent!,/No cambia tu selección ni tu cobertura/);
+    assert.doesNotMatch(host.textContent!,/provisional|Comparación experimental|Sin determinar/);
+    assert.equal(JSON.stringify(comparison),before);
+    assert.equal(host.querySelectorAll("button,input").length,0);
+    await act(async()=>root.render(createElement(ExperimentalComparison,{})));
+    assert.equal(host.textContent,"");
+  } finally {await act(async()=>root.unmount());host.remove();}
+});
 function response(): SuggestionResponse {
   return { context: { ...reference, requestToken: "r1" }, cacheKey: "batch-1",
     suggestions: [
@@ -60,7 +78,7 @@ test("crop inspector is collapsed, read-only and bounded; reopen needs no infere
     assert.equal(svg.querySelector("image")?.getAttribute("href"),props.src);
     assert.ok(svg.querySelector("g")?.getAttribute("clip-path"));
     assert.equal(svg.style.height,"160px");
-    assert.match(host.textContent!,/Sin determinar/);assert.match(host.textContent!,/no todos los píxeles/);
+    assert.match(host.textContent!,/Revisar manualmente/);assert.doesNotMatch(host.textContent!,/Comparación experimental|Sin determinar/);assert.match(host.textContent!,/no todos los píxeles/);
     assert.match(host.textContent!,/recorte central/);
     await act(async()=>Array.from(host.querySelectorAll("button")).find(b=>b.textContent==="Ubicar en la foto")!.click());
     assert.equal(host.querySelector("svg")?.getAttribute("viewBox"),"0 0 1024 768");

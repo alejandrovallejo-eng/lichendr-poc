@@ -67,8 +67,8 @@ function EvidenceViewer({ ai, src, width, height, items }: Props & { items: Retu
         </svg>
         <button type="button" aria-pressed={location} onClick={() => setLocation(v => !v)}>{location ? "Volver al recorte" : "Ubicar en la foto"}</button>
       </> : <p>No está disponible el recorte guardado de este ejemplo. No lo reconstruimos por aproximación.</p>}
-      <p><strong>Sugerencia habitual:</strong> {item.habitual}.</p>
-      {item.experimental ? <p><strong>Comparación experimental:</strong> {item.experimental}.</p> : null}
+      <p><strong>Revisión de IA:</strong> {item.habitual}.</p>
+      {item.experimental ? <p><strong>Segunda opinión:</strong> {item.experimental === "Sin determinar" ? "Revisar manualmente" : item.experimental}.</p> : null}
       <p>La sugerencia describe este recorte, no todos los píxeles del color que elegiste. Tu selección y cobertura no cambian.</p>
       {ai?.suggestions.some(s => s.preprocess === "standard_center_crop")
         ? <p style={{ color: "#4a6156", fontSize: 11 }}>Se muestra la región enviada. El modelo la redimensiona y utiliza un recorte central.</p> : null}

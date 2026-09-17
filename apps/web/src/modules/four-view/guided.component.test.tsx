@@ -209,7 +209,7 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     await click("Aceptar este tono");assert.equal(button("Analizar selección").disabled,false);
     await click("Analizar selección");
     for(let i=0;i<80 && !host.textContent!.includes(aiUnavailable?"Worker unavailable":"Revisa y guarda");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
-    if(aiUnavailable){assert.match(host.textContent!,/Sin revisión de IA/);await click("Revisar sin IA");}
+    if(aiUnavailable){assert.match(host.textContent!,/Sin revisión de IA/);await click("Continuar sin IA");}
     assert.equal(calls,1);assert.match(host.textContent!,/100.0 %/);assert.equal(host.querySelectorAll("svg").length,1);
     failSave=true;
     await click("Guardar y pasar a Este");assert.match(host.textContent!,/No avanzamos/);assert.match(host.textContent!,/Norte · 1 de 4/);

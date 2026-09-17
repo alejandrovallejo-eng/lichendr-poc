@@ -19,6 +19,7 @@ import { issueSessionTicket } from "./session-ticket.ts";
 import { resetSerialCoordinator } from "./serial.ts";
 import { clearSuggestionCache } from "../../../app/api/vision/region-suggestions/cache.ts";
 import type { Box } from "../types.ts";
+import { EXPERIMENTAL_MODEL, EXPERIMENTAL_BUNDLE, EXPERIMENTAL_LABELS } from "../experimental.ts";
 
 const SUPABASE_URL = "https://project.supabase.co";
 const TOKEN = "0123456789abcdef0123456789abcdef";
@@ -580,12 +581,13 @@ test("releasing works from another instance and only for the owner", async () =>
   assert.ok(ownerLog.urls.some((url) => url.includes("/sessions/")));
 });
 
-function suggestRequest() {
+function suggestRequest(extra: Record<string, unknown> = {}) {
   return jsonRequest({
     imageId: IMAGE_IDS.N,
     treeSampleId: TREE,
     direction: "N",
     requestToken: "token1",
+    ...extra,
     sourceWidth: 1024,
     sourceHeight: 768,
     regions: [
@@ -619,6 +621,40 @@ async function suggestDeps(
 }
 
 // A FLAT proxy compresses to almost nothing, so it can never show the byte
+test("experimental comparison is explicit, complete and isolated from habitual cache", async () => {
+  reset(); const log = emptyLog(); const deps = await suggestDeps(log);
+  const originalFetch = deps.fetchImpl;
+  let calls = 0;
+  deps.preprocessMode = "standard_center_crop";
+  deps.fetchImpl = (async (input, init) => {
+    const response = await originalFetch(input, init);
+    if (!String(input).endsWith("/suggest-regions")) return response;
+    const payload = JSON.parse(String(init?.body));
+    if (!payload.experimental) return response;
+    calls++;
+    return Response.json({ ...await response.json(), experimental: {
+      modelId: EXPERIMENTAL_MODEL, bundleSha256: EXPERIMENTAL_BUNDLE, experimental: true, preprocess: "standard_center_crop",
+      suggestions: payload.regions.map((r: { regionId: string }) => ({ regionId: r.regionId, status: "pending", decision: "undetermined",
+        ranking: EXPERIMENTAL_LABELS.map((label, i) => ({ label, rawScore: 1 - i * .1 })) })),
+    } });
+  }) as typeof fetch;
+  const first = await handleRegionSuggestions(deps, suggestRequest());
+  assert.equal(first.status, 200); assert.equal(first.body.experimental, undefined);
+  for (let i = 0; i < 2; i++) {
+    const result = await handleRegionSuggestions(deps, suggestRequest({ experimental: true }));
+    assert.equal(result.status, 200); assert.equal(result.body.cached, false);
+    assert.deepEqual(result.body.suggestions, first.body.suggestions);
+    const comparison = result.body.experimental as { suggestions: { decision: string }[] };
+    assert.equal(comparison.suggestions[0].decision, "undetermined");
+  }
+  assert.equal(calls, 2);
+  const habitual = await handleRegionSuggestions(deps, suggestRequest());
+  assert.equal(habitual.body.cached, true); assert.equal(habitual.body.experimental, undefined);
+  assert.equal((await handleRegionSuggestions(deps, suggestRequest({ experimental: "true" }))).status, 400);
+  deps.fetchImpl = originalFetch;
+  assert.equal((await handleRegionSuggestions(deps, suggestRequest({ experimental: true }))).status, 502);
+});
+
 // budget failing. This one is real noise, like the bark the reviewer photographs:
 // its crops are megabytes of incompressible PNG.
 let texturedBytesCache: Buffer | null = null;

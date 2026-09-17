@@ -25,6 +25,7 @@ import {
 } from "./context";
 import { resolveWorkerIdentity, sameWorkerIdentity, type WorkerIdentity } from "./identity";
 import { runSerially } from "./serial";
+import { parseExperimental, EXPERIMENTAL_BUNDLE } from "../experimental";
 
 export interface SuggestDeps {
   supabase: SupabaseClient;
@@ -130,6 +131,10 @@ export async function handleRegionSuggestions(
 
   const parsed = parseRequest(raw);
   if ("error" in parsed) return { status: 400, body: { error: parsed.error } };
+  const comparisonRequested = (raw as Record<string, unknown>).experimental;
+  if (comparisonRequested !== undefined && typeof comparisonRequested !== "boolean")
+    return { status: 400, body: { error: "La opción experimental no es válida." } };
+  const experimental = comparisonRequested === true;
   const { imageId, treeSampleId, direction, requestToken, sourceWidth, sourceHeight, regions } =
     parsed;
   const ownerId = authData.user.id;
@@ -182,7 +187,7 @@ export async function handleRegionSuggestions(
       proxySha256,
       maskSetSha256,
       preprocessVersion: deps.preprocessMode,
-      suggestionVersion: SUGGESTION_VERSION,
+      suggestionVersion: experimental ? `${SUGGESTION_VERSION}-experimental-${EXPERIMENTAL_BUNDLE}` : SUGGESTION_VERSION,
     };
 
     // Bounded reuse is only attempted when the identity of the model can be
@@ -196,7 +201,8 @@ export async function handleRegionSuggestions(
     } catch {
       return { status: 503, body: { error: "BioCLIP todavía no está listo. Tus selecciones están guardadas; reintenta en un momento." } };
     }
-    const cacheKey = declaredIdentity
+    // Comparisons are never read from or written into the habitual cache.
+    const cacheKey = declaredIdentity && !experimental
       ? suggestionCacheKey({ ...identityBase, ...identityOf(declaredIdentity) })
       : null;
     if (cacheKey) {
@@ -246,11 +252,13 @@ export async function handleRegionSuggestions(
       headWarning?: unknown;
       versions?: Record<string, string>;
       suggestions?: unknown;
+      experimental?: unknown;
     };
     // The real serialised body is measured BEFORE sending it: the budget above is
     // an estimate, this is the actual size the worker will read.
     const workerBody = JSON.stringify({
       preprocess: deps.preprocessMode,
+      ...(experimental ? { experimental: true } : {}),
       regions: crops.map((crop) => ({
         regionId: crop.regionIds[0],
         cropPngBase64: crop.base64,
@@ -283,7 +291,9 @@ export async function handleRegionSuggestions(
         return {
           status: upstream.status === 429 ? 429 : 502,
           body: {
-            error: headInvalid
+            error: detail === "experimental_unavailable"
+              ? "La comparación experimental aún no está disponible. Desmarca esa opción para usar el modelo habitual. Tus selecciones se conservan."
+              : headInvalid
               ? "La cabeza entrenada configurada no es válida, así que no se emiten sugerencias. Revisa el archivo NPZ; tus fotografías y revisiones se conservan."
               : "El worker BioCLIP rechazó la solicitud. Las fotografías y tus revisiones se conservan.",
           },
@@ -308,8 +318,16 @@ export async function handleRegionSuggestions(
       headError: null,
     };
     const identity = { ...identityBase, ...identityOf(answeredIdentity) };
+    const comparison = experimental ? parseExperimental(workerPayload.experimental, crops.map(c => c.regionIds[0])) : null;
+    if (experimental && !comparison) return { status: 502, body: { error: "No se pudo verificar la comparación experimental. No se reemplaza por una respuesta del modelo habitual." } };
 
     const payload = {
+      ...(comparison ? { experimental: { ...comparison,
+        suggestions: crops.flatMap(crop => {
+          const suggestion = comparison.suggestions.find(s => s.regionId === crop.regionIds[0])!;
+          return crop.regionIds.map(regionId => ({ ...suggestion, regionId }));
+        }),
+      } } : {}),
       context: { imageId, treeSampleId, direction, requestToken },
       cacheKey: suggestionCacheKey(identity),
       cached: false,

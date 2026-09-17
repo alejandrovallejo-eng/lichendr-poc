@@ -6,6 +6,7 @@ import type { GuidedReview, GuidedServices, GuidedSession } from "./guided-flow"
 import { classifyTrunkColors, colorWorkingSize, OVERLAY_RGB } from "../region-suggestions/trunk-colors";
 import { TreeOrbit } from "./TreeOrbit";
 import { ExperimentalComparison } from "./ExperimentalComparison";
+import { BioClipEvidence } from "./BioClipEvidence";
 import { GuidedGroupCoverage } from "./GuidedColorPicker";
 
 type Entry = { review: GuidedReview | null; src: string; loading: boolean; error: string };
@@ -129,6 +130,8 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
         <p>{(100 * (a.total - a.lichen) / a.total).toFixed(1)} % sin clasificar</p>
         <p>{ai?.suggestions.length ? `BioCLIP: sugiere liquen en ${matches}/${ai.suggestions.length} ejemplos.` : "Sin revisión de IA guardada."}</p>
         <ExperimentalComparison comparison={ai?.experimental} />
+        {imageId ? <BioClipEvidence ai={ai} src={decoded && overlay && !maskError ? entry.src : ""} width={size.width} height={size.height}
+          reference={{ imageId, treeSampleId, direction }} /> : null}
         <GuidedGroupCoverage config={entry.review!.config} counts={a.counts} total={a.total} />
       </> : <p>{imageId ? "La foto está guardada; falta confirmar su análisis en este flujo." : "Completa esta orientación para añadir su análisis."}</p>}
       {entry.error || maskError ? <p role="alert" style={{ color: "#9c341f" }}>{entry.error || maskError}</p> : null}

@@ -10,6 +10,7 @@ import { trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-
 import { orderedCloudWriter, reviewFingerprint, type CloudReview } from "./guided-cloud";
 import { TreeSummary } from "./TreeSummary";
 import { ExperimentalComparison } from "./ExperimentalComparison";
+import { BioClipEvidence } from "./BioClipEvidence";
 import { GuidedColorControls, GuidedGroupCoverage, GuidedToneMarker, proposalDisplayPixels, useGuidedColorPicker } from "./GuidedColorPicker";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
@@ -373,6 +374,8 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
         {step === 2 ? <details style={{ fontSize: 12 }}><summary>Opciones de IA</summary><label style={{ display: "block", marginTop: 8 }}><input type="checkbox" checked={experimental} disabled={!!busy} onChange={e => setExperimental(e.target.checked)} /> Comparar detector ampliado (experimental)</label><p>También distingue algas y otros hongos; puede dejar ejemplos sin determinar. No modifica tu selección ni sustituye al modelo habitual.</p></details> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
         {step >= 3 && a ? <GuidedGroupCoverage config={review.config} counts={a.counts} total={a.total} /> : null}
+        {step >= 3 && a && session && imageId ? <BioClipEvidence ai={a.ai} src={src} width={photoWidth} height={photoHeight}
+          reference={{ imageId, treeSampleId: session.treeSampleId, direction }} /> : null}
         {step >= 3 ? <ExperimentalComparison comparison={a?.ai?.experimental} /> : null}
         {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. {editingSummary || DIRECTIONS.every(d => d === direction || saved[d]) ? "Después verás el análisis del árbol con sus cuatro vistas." : "Después se abre la siguiente orientación."}</p> : null}
         {cloudStatus ? <p role="status" style={{ fontSize: 12 }}>{cloudStatus}</p> : null}

@@ -92,6 +92,19 @@ def test_missing_encoder_is_reported_not_downloaded(monkeypatch: pytest.MonkeyPa
     assert health["backend"] == "zeroshot"
 
 
+def test_experimental_request_never_silently_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_app(monkeypatch, BIOCLIP_WORKER_ENABLED="1", BIOCLIP_MODEL_DIR="/nonexistent-model-dir")
+    module._state["encoder"] = object()
+    body = {"regions": [{"regionId": "r1", "cropPngBase64": encoded_png()}],
+            "preprocess": "standard_center_crop", "experimental": True}
+    with TestClient(module.app) as client:
+        unavailable = client.post("/suggest-regions", json=body)
+        assert unavailable.status_code == 503
+        assert unavailable.json()["detail"] == "experimental_unavailable"
+        invalid = client.post("/suggest-regions", json={**body, "experimental": "true"})
+        assert invalid.status_code == 422
+
+
 def test_invalid_head_is_surfaced_and_never_silently_ignored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -218,6 +231,7 @@ def test_only_one_inference_runs_at_a_time(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 class _FakeBatch:
+    experimental = None
     """Minimal stand-in for a SuggestionBatch: these tests never load BioCLIP."""
 
     backend = "zeroshot"

@@ -5,6 +5,8 @@ import { DIRECTIONS, DIRECTION_LABELS, type Direction } from "./types";
 import type { GuidedReview, GuidedServices, GuidedSession } from "./guided-flow";
 import { classifyTrunkColors, colorWorkingSize, OVERLAY_RGB } from "../region-suggestions/trunk-colors";
 import { TreeOrbit } from "./TreeOrbit";
+import { ExperimentalComparison } from "./ExperimentalComparison";
+import { BioClipEvidence } from "./BioClipEvidence";
 import { GuidedGroupCoverage } from "./GuidedColorPicker";
 
 type Entry = { review: GuidedReview | null; src: string; loading: boolean; error: string };
@@ -69,7 +71,8 @@ export function TreeSummary({ session, services, onEdit }: {
         marked={marked} expanded={expanded !== null} onExpand={() => setExpanded(direction)}
         onEdit={() => onEdit(direction)} onRetry={() => setAttempt(n => n + 1)} />)}
     </div>}
-    <p className="tree-summary-note">Cada porcentaje corresponde al tronco delimitado en esa foto. BioCLIP revisa ejemplos; no valida toda la selección. Las cuatro vistas no equivalen a una medición de superficie total ni de calidad del aire.</p>
+    <p className="tree-summary-note">Cobertura estimada del tronco en cada foto.</p>
+    <details className="tree-summary-note"><summary>Cómo interpretar estos resultados</summary><p>El porcentaje se calcula con los colores que aceptaste dentro del contorno. La IA revisa ejemplos, no toda la selección. Las cuatro vistas no equivalen a una medición de superficie total ni de calidad del aire, y la IA no identifica especies.</p></details>
   </main>;
 }
 
@@ -125,8 +128,11 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
     </div>
     <div className="tree-summary-info" style={{ minHeight: 0, overflowY: "auto" }}>
       {a ? <><p>Cobertura estimada por color</p><p style={{ fontSize: 30, fontWeight: 750 }}>{(100 * a.lichen / a.total).toFixed(1)} %</p>
-        <p>{(100 * (a.total - a.lichen) / a.total).toFixed(1)} % sin clasificar</p>
-        <p>{ai?.suggestions.length ? `BioCLIP: sugiere liquen en ${matches}/${ai.suggestions.length} ejemplos.` : "Sin revisión de IA guardada."}</p>
+        <p>{(100 * (a.total - a.lichen) / a.total).toFixed(1)} % sin seleccionar</p>
+        <p>{ai?.suggestions.length ? `Revisión de IA: ${matches}/${ai.suggestions.length} ejemplos sugieren liquen.` : "Sin revisión de IA guardada."}</p>
+        <ExperimentalComparison comparison={ai?.experimental} />
+        {imageId ? <BioClipEvidence ai={ai} src={decoded && overlay && !maskError ? entry.src : ""} width={size.width} height={size.height}
+          reference={{ imageId, treeSampleId, direction }} /> : null}
         <GuidedGroupCoverage config={entry.review!.config} counts={a.counts} total={a.total} />
       </> : <p>{imageId ? "La foto está guardada; falta confirmar su análisis en este flujo." : "Completa esta orientación para añadir su análisis."}</p>}
       {entry.error || maskError ? <p role="alert" style={{ color: "#9c341f" }}>{entry.error || maskError}</p> : null}

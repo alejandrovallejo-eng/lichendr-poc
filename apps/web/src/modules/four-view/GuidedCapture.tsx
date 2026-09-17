@@ -9,6 +9,8 @@ import { classifyTrunkColors, colorWorkingSize, initialColorConfig, OVERLAY_RGB,
 import { trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { orderedCloudWriter, reviewFingerprint, type CloudReview } from "./guided-cloud";
 import { TreeSummary } from "./TreeSummary";
+import { ExperimentalComparison } from "./ExperimentalComparison";
+import { BioClipEvidence } from "./BioClipEvidence";
 import { GuidedColorControls, GuidedGroupCoverage, GuidedToneMarker, proposalDisplayPixels, useGuidedColorPicker } from "./GuidedColorPicker";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
@@ -39,6 +41,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const [proposalOverlay, setProposalOverlay] = useState("");
   const [showOverlay, setShowOverlay] = useState(true);
   const [compareOriginal, setCompareOriginal] = useState(false);
+  const [experimental, setExperimental] = useState(false);
   const [busy, setBusy] = useState("Recuperando esta captura…");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState<Partial<Record<Direction, boolean>>>({});
@@ -264,7 +267,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       await sync(partial);
       if (current !== generation.current) return;
       setBusy("Preparando la IA y revisando tus ejemplos. El primer análisis puede tardar unos dos minutos…");
-      const ai = await checkSamples({ imageId, treeSampleId: session.treeSampleId, direction }, review.outline, review.config, pixels.width, pixels.height, abort.signal);
+      const ai = await checkSamples({ imageId, treeSampleId: session.treeSampleId, direction }, review.outline, review.config, pixels.width, pixels.height, abort.signal, experimental);
       if (current !== generation.current) return;
       if (ai.context.imageId !== imageId || ai.context.treeSampleId !== session.treeSampleId || ai.context.direction !== direction || !ai.suggestions.length)
         throw new Error("La respuesta de IA no corresponde a esta fotografía.");
@@ -368,8 +371,12 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
         {step === 0 ? <><p>Una fotografía por orientación. Empezamos con {name.toLowerCase()}.</p><label className="g-upload">{imageId ? "Reemplazar fotografía" : "Elegir fotografía"}<input aria-label={`Subir foto de ${name}`} type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" className="g-hidden" disabled={!!busy || !session || session.completed} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file); }} /></label>{imageId ? <p style={{ fontSize: 13 }}>Original guardado ✓</p> : null}{saved[direction] ? <p>Esta vista ya tiene una revisión guardada.</p> : null}</> : null}
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
         {step === 2 ? <GuidedColorControls picker={picker} config={review.config} onFocusPhoto={() => { setCompareOriginal(false); setShowOverlay(true); photo.current?.focus(); }} /> : null}
-        {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % restante sin clasificar; no se asume corteza.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>BioCLIP sugiere liquen en {matching}/{a.ai.suggestions.length} ejemplos. {matching < a.ai.suggestions.length ? "Hay diferencias: comprueba los colores antes de guardar." : "Comprueba igualmente la selección."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje se calcula por color dentro del contorno. La IA revisa recortes de ejemplo, no identifica especies ni valida todos los píxeles.</p></> : null}
+        {step === 2 ? <details style={{ fontSize: 12 }}><summary>Opciones de IA</summary><label style={{ display: "block", marginTop: 8 }}><input type="checkbox" checked={experimental} disabled={!!busy} onChange={e => setExperimental(e.target.checked)} /> Añadir segunda opinión de IA</label><p>Revisión adicional en prueba para distinguir musgo, algas y otros hongos. Tu selección se conserva.</p></details> : null}
+        {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % sin seleccionar.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>Revisión de IA: {matching}/{a.ai.suggestions.length} ejemplos sugieren liquen. {matching < a.ai.suggestions.length ? "Hay diferencias: revisa las zonas resaltadas." : "Revisa las zonas resaltadas antes de guardar."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje corresponde al área que seleccionaste dentro del contorno.</p></> : null}
         {step >= 3 && a ? <GuidedGroupCoverage config={review.config} counts={a.counts} total={a.total} /> : null}
+        {step >= 3 && a && session && imageId ? <BioClipEvidence ai={a.ai} src={src} width={photoWidth} height={photoHeight}
+          reference={{ imageId, treeSampleId: session.treeSampleId, direction }} /> : null}
+        {step >= 3 ? <ExperimentalComparison comparison={a?.ai?.experimental} /> : null}
         {step === 4 ? <p style={{ fontSize: 12 }}>Al guardar confirmas la selección visible y su revisión en la nube. {editingSummary || DIRECTIONS.every(d => d === direction || saved[d]) ? "Después verás el análisis del árbol con sus cuatro vistas." : "Después se abre la siguiente orientación."}</p> : null}
         {cloudStatus ? <p role="status" style={{ fontSize: 12 }}>{cloudStatus}</p> : null}
         {recovery ? <button disabled={!!busy} onClick={() => { const draft = { ...recovery, savedAt: null }; persist(draft); setReview(draft); setResult(null); setRecovery(null); setSaved(s => ({ ...s, [direction]: false })); setCloudStatus("Borrador recuperado; pulsa Guardar para sincronizar"); }}>Recuperar borrador local distinto</button> : null}
@@ -395,7 +402,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
           else if(step===2) void analyse();
           else if(step===3) setStep(4);
           else if(step===4) void save();
-        }}>{step===4 ? editingSummary || DIRECTIONS.every(d=>d===direction||saved[d]) ? "Guardar y ver árbol" : direction==="W" ? "Guardar y continuar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : "Revisar sin IA" : "Continuar"}</button>
+        }}>{step===4 ? editingSummary || DIRECTIONS.every(d=>d===direction||saved[d]) ? "Guardar y ver árbol" : direction==="W" ? "Guardar y continuar" : `Guardar y pasar a ${DIRECTION_LABELS[DIRECTIONS[DIRECTIONS.indexOf(direction)+1]]}` : step===2 ? "Analizar selección" : step===3 ? busy ? "Analizando…" : a?.ai ? "Continuar" : "Continuar sin IA" : "Continuar"}</button>
       </div> : <div style={{display:"flex",gap:16,flexWrap:"wrap"}}><a href={`/analysis?${new URLSearchParams({projectId:context.projectId,siteId:context.siteId,eventId:context.eventId})}`} onClick={leave} style={{fontWeight:700}}>Ver resultados de la jornada</a><a href={backHref} onClick={leave} style={{fontWeight:700}}>Continuar con otro árbol →</a></div>}
     </footer>
   </section>;

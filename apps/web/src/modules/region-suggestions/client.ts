@@ -20,12 +20,14 @@
 import { maskBoundingBox } from "./crop-geometry";
 import { encodeMaskRle, maskArea } from "./mask-codec";
 import type { Box, ProposedRegion, RegionSuggestion, SuggestionProvenance } from "./types";
+import type { ExperimentalComparison } from "./experimental";
 
 export interface SuggestionRequestContext {
   imageId: string;
   treeSampleId: string;
   direction: string;
   requestToken: string;
+  experimental?: boolean;
 }
 
 export interface SuggestionResponse {
@@ -38,6 +40,7 @@ export interface SuggestionResponse {
   geometry: Array<{ regionId: string; cropBoxNormalized: Box }>;
   suggestions: RegionSuggestion[];
   notice: string;
+  experimental?: ExperimentalComparison;
 }
 
 // Fixed, reproducible prompt grid — proposals must not depend on where the

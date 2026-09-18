@@ -14,12 +14,14 @@ export default function AccountPanel() {
   useEffect(() => {
     let active = true;
     const load = async () => {
-      setMessage(authMessage(new URL(window.location.href).searchParams.get("status")));
+      const status = new URL(window.location.href).searchParams.get("status");
       try {
         const result = await supabase.auth.getUser();
         if (result.error && result.error.name !== "AuthSessionMissingError") throw result.error;
         if (!active) return;
         setUser(result.data.user);
+        const verifiedGoogle = result.data.user && !result.data.user.is_anonymous && result.data.user.identities?.some(identity => identity.provider === "google");
+        setMessage(authMessage(status === "connected" && !verifiedGoogle ? null : status));
         if (result.data.user) {
           const projects = await supabase.from("projects").select("id", { head: true, count: "exact" }).eq("owner_id", result.data.user.id);
           if (active && !projects.error) setCount(projects.count);

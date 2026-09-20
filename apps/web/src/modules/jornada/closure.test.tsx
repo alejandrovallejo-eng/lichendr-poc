@@ -118,7 +118,7 @@ async function render(props: Partial<ClosureReviewProps>, run: (host: HTMLDivEle
   const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
   try {
     await act(async () => root.render(createElement(ClosureReview, {
-      eventId: "event", load: async () => fixture(), change: async snapshot => ({ changed: false, snapshot }), onBack() {}, ...props,
+      eventId: "event", load: async () => fixture(), change: async snapshot => ({ changed: false, snapshot }), onBack() {}, navigate() {}, ...props,
     })));
     await run(host);
   } finally { await act(async () => root.unmount()); host.remove(); }
@@ -167,5 +167,18 @@ test("concurrent change clears acknowledgement and requires another review", asy
     await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
     await act(async () => findButton(host, "Cerrar con pendientes").click());
     assert.match(host.textContent!, /cambió desde/); assert.equal(findButton(host, "Cerrar con pendientes").disabled, true);
+  });
+});
+test("only a confirmed closure opens the unified summary; reopening stays on the review", async () => {
+  const visited: string[] = [];
+  await render({ navigate: href => visited.push(href), change: async (s, status) => ({ changed: true, snapshot: { ...s, event: { ...s.event, status } } }) }, async host => {
+    await act(async () => findButton(host, "Confirmar cierre de jornada").click());
+    assert.deepEqual(visited, ["/analysis?eventId=event"]);
+    await act(async () => findButton(host, "Reabrir jornada").click());
+    assert.equal(visited.length, 1);
+  });
+  await render({ navigate: href => visited.push(href), change: async s => ({ changed: false, snapshot: s }) }, async host => {
+    await act(async () => findButton(host, "Confirmar cierre de jornada").click());
+    assert.equal(visited.length, 1);
   });
 });

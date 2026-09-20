@@ -6,8 +6,9 @@ import { morphDisplayName } from "./ecology";
 import { guidedResultHref } from "./guided-results";
 import { DIRECTION_LABELS, type Direction } from "./types";
 
-export default function EcologySummary({ data, eventId, onReview }: {
+export default function EcologySummary({ data, eventId, onReview, includeCapture = false }: {
   data: EcologyData; eventId: string; onReview: (sampleId: string, direction: Direction) => void;
+  includeCapture?: boolean;
 }) {
   let summary;
   try { summary = buildEcologySummary(data, eventId); }
@@ -15,7 +16,9 @@ export default function EcologySummary({ data, eventId, onReview }: {
   const missing = summary.expectedViews - summary.quadrats;
   return <div className="space-y-5" aria-label="Resumen ecológico de la jornada">
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-      {[[summary.trees.length, "Árboles de la jornada"], [`${summary.treesReviewed}/${summary.trees.length}`, "Con algún cuadrante revisado"],
+      {[[summary.trees.length, "Árboles de la jornada"], includeCapture
+        ? [`${data.rows.reduce((n, r) => n + r.savedCount, 0)}/${summary.expectedViews}`, "Vistas guardadas N/E/S/O"]
+        : [`${summary.treesReviewed}/${summary.trees.length}`, "Con algún cuadrante revisado"],
         [`${summary.quadrats}/${summary.expectedViews}`, "Cuadrantes vigentes N/E/S/O"], [summary.quadrats ? summary.morphs.length : "—", "Morfoespecies registradas"]].map(([value, label]) =>
         <div key={label} className="rounded-xl border bg-white p-4"><p className="text-2xl font-bold">{value}</p><p className="text-sm">{label}</p></div>)}
     </div>
@@ -48,14 +51,18 @@ export default function EcologySummary({ data, eventId, onReview }: {
 
     <section className="space-y-3" aria-label="Árboles y cuadrantes">
       <h2 className="text-lg font-bold">Árboles y sus cuatro vistas</h2>
-      {summary.trees.map(({ tree, views, savedCount, morphIds }) => <article key={tree.sampleId} className="rounded-xl border bg-white p-4">
+      {summary.trees.map(({ tree, views, savedCount, morphIds }) => <article id={`arbol-${tree.sampleId}`} key={tree.sampleId} className="rounded-xl border bg-white p-4">
         <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-bold">{tree.tree.code}</h3>
+          {includeCapture ? <p className="text-sm">{tree.savedCount}/4 vistas guardadas</p> : null}
           <p className="text-sm">{savedCount}/4 cuadrantes revisados{savedCount ? ` · ${morphIds.length} morfoespecies registradas` : " · diversidad pendiente"}</p></div>
           <a className="text-sm underline" href={guidedResultHref(tree)}>Ver tronco completo y 360°</a></div>
         <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">{views.map(v => <div key={v.direction} className={`rounded-lg p-3 text-sm ${v.state === "saved" ? "bg-emerald-50" : "bg-stone-50"}`}>
           <h4 className="font-semibold">{DIRECTION_LABELS[v.direction]}</h4>
+          {includeCapture ? <p className="my-2 font-semibold">Tronco delimitado: {tree.views[v.direction].state === "saved"
+            ? `${tree.views[v.direction].coverage!.toFixed(1)} %`
+            : { missing: "Sin foto", pending: "Sin guardar", invalid: "Revisar guardado", saved: "Guardada" }[tree.views[v.direction].state]}</p> : null}
           <p>{v.state === "saved" ? "Cuadrante guardado" : v.state === "changed" ? "Tronco modificado: revisar" : v.state === "pending" ? "Cuadrante pendiente" : "Captura pendiente o por revisar"}</p>
-          {v.state === "saved" ? <details className="mt-2"><summary className="cursor-pointer underline">Ver coberturas</summary>
+          {v.state === "saved" ? <details className="mt-2" open={includeCapture || undefined}><summary className="cursor-pointer underline">Cobertura del cuadrante</summary>
             <ul className="mt-2 space-y-1">{v.row!.review.config.confirmed!.groups.filter(g => g.id !== "unassigned" && v.row!.review.counts[g.label] > 0).map(g =>
               <li key={g.id} style={{ overflowWrap: "anywhere" }}>{morphDisplayName(data.catalog.find(m => m.id === g.id)!)}: {(100 * v.row!.review.counts[g.label] / v.row!.review.total).toFixed(1)} %</li>)}
               <li>Sin clasificar: {(100 * v.row!.review.counts[1] / v.row!.review.total).toFixed(1)} %</li></ul>

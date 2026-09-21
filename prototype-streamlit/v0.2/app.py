@@ -70,6 +70,16 @@ CLASS_COLORS = {
 
 VALID_COVER_CLASSES = {"Liquen", "Corteza", "Musgo", "Alga"}
 RADIUS_OPTIONS = [50, 100, 250, 500, 1000]
+METHOD_VERSION = "0.3-cell-frequency"
+FRAME_WIDTH_CM = 50
+FRAME_HEIGHT_CM = 10
+FRAME_CELL_COUNT = 5
+CELL_STATES = {
+    "proposed": "Propuesta pendiente",
+    "observed": "Presencia observada",
+    "not_observed": "No observada tras revisión",
+    "not_evaluated": "No evaluada",
+}
 
 
 def now_iso() -> str:
@@ -576,6 +586,147 @@ def normalized_roi(value: dict[str, Any]) -> list[float] | None:
     ]
 
 
+def default_frame() -> dict[str, Any]:
+    return {
+        "width_cm": FRAME_WIDTH_CM,
+        "height_cm": FRAME_HEIGHT_CM,
+        "geometry": None,
+        "orientation": None,
+        "position_confirmed": False,
+        "scale_px_per_cm": None,
+        "calibration_source": "not_available",
+        "method_version": METHOD_VERSION,
+    }
+
+
+def frame_geometry(image_record: dict[str, Any]) -> list[float] | None:
+    frame = image_record.get("frame") or {}
+    geometry = frame.get("geometry")
+    if isinstance(geometry, list) and len(geometry) == 4:
+        return geometry
+    return None
+
+
+def frame_cells(image_record: dict[str, Any]) -> list[dict[str, Any]]:
+    geometry = frame_geometry(image_record)
+    if not geometry:
+        return []
+    left, top, right, bottom = geometry
+    return [
+        {
+            "index": index,
+            "label": f"Celda {index + 1}",
+            "geometry": [
+                left + (right - left) * index / FRAME_CELL_COUNT,
+                top,
+                left + (right - left) * (index + 1) / FRAME_CELL_COUNT,
+                bottom,
+            ],
+        }
+        for index in range(FRAME_CELL_COUNT)
+    ]
+
+
+def point_in_cell(x: float, y: float, cell: dict[str, Any]) -> bool:
+    left, top, right, bottom = cell["geometry"]
+    return left <= x <= right and top <= y <= bottom
+
+
+def mask_overlaps_cell(mask: dict[str, Any], cell: dict[str, Any]) -> bool:
+    """Accept the normalized bbox or polygon shapes emitted by mask annotators."""
+    bbox = mask.get("bbox") or mask.get("geometry")
+    if isinstance(bbox, list) and len(bbox) == 4 and all(
+        isinstance(value, (int, float)) for value in bbox
+    ):
+        left, top, right, bottom = bbox
+        cell_left, cell_top, cell_right, cell_bottom = cell["geometry"]
+        return (
+            min(right, cell_right) > max(left, cell_left)
+            and min(bottom, cell_bottom) > max(top, cell_top)
+        )
+    points = mask.get("points")
+    if isinstance(points, list):
+        return any(
+            isinstance(point, (list, tuple))
+            and len(point) >= 2
+            and point_in_cell(float(point[0]), float(point[1]), cell)
+            for point in points
+        )
+    return False
+
+
+def proposed_cell_presence(
+    image_record: dict[str, Any], tree: dict[str, Any]
+) -> dict[str, set[int]]:
+    """Return proposals only from accepted masks; proposals are not confirmations."""
+    cells = frame_cells(image_record)
+    proposals: dict[str, set[int]] = {}
+    for mask in image_record.get("accepted_masks", []):
+        code = mask.get("morphotype_code")
+        if code not in tree.get("morphotypes", {}):
+            continue
+        proposals.setdefault(code, set()).update(
+            cell["index"] for cell in cells if mask_overlaps_cell(mask, cell)
+        )
+    return proposals
+
+
+def cell_decisions(image_record: dict[str, Any], tree: dict[str, Any]) -> dict[str, dict[str, str]]:
+    decisions = image_record.setdefault("cell_decisions", {})
+    proposals = proposed_cell_presence(image_record, tree)
+    for code, indexes in proposals.items():
+        code_decisions = decisions.setdefault(code, {})
+        for index in indexes:
+            code_decisions.setdefault(str(index), "proposed")
+    for code in tree.get("morphotypes", {}):
+        decisions.setdefault(code, {})
+        for index in range(FRAME_CELL_COUNT):
+            decisions[code].setdefault(str(index), "not_evaluated")
+    return decisions
+
+
+def reviewed_frame_frequency(
+    image_record: dict[str, Any], tree: dict[str, Any]
+) -> dict[str, Any]:
+    if not (image_record.get("frame", {}).get("position_confirmed") and frame_cells(image_record)):
+        return {"status": "not_evaluated", "occupied_cells": None, "total_cells": 5}
+    decisions = cell_decisions(image_record, tree)
+    if any(
+        state in {"proposed", "not_evaluated"}
+        for code in decisions.values()
+        for state in code.values()
+    ):
+        return {"status": "pending", "occupied_cells": None, "total_cells": 5}
+    occupied = sum(
+        any(states.get(str(index)) == "observed" for states in decisions.values())
+        for index in range(FRAME_CELL_COUNT)
+    )
+    return {"status": "complete", "occupied_cells": occupied, "total_cells": 5}
+
+
+def tree_frequency(tree: dict[str, Any]) -> dict[str, Any]:
+    frame_images = [
+        image for image in tree.get("images", []) if image.get("sampling_mode") == "frame"
+    ]
+    by_orientation: dict[str, list[dict[str, Any]]] = {}
+    for image in frame_images:
+        orientation = image.get("orientation")
+        if orientation:
+            by_orientation.setdefault(orientation, []).append(image)
+    if set(by_orientation) != {"N", "E", "S", "W"} or any(
+        len(images) != 1 for images in by_orientation.values()
+    ):
+        return {"status": "pending", "occupied_cells": None, "total_cells": 20}
+    views = [reviewed_frame_frequency(by_orientation[key][0], tree) for key in ("N", "E", "S", "W")]
+    if any(view["status"] != "complete" for view in views):
+        return {"status": "pending", "occupied_cells": None, "total_cells": 20}
+    return {
+        "status": "complete",
+        "occupied_cells": sum(view["occupied_cells"] for view in views),
+        "total_cells": 20,
+    }
+
+
 def generate_grid(image_record: dict[str, Any]) -> list[dict[str, Any]]:
     roi = image_record.get("roi") or [0.05, 0.05, 0.95, 0.95]
     left, top, right, bottom = roi
@@ -619,6 +770,29 @@ def draw_overlay(
             outline="#FFFFFF",
             width=max(3, width // 260),
         )
+
+    frame = image_record.get("frame") or {}
+    geometry = frame.get("geometry")
+    if geometry and layer in {"frame", "cells"}:
+        left, top, right, bottom = geometry
+        draw.rectangle(
+            (left * width, top * height, right * width, bottom * height),
+            outline="#FFD166" if frame.get("position_confirmed") else "#FFFFFF",
+            width=max(3, width // 220),
+        )
+        if layer == "cells":
+            for cell in frame_cells(image_record):
+                cell_left, cell_top, cell_right, cell_bottom = cell["geometry"]
+                draw.line(
+                    (
+                        cell_left * width,
+                        cell_top * height,
+                        cell_left * width,
+                        cell_bottom * height,
+                    ),
+                    fill="#FFD166",
+                    width=max(2, width // 400),
+                )
 
     if layer == "coverage":
         for point in image_record.get("grid", []):
@@ -698,7 +872,11 @@ def persist_project() -> None:
                     destination.write_bytes(raw)
                     image["saved_path"] = str(destination)
                 image["updated_at"] = now_iso()
-    serializable = {"version": "0.2", "saved_at": now_iso(), "sites": st.session_state.sites}
+    serializable = {
+        "version": METHOD_VERSION,
+        "saved_at": now_iso(),
+        "sites": st.session_state.sites,
+    }
     temporary = STATE_PATH.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(serializable, ensure_ascii=False, indent=2, default=str),
@@ -737,6 +915,7 @@ def image_rows(site: dict[str, Any] | None = None) -> pd.DataFrame:
         for tree in item_site.get("trees", {}).values():
             for image in tree.get("images", []):
                 metrics = image_analysis_metrics(image)
+                frequency = reviewed_frame_frequency(image, tree)
                 visible_codes = sorted(
                     {
                         point["morphotype_code"]
@@ -766,6 +945,10 @@ def image_rows(site: dict[str, Any] | None = None) -> pd.DataFrame:
                         "camera_make": image["metadata"].get("camera_make"),
                         "camera_model": image["metadata"].get("camera_model"),
                         "cover_pct": metrics["cover_pct"],
+                        "frequency_occupied_cells": frequency["occupied_cells"],
+                        "frequency_status": frequency["status"],
+                        "sampling_mode": image.get("sampling_mode", "exploratory"),
+                        "method_version": image.get("frame", {}).get("method_version"),
                         "assessable_pct": metrics["assessable_pct"],
                         "grid_labeled": metrics["labeled_points"],
                         "visible_morphotype_points": len(image.get("morphotype_points", [])),
@@ -788,6 +971,7 @@ def tree_rows(site: dict[str, Any] | None = None) -> pd.DataFrame:
             covers = []
             valid_images = 0
             observed_codes = set()
+            frequencies = []
             for image in tree.get("images", []):
                 metrics = image_analysis_metrics(image)
                 if metrics["valid_image"]:
@@ -797,6 +981,10 @@ def tree_rows(site: dict[str, Any] | None = None) -> pd.DataFrame:
                     point["morphotype_code"]
                     for point in image.get("morphotype_points", [])
                 )
+                frequency = reviewed_frame_frequency(image, tree)
+                if frequency["status"] == "complete":
+                    frequencies.append(frequency["occupied_cells"])
+            tree_frequency_result = tree_frequency(tree)
             distance = None
             if tree.get("latitude") is not None and tree.get("longitude") is not None:
                 distance = haversine_m(
@@ -824,6 +1012,9 @@ def tree_rows(site: dict[str, Any] | None = None) -> pd.DataFrame:
                     "number_of_images": len(tree.get("images", [])),
                     "valid_images": valid_images,
                     "mean_cover_pct": sum(covers) / len(covers) if covers else None,
+                    "frequency_occupied_cells": tree_frequency_result["occupied_cells"],
+                    "frequency_status": tree_frequency_result["status"],
+                    "frequency_views_complete": len(frequencies),
                     "visible_morphotypes_on_tree": len(observed_codes),
                 }
             )
@@ -881,6 +1072,27 @@ def annotation_rows(site: dict[str, Any] | None = None) -> pd.DataFrame:
                             "growth_form": morphotype.get("growth_form"),
                         }
                     )
+                for code, states in image.get("cell_decisions", {}).items():
+                    for cell_index, state in states.items():
+                        morphotype = morphotypes.get(code, {})
+                        rows.append(
+                            {
+                                "site_id": item_site["id"],
+                                "site_name": item_site["name"],
+                                "tree_id": tree["id"],
+                                "tree_code": tree["code"],
+                                "image_id": image["id"],
+                                "file_name": image["name"],
+                                "annotation_layer": "frame_cell_presence",
+                                "point_index": cell_index,
+                                "x_normalized": None,
+                                "y_normalized": None,
+                                "class": state,
+                                "morphotype_code": code,
+                                "morphotype_label": morphotype.get("label"),
+                                "growth_form": morphotype.get("growth_form"),
+                            }
+                        )
     return pd.DataFrame(rows)
 
 
@@ -891,7 +1103,7 @@ def export_project_json() -> bytes:
             for image in tree.get("images", []):
                 image.pop("saved_path", None)
     payload = {
-        "version": "0.2",
+        "version": METHOD_VERSION,
         "exported_at": now_iso(),
         "sites": sites,
     }
@@ -1232,6 +1444,10 @@ def images_page() -> None:
                 "roi": [0.05, 0.05, 0.95, 0.95],
                 "grid": [],
                 "morphotype_points": [],
+                "sampling_mode": "exploratory",
+                "frame": default_frame(),
+                "accepted_masks": [],
+                "cell_decisions": {},
                 "created_at": now_iso(),
             }
             image["grid"] = generate_grid(image)
@@ -1511,6 +1727,111 @@ def roi_tab(image_record: dict[str, Any], image: Image.Image, tree: dict[str, An
         st.success("Área de análisis definida. Cambiarla reinicia las etiquetas de cobertura.")
 
 
+def frame_tab(image_record: dict[str, Any], image: Image.Image, tree: dict[str, Any]) -> None:
+    st.write(
+        "Selecciona el marco físico visible en la fotografía. La selección solo se "
+        "acepta como marco de 10 × 50 cm después de confirmar que el marco real está visible."
+    )
+    mode = st.radio(
+        "Tipo de análisis",
+        ["Exploratorio sin referencia física", "Muestreo con marco 10 × 50 cm"],
+        index=1 if image_record.get("sampling_mode") == "frame" else 0,
+        key=f"sampling_mode_{image_record['id']}",
+    )
+    image_record["sampling_mode"] = "frame" if mode.startswith("Muestreo") else "exploratory"
+    if image_record["sampling_mode"] != "frame":
+        st.info("Este registro conserva el análisis exploratorio y no calcula frecuencia por celdas.")
+        return
+
+    orientation_options = ["N", "NE", "E", "SE", "S", "SW", "W", "NW", "Desconocida"]
+    frame = image_record.setdefault("frame", default_frame())
+    frame["orientation"] = st.selectbox(
+        "Orientación de este marco",
+        orientation_options,
+        index=option_index(orientation_options, image_record.get("orientation"), 8),
+        key=f"frame_orientation_{image_record['id']}",
+    )
+    overlay = draw_overlay(image, image_record, tree, "frame")
+    value = streamlit_image_coordinates(
+        overlay,
+        width=850,
+        click_and_drag=True,
+        cursor="crosshair",
+        key=f"frame_{image_record['id']}_{image_record.get('frame_version', 0)}",
+    )
+    if value and is_new_event(f"frame_{image_record['id']}", value):
+        geometry = normalized_roi(value)
+        if geometry:
+            frame["geometry"] = geometry
+            frame["position_confirmed"] = False
+            frame["calibration_source"] = "not_available"
+            image_record["cell_decisions"] = {}
+            image_record["derived_invalidated_at"] = now_iso()
+            image_record["frame_version"] = image_record.get("frame_version", 0) + 1
+            st.rerun()
+        else:
+            st.error("El marco seleccionado es demasiado pequeño.")
+    if frame.get("geometry"):
+        st.checkbox(
+            "Confirmo que esta selección corresponde al marco físico de 10 × 50 cm visible.",
+            value=bool(frame.get("position_confirmed")),
+            key=f"confirm_frame_{image_record['id']}",
+            on_change=lambda: None,
+        )
+        if st.button("Guardar posición del marco", key=f"save_frame_{image_record['id']}"):
+            frame["position_confirmed"] = bool(
+                st.session_state.get(f"confirm_frame_{image_record['id']}", False)
+            )
+            frame["method_version"] = METHOD_VERSION
+            frame["calibration_source"] = "manual_physical_frame_confirmation"
+            frame["scale_px_per_cm"] = None
+            persist_project()
+            st.success(
+                "Posición guardada. La escala en centímetros no se simula: depende de la confirmación del marco físico."
+            )
+        if frame.get("position_confirmed"):
+            st.success("Marco confirmado; sus cinco celdas verticales están disponibles para revisión.")
+    else:
+        st.warning("Aún no se ha confirmado la posición del marco.")
+
+
+def cell_review_tab(image_record: dict[str, Any], image: Image.Image, tree: dict[str, Any]) -> None:
+    if image_record.get("sampling_mode") != "frame":
+        st.info("Activa el muestreo con marco para revisar presencia por celda.")
+        return
+    if not image_record.get("frame", {}).get("position_confirmed"):
+        st.warning("Confirma primero la posición del marco.")
+        return
+    cells = frame_cells(image_record)
+    st.image(draw_overlay(image, image_record, tree, "cells"), width="stretch")
+    decisions = cell_decisions(image_record, tree)
+    options = list(CELL_STATES)
+    pending = False
+    for code, morphotype in tree.get("morphotypes", {}).items():
+        st.markdown(f"**{code} · {morphotype['label']}**")
+        columns = st.columns(FRAME_CELL_COUNT)
+        for index, column in enumerate(columns):
+            current = decisions[code].get(str(index), "not_evaluated")
+            selected = column.selectbox(
+                cells[index]["label"],
+                options,
+                index=option_index(options, current),
+                format_func=lambda item: CELL_STATES[item],
+                key=f"cell_{image_record['id']}_{code}_{index}",
+            )
+            decisions[code][str(index)] = selected
+            pending |= selected in {"proposed", "not_evaluated"}
+    if st.button("Confirmar revisión de celdas", key=f"confirm_cells_{image_record['id']}", type="primary"):
+        if pending:
+            st.warning("Cada celda debe quedar observada o no observada tras revisión.")
+        else:
+            image_record["cell_decisions"] = decisions
+            image_record["cell_reviewed_at"] = now_iso()
+            image_record["cell_method_version"] = METHOD_VERSION
+            persist_project()
+            st.success("Revisión de presencia guardada.")
+
+
 def coverage_tab(image_record: dict[str, Any], image: Image.Image, tree: dict[str, Any]) -> None:
     st.markdown(class_legend(), unsafe_allow_html=True)
     morphotype_options = [
@@ -1715,22 +2036,27 @@ def annotation_page() -> None:
         return
 
     create_morphotype(tree)
-    roi, coverage, morphotypes = st.tabs(
-        ["1 · Área de análisis", "2 · Cobertura", "3 · Morfotipos"]
+    frame, roi, coverage, morphotypes, cells = st.tabs(
+        ["1 · Marco y modo", "2 · Área de análisis", "3 · Cobertura", "4 · Morfotipos", "5 · Presencia por celda"]
     )
+    with frame:
+        frame_tab(image_record, image, tree)
     with roi:
         roi_tab(image_record, image, tree)
     with coverage:
         coverage_tab(image_record, image, tree)
     with morphotypes:
         morphotype_tab(image_record, image, tree)
+    with cells:
+        cell_review_tab(image_record, image, tree)
 
     st.markdown("")
     save_col, another_col, finish_col = st.columns(3)
     if save_col.button("Guardar esta imagen", type="primary", width="stretch"):
         persist_project()
         st.success("Imagen, metadata y anotaciones guardadas.")
-    if another_col.button("Otra imagen del mismo árbol", width="stretch"):
+    if another_col.button("Guardar y siguiente orientación", width="stretch"):
+        persist_project()
         go_to(3)
     if finish_col.button("Finalizar este árbol →", width="stretch"):
         persist_project()
@@ -1758,6 +2084,7 @@ def tree_summary_page() -> None:
         observed_codes.update(
             point["morphotype_code"] for point in image.get("morphotype_points", [])
         )
+        frequency = reviewed_frame_frequency(image, tree)
         rows.append(
             {
                 "Imagen": image["name"],
@@ -1767,6 +2094,11 @@ def tree_summary_page() -> None:
                     f"{metrics['cover_pct']:.1f}%"
                     if metrics["cover_pct"] is not None
                     else "—"
+                ),
+                "Frecuencia (celdas/5)": (
+                    f"{frequency['occupied_cells']}/5"
+                    if frequency["occupied_cells"] is not None
+                    else "Pendiente"
                 ),
                 "Evaluable": (
                     f"{metrics['assessable_pct']:.0f}%"
@@ -1778,13 +2110,20 @@ def tree_summary_page() -> None:
                 ),
             }
         )
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Imágenes", len(tree.get("images", [])))
     col2.metric(
         "Cobertura media válida",
         f"{sum(covers) / len(covers):.1f}%" if covers else "Pendiente",
     )
     col3.metric("Morfotipos visibles en el árbol", len(observed_codes))
+    tree_frequency_result = tree_frequency(tree)
+    col4.metric(
+        "Frecuencia del árbol (celdas/20)",
+        f"{tree_frequency_result['occupied_cells']}/20"
+        if tree_frequency_result["occupied_cells"] is not None
+        else "Pendiente",
+    )
     if rows:
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     else:
@@ -1886,24 +2225,10 @@ def site_summary_page() -> None:
         ).round(1)
         st.dataframe(display, width="stretch", hide_index=True)
 
-    st.markdown("#### Elegibilidad para una señal ambiental del sitio")
-    st.progress(min(eligible_trees / 5, 1.0))
-    st.write(
-        f"**{eligible_trees} de 5 árboles mínimos dentro del radio, "
-        "cada uno con ≥1 imagen válida**"
+    st.info(
+        "La cobertura (%) y la frecuencia (celdas ocupadas) son resultados distintos. "
+        "Las vistas o árboles incompletos permanecen pendientes; no se convierten en cero."
     )
-    st.progress(min(valid_images / 10, 1.0))
-    st.write(f"**{valid_images} de 10 imágenes válidas dentro del radio**")
-    if eligible_trees >= 5 and valid_images >= 10:
-        st.success(
-            "El sitio alcanza el mínimo operativo de muestreo. La categoría ambiental "
-            "seguirá siendo provisional hasta contar con calibración dominicana."
-        )
-    else:
-        st.warning(
-            "Datos insuficientes para una categoría ambiental del sitio. "
-            "Continúa añadiendo árboles e imágenes válidas."
-        )
     st.markdown(
         """
         <div class="scientific-note">

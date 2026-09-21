@@ -26,9 +26,11 @@ python -m streamlit run app.py --server.address 0.0.0.0
 6. Define el rectángulo de corteza que se analizará.
 7. Clasifica los 50 puntos fijos para estimar cobertura.
 8. Crea morfotipos visuales M1, M2, M3, etc., y marca ejemplos en la foto.
-9. Guarda la imagen y añade otra imagen del mismo árbol o finaliza el árbol.
-10. Añade más árboles al mismo sitio.
-11. Revisa el resumen dentro del radio y exporta los datos.
+9. Conserva el análisis exploratorio o confirma en la misma pantalla un marco físico
+   visible de 10 × 50 cm; revisa en una sola matriz las cinco celdas por orientación.
+10. Guarda la imagen y continúa con la siguiente orientación o finaliza el árbol.
+11. Añade más árboles al mismo sitio.
+12. Revisa el resumen dentro del radio y exporta los datos.
 
 ## Dos tipos de puntos
 
@@ -44,6 +46,18 @@ La cobertura se calcula como:
 ```text
 cobertura (%) = puntos de liquen / puntos evaluables × 100
 ```
+
+La frecuencia es independiente de la cobertura: en una vista es el número de
+celdas ocupadas (0–5), y en un árbol completo de cuatro orientaciones es el
+número de celdas ocupadas (0–20). Los tonos del mismo morfotipo se deduplican
+por celda. Una propuesta queda pendiente hasta que se confirme o se marque
+como no observada; los datos incompletos no se convierten en cero.
+
+El marco guarda su geometría normalizada, orientación, decisiones por celda,
+procedencia de confirmación y versión del método. Esta versión no inventa una
+escala de píxeles por centímetro: si no se puede confirmar un marco físico
+visible, el resultado de frecuencia permanece pendiente. Los registros
+anteriores siguen siendo exploratorios y no reciben frecuencia retroactiva.
 
 ## Qué incluye
 
@@ -78,8 +92,6 @@ También conviene descargar el respaldo JSON desde la pantalla **Exportar**.
 - M1, M2, M3 son morfotipos visuales, no especies confirmadas.
 - Los códigos son comparables entre imágenes del mismo árbol.
 - Los códigos de árboles distintos todavía no se reconcilian automáticamente.
-- El resumen del sitio exige al menos 5 árboles dentro del radio y 10 imágenes
-  válidas antes de habilitar una señal ambiental provisional.
 - Todavía no existe identificación automática de especies ni una estimación
-  ambiental calibrada para la República Dominicana.
-
+  ambiental calibrada para la República Dominicana. No se calcula LDV
+  normalizado, AQI ni categorías de calidad del aire.

@@ -1698,6 +1698,20 @@ def create_morphotype(tree: dict[str, Any]) -> None:
                 st.rerun()
     if tree.get("morphotypes"):
         st.markdown(morphotype_legend(tree), unsafe_allow_html=True)
+        with st.expander("Editar nombres y tonos del catálogo"):
+            changes = {}
+            for code, morphotype in tree["morphotypes"].items():
+                changes[code] = st.text_input(
+                    f"{code} · nombre editable",
+                    value=morphotype.get("label", ""),
+                    key=f"edit_morphotype_{tree['id']}_{code}",
+                )
+            if st.button("Guardar nombres del catálogo", key=f"save_morphotypes_{tree['id']}"):
+                for code, label in changes.items():
+                    if label.strip():
+                        tree["morphotypes"][code]["label"] = label.strip()
+                persist_project()
+                st.success("Nombres guardados; los códigos y las decisiones por celda se conservaron.")
 
 
 def roi_tab(image_record: dict[str, Any], image: Image.Image, tree: dict[str, Any]) -> None:

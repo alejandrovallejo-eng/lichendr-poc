@@ -11,10 +11,12 @@ export interface ClosureReviewProps {
   load: (eventId: string) => Promise<ClosureSnapshot>;
   change: (snapshot: ClosureSnapshot, target: ClosureEvent["status"], acknowledged: boolean) => Promise<ClosureChange>;
   onBack: () => void;
+  navigate?: (href: string) => void;
 }
 const button = "rounded-lg border px-4 py-2 font-semibold disabled:opacity-50";
 
-export default function ClosureReview({ eventId, load, change, onBack }: ClosureReviewProps) {
+const openResults = (href: string) => window.location.assign(href);
+export default function ClosureReview({ eventId, load, change, onBack, navigate = openResults }: ClosureReviewProps) {
   const [snapshot, setSnapshot] = useState<ClosureSnapshot | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
@@ -53,6 +55,8 @@ export default function ClosureReview({ eventId, load, change, onBack }: Closure
       setSnapshot(result.snapshot); setAcknowledged(false);
       setNotice(result.changed ? target === "completed" ? "Jornada cerrada. Tus resultados y pendientes siguen disponibles." : "Jornada reabierta. Puedes continuar trabajando."
         : "La jornada cambió desde que la abriste. Revisa la información actualizada antes de confirmar.");
+      if (result.changed && target === "completed" && result.snapshot.event.status === "completed")
+        navigate(`/analysis?${new URLSearchParams({ eventId })}`);
     } catch (err) {
       if (id === request.current) setError(err instanceof Error ? err.message : "No se pudo confirmar el cambio. Actualiza la revisión.");
     } finally { if (id === request.current) { setBusy(false); locked.current = false; } }
@@ -97,8 +101,7 @@ export default function ClosureReview({ eventId, load, change, onBack }: Closure
           <button type="button" className={`${button} text-white`} style={{ background: "var(--ld-sidebar, #173D35)" }} disabled={busy || !!error || !!block} onClick={submit}>
             {closed ? "Reabrir jornada" : summary.pending ? "Cerrar con pendientes" : "Confirmar cierre de jornada"}</button>
           <button type="button" className={button} disabled={busy} onClick={refresh}>Actualizar revisión</button>
-          <a className={button} href={`/analysis?${new URLSearchParams({ eventId })}`}>Ver resultados de la jornada</a>
-          <a className={button} href={`/analysis?${new URLSearchParams({ mode: "ecology", eventId })}`}>Ver resumen ecológico</a>
+          <a className={button} href={`/analysis?${new URLSearchParams({ eventId })}`}>Ver resumen completo de la jornada</a>
         </div>
         {block && !closed ? <p className="text-sm text-stone-600">{block}</p> : null}
       </div>

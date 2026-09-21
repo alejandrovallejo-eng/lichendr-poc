@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.component-tests.json",
+  "compilerOptions": { "rootDir": "./src", "outDir": "./.test-build/unified-jornada" },
+  "include": ["src/modules/four-view/jornada-summary.test.tsx", "src/modules/four-view/guided-results.test.tsx", "src/modules/four-view/ecology-summary.test.tsx", "src/modules/jornada/closure.test.tsx", "src/modules/environmental-quality/EnvironmentalQualityEntry.tsx", "src/app/(dashboard)/environmental-quality/page.tsx"]
+}

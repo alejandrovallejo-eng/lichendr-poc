@@ -5,6 +5,7 @@ import { DIRECTIONS, DIRECTION_LABELS } from "./types";
 import { filterGuidedResults, guidedProgress, guidedResultHref, type GuidedTreeResult, type ResultFilters, type SavedViewResult } from "./guided-results";
 import { useGuidedResults } from "./use-guided-results";
 import { ecologyHref } from "./ecology";
+import JornadaSummary from "./JornadaSummary";
 
 export function savedViewLabel(view: SavedViewResult) {
   if (view.state === "saved") return `${view.coverage!.toFixed(1)}%`;
@@ -23,8 +24,9 @@ export function GuidedProgress({ rows }: { rows: GuidedTreeResult[] }) {
 
 // Presentation is separate from the reader so filters, links and missing-data
 // states can be tested without a database, a photograph or model weights.
-export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
+export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental = false }: {
   rows: GuidedTreeResult[]; filters?: ResultFilters; onRefresh?: () => void;
+  environmental?: boolean;
 }) {
   const [draft, setDraft] = useState(filters);
   const selected = filterGuidedResults(rows, filters);
@@ -32,6 +34,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
   const projects = unique(rows.map(r => r.project));
   const sites = unique(rows.filter(r => !draft.projectId || r.project.id === draft.projectId).map(r => r.site));
   const events = unique(rows.filter(r => (!draft.projectId || r.project.id === draft.projectId) && (!draft.siteId || r.site.id === draft.siteId)).map(r => r.event));
+  const resultPath = environmental ? "/environmental-quality" : "/analysis";
   const selector = (name: "projectId" | "siteId" | "eventId", title: string, options: { id: string; name: string }[]) =>
     <label className="flex min-w-0 flex-col gap-1 text-sm"><span>{title}</span>
       <select name={name} value={draft[name] ?? ""} className="min-w-0 rounded border bg-white p-2" onChange={e => setDraft({ ...draft,
@@ -42,9 +45,10 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
       </select>
     </label>;
   return <section className="space-y-5">
-    <header><h1 className="text-2xl font-bold">Resultados por jornada</h1>
-      <p className="mt-1 text-sm">Tus árboles, con sus cuatro vistas y los análisis que guardaste.</p></header>
-    <form action="/analysis" method="get" className="grid items-end gap-3 rounded-lg border p-4 md:grid-cols-4" style={{ borderColor: "var(--ld-border)" }}>
+    <header><h1 className="text-2xl font-bold">{environmental ? "Datos para la evaluación ambiental" : "Resultados por jornada"}</h1>
+      <p className="mt-1 text-sm">Elige una jornada para ver juntos sus árboles, cuatro vistas, cobertura y diversidad.</p>
+      {environmental ? <p className="mt-2 rounded-lg bg-emerald-50 p-3 text-sm">Aquí se incluyen tus capturas guiadas. La calidad del aire todavía no está estimada; los datos guardados se muestran sin convertirlos en una clasificación ambiental.</p> : null}</header>
+    <form action={resultPath} method="get" className="grid items-end gap-3 rounded-lg border p-4 md:grid-cols-4" style={{ borderColor: "var(--ld-border)" }}>
       {selector("projectId", "Proyecto", projects)}{selector("siteId", "Sitio / zona", sites)}{selector("eventId", "Jornada", events)}
       {draft.treeSampleId ? <input type="hidden" name="treeSampleId" value={draft.treeSampleId} /> : null}
       <button type="submit" className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }}>Ver resultados</button>
@@ -64,6 +68,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
           <h2 className="text-lg font-bold">{row.tree.code}</h2>
           <p className="text-sm">{row.project.name} · {row.site.name}</p>
           <a className="text-sm underline" href={`/jornada/${encodeURIComponent(row.event.id)}`}>{row.event.name} · {row.event.sampled_at.slice(0, 10)}</a>
+          <a className="mt-2 block font-semibold underline" href={`${resultPath}?${new URLSearchParams({ eventId: row.event.id })}`}>Abrir resumen de esta jornada</a>
         </div><span className={`rounded-full px-3 py-1 text-sm ${row.complete ? "bg-emerald-100" : "bg-amber-50"}`}>
           {row.savedCount}/4 vistas guardadas{row.complete ? " · Completo" : " · Pendiente"}</span></div>
         <dl className="my-4 grid grid-cols-2 gap-2 md:grid-cols-4">{DIRECTIONS.map(d => <div key={d} className="rounded-lg bg-stone-50 p-3">
@@ -74,13 +79,17 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh }: {
           {!row.complete ? <a className="rounded border px-4 py-2" href={guidedResultHref(row, false)}>Continuar captura</a> : null}</div>
         {row.lastSavedAt ? <p className="mt-3 text-xs text-stone-600">Último guardado: {new Date(row.lastSavedAt).toLocaleString("es-DO")}</p> : null}
       </article>)}</div>}
-    <p className="text-sm">¿Buscas evaluaciones del flujo anterior? <a className="underline" href="/analysis?mode=classic">Abrir análisis clásico</a>. Se conservan por separado.</p>
+    <p className="text-sm">¿Buscas evaluaciones del flujo anterior? <a className="underline" href={`${resultPath}?mode=classic`}>Abrir análisis clásico</a>. Se conservan por separado.</p>
   </section>;
 }
 
-export default function GuidedResults({ filters = {} }: { filters?: ResultFilters }) {
+export default function GuidedResults({ filters = {}, environmental = false }: { filters?: ResultFilters; environmental?: boolean }) {
+  if (filters.eventId && !filters.treeSampleId) return <JornadaSummary filters={{ ...filters, eventId: filters.eventId }} environmental={environmental} />;
+  return <GuidedResultsList filters={filters} environmental={environmental} />;
+}
+function GuidedResultsList({ filters, environmental }: { filters: ResultFilters; environmental: boolean }) {
   const { rows, error, retry } = useGuidedResults(filters.eventId);
   if (error) return <section className="rounded-lg border p-5"><h1 className="text-xl font-bold">Resultados por jornada</h1><p role="alert" className="my-3">{error}</p><button onClick={retry} className="underline">Reintentar lectura</button></section>;
   if (!rows) return <p role="status">Cargando análisis guardados…</p>;
-  return <GuidedResultsView key={JSON.stringify(filters)} rows={rows} filters={filters} onRefresh={retry} />;
+  return <GuidedResultsView key={JSON.stringify(filters)} rows={rows} filters={filters} onRefresh={retry} environmental={environmental} />;
 }

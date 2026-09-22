@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+/* Color system for LichenDR */
+:root {
+  --ld-background: #F4F7F5; /* fondo general */
+  --ld-sidebar: #173D35; /* sidebar primary */
+  --ld-sidebar-2: #225447; /* sidebar secondary */
+  --ld-green: #4F7C5B; /* verde principal */
+  --ld-text: #17231F; /* texto principal */
+  --ld-text-secondary: #56645E; /* texto secundario */
+  --ld-sand: #D9BD67; /* arena */
+  --ld-card: #FFFFFF; /* tarjetas */
+  --ld-border: #DCE5E0; /* bordes */
+}
+
+/* Force light color scheme and remove automatic dark-mode switching */
+html {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ld-background);
+  color: var(--ld-text);
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.5;
+}
+
+html, body {
+  width: 100%;
+  min-height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+main, section, header, nav {
+  display: block;
+}
+
+/* Utility focus outline */
+.ld-focus:focus {
+  outline: 2px solid var(--ld-green);
+  outline-offset: 2px;
+}
+
+.annotation-studio button {
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease, opacity 120ms ease;
+}
+
+.annotation-studio button:hover:not(:disabled) {
+  box-shadow: 0 2px 8px rgb(23 35 31 / 16%);
+  filter: brightness(0.98);
+}
+
+.annotation-studio button:active:not(:disabled) {
+  box-shadow: inset 0 2px 5px rgb(23 35 31 / 20%);
+  transform: translateY(1px);
+}
+
+.annotation-studio button:focus-visible {
+  outline: 3px solid var(--ld-green);
+  outline-offset: 2px;
+}
+
+.annotation-studio button[aria-pressed="true"] {
+  border-color: var(--ld-text) !important;
+  background: var(--ld-sand) !important;
+}
+
+.annotation-studio button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.annotation-studio button[aria-busy="true"] {
+  cursor: progress;
+}
+
+.annotation-studio .studio-primary {
+  min-height: 44px;
+  border-color: var(--ld-text);
+  background: var(--ld-sand);
+}
+
+.studio-spinner {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  border: 2px solid var(--ld-border);
+  border-top-color: var(--ld-green);
+  border-radius: 9999px;
+  animation: studio-spin 700ms linear infinite;
+}
+
+@keyframes studio-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .annotation-studio button,
+  .studio-spinner {
+    transition: none;
+    animation: none;
+  }
+}

@@ -10,3 +10,4 @@ __pycache__/
 prototype-streamlit/**/data/
 supabase/.temp/
 services/vision/.venv/
+services/vision/checkpoints/

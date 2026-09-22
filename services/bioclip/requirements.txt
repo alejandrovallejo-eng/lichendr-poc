@@ -1,0 +1,13 @@
+# Local reviewer worker only. These dependencies are deliberately NOT installed
+# in services/vision (the 512 MB ONNX container): BioCLIP 2 peaks around
+# 3–3.3 GiB of CPU RSS and would not fit there.
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.4
+python-multipart==0.0.30
+numpy==1.26.4
+Pillow==12.3.0
+safetensors==0.4.5
+open_clip_torch==2.32.0
+torch==2.6.0
+torchvision==0.21.0

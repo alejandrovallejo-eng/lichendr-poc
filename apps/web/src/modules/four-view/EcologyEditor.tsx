@@ -10,6 +10,35 @@ import { emptyEcologyConfig, morphDisplayName, parseEcologyReview, quadratFromPo
 import { DIRECTION_LABELS, type Direction } from "./types";
 import { reviewFingerprint } from "./guided-cloud";
 import MorphNameEditor from "./MorphNameEditor";
+import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, isVerifiedCalibration, proposeCellDecisions, type CellDecision, type CellDecisions, type StandardizedCellReview } from "./cell-frequency";
+
+function CellReviewMatrix({ catalog, config, decisions, onChange }: {
+  catalog: Morphospecies[]; config: ColorConfig; decisions: CellDecisions;
+  onChange: (value: CellDecisions) => void;
+}) {
+  const groups = config.confirmed?.groups.filter(group => group.id !== "unassigned") ?? [];
+  const update = (morphId: string, index: number, value: CellDecision) => onChange({
+    ...decisions, [morphId]: { ...(decisions[morphId] ?? {}), [String(index)]: value },
+  });
+  return <div aria-label="Revisión compacta de presencia por celda" style={{display:"grid",gap:8}}>
+    <p className="eco-small">La propuesta usa los píxeles de las máscaras aceptadas. Confirma cada celda; tonos distintos del mismo liquen cuentan una sola vez.</p>
+    {groups.map(group => <div key={group.id}>
+      <strong style={{overflowWrap:"anywhere"}}>{morphDisplayName(catalog.find(m=>m.id===group.id) ?? {id:group.id,event_id:"",ordinal:0})}</strong>
+      <div style={{display:"grid",gridTemplateColumns:`repeat(${FRAME_CELL_COUNT}, minmax(0, 1fr))`,gap:4}}>
+        {Array.from({length:FRAME_CELL_COUNT},(_,index)=>{
+          const value=decisions[group.id]?.[String(index)] ?? "not_evaluated";
+          return <label key={index} className="eco-small"><span>Celda {index+1}</span>
+            <select value={value} onChange={e=>update(group.id,index,e.target.value as CellDecision)} style={{width:"100%",fontSize:11}}>
+              <option value="proposed">Propuesta</option><option value="observed">Presencia</option>
+              <option value="not_observed">No observada</option><option value="not_evaluated">No evaluada</option>
+            </select>
+          </label>;
+        })}
+      </div>
+    </div>)}
+    {!groups.length?<p className="eco-small">Acepta primero un tono y asígnalo a una morfoespecie.</p>:null}
+  </div>;
+}
 
 export function MorphCatalogue({ catalog, reviews, selectedId, disabled, busy, onSelect, onCreate, onRename }: {
   catalog:Morphospecies[]; reviews:EcologyRow[]; selectedId?:string; disabled:boolean; busy:boolean;
@@ -41,6 +70,10 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const [error,setError]=useState(""),[dirty,setDirty]=useState(false),[saving,setSaving]=useState(false),[creating,setCreating]=useState(false);
   const [open,setOpen]=useState(true),[original,setOriginal]=useState(false),[zero,setZero]=useState(!!usable&&!usable.config.samples.length);
   const [overlay,setOverlay]=useState(""),[proposal,setProposal]=useState("");
+  const calibrated = isVerifiedCalibration(source.calibration)
+    && source.analysis?.width === source.calibration.width && source.analysis.height === source.calibration.height;
+  const [standardized,setStandardized]=useState(false);
+  const [cellDecisions,setCellDecisions]=useState<CellDecisions>(existing?.review.standardized?.decisions ?? {});
   const [cursor,setCursor]=useState<TrunkPoint>({x:.5,y:.5}),[keyboard,setKeyboard]=useState(false);
   const photo=useRef<SVGSVGElement>(null),createId=useRef<string|null>(null),alive=useRef(true),savingRef=useRef(false);
   const lastAttempt=useRef<{fingerprint:string;savedAt:string}|null>(null);
@@ -50,6 +83,19 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const selectedId=picker.groups.find(g=>g.label===picker.label)?.id;
   const groupNames=Object.fromEntries(catalog.map(m=>[m.id,morphDisplayName(m)]));
   const assigned=selectedId!=="unassigned";
+  useEffect(()=>{
+    if (!standardized || !picker.accepted || !pixels) return;
+    const masksByMorph=encodeAcceptedMasks(picker.accepted.labels,pixels.width,pixels.height,
+      config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label})));
+    const proposed=proposeCellDecisions({masksByMorph,maskWidth:pixels.width,maskHeight:pixels.height,
+      frame:{x:0,y:0,width:1,height:1,widthCm:10,heightCm:50}});
+    setCellDecisions(previous=>{
+      const next={...previous};
+      for(const [id,cells] of Object.entries(proposed)) next[id]={...(next[id]??{}),...Object.fromEntries(
+        Object.entries(cells).map(([index,state])=>[index,next[id]?.[index] === "observed" || next[id]?.[index] === "not_observed" ? next[id][index] : state]))};
+      return next;
+    });
+  },[standardized,picker.accepted,pixels,config]);
   useEffect(()=>{alive.current=true;let url="";const abort=new AbortController();
     void services.photo(ownerId,imageId).then(blob=>{if(!abort.signal.aborted){url=URL.createObjectURL(blob);setSrc(url);}}).catch(e=>{if(!abort.signal.aborted)setError(detail(e));});
     return()=>{alive.current=false;abort.abort();if(url)URL.revokeObjectURL(url);};
@@ -89,8 +135,18 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const close=()=>{if(saving||creating)return;if((dirty||picker.pending)&&!window.confirm("¿Salir sin guardar los cambios de este cuadrante? El análisis anterior se conserva."))return;onClose();};
   const save=async()=>{
     if(savingRef.current||!pixels||!quadrat||!picker.accepted||picker.pending||(!config.samples.length&&!zero))return;
+    const standardizedReview: StandardizedCellReview | undefined = standardized && calibrated && source.calibration
+      ? { method: CELL_FREQUENCY_METHOD, frame: { x: 0, y: 0, width: 1, height: 1, widthCm: 10, heightCm: 50 },
+        calibration: source.calibration, maskWidth: pixels.width, maskHeight: pixels.height,
+        masksByMorph: encodeAcceptedMasks(picker.accepted.labels, pixels.width, pixels.height,
+          config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label}))),
+        decisions: cellDecisions, reviewedAt: new Date().toISOString() } : undefined;
+    if (standardized && !standardizedReview) { setError("No hay una calibración física verificable para este modo."); return; }
+    if (standardized && Object.values(cellDecisions).flatMap(v=>Object.values(v)).some(v=>v==="proposed"||v==="not_evaluated")) {
+      setError("Revisa cada celda y confirma presencia o no observada antes de guardar."); return;
+    }
     const draft={version:1,scale:"uncalibrated",sourceOutline:source.outline,quadrat,width:pixels.width,height:pixels.height,
-      config,counts:Array.from(picker.accepted.counts),total:picker.accepted.total};
+      config,counts:Array.from(picker.accepted.counts),total:picker.accepted.total, ...(standardizedReview ? {standardized:standardizedReview} : {})};
     const fingerprint=reviewFingerprint(draft);
     if(lastAttempt.current?.fingerprint!==fingerprint)lastAttempt.current={fingerprint,savedAt:new Date().toISOString()};
     const review=parseEcologyReview({...draft,savedAt:lastAttempt.current.savedAt});
@@ -106,7 +162,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const pct=(n:number)=>`${(100*n/Math.max(1,picker.accepted?.total??1)).toFixed(1)} %`;
   return <section className="ecology-editor" aria-label="Análisis del cuadrante" style={{position:"fixed",inset:0,zIndex:100,background:"#f3f6f1",color:"#173d35",display:"grid",gridTemplateRows:"auto auto minmax(0,1fr) auto"}}>
     <style>{`.ecology-editor *{box-sizing:border-box}.ecology-editor p{margin:0}.ecology-editor button{border:1px solid #a5bfb2;border-radius:10px;background:white;color:#173d35;min-height:42px;padding:8px 12px;cursor:pointer;font:inherit}.ecology-editor button:disabled{opacity:.45;cursor:default}.ecology-editor button:focus-visible,.ecology-editor svg:focus-visible{outline:3px solid #c09b28;outline-offset:2px}.ecology-editor .g-primary{background:#00674d;color:white;font-weight:700}.eco-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;min-height:0;gap:14px;padding:14px}.eco-photo{min-height:0;background:#dfe7df;border-radius:16px;overflow:hidden;position:relative}.eco-tools{overflow:auto;min-height:0;background:white;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px}.eco-small{font-size:12px}.eco-catalogue{display:flex;flex-direction:column;gap:8px}.eco-morph{text-align:left;display:flex;flex-direction:column;gap:5px}.eco-morph[aria-pressed=true]{border:2px solid #00674d;background:#edf8ef}.eco-swatches{display:flex;gap:4px;flex-wrap:wrap}.eco-swatches span{width:20px;height:20px;border:1px solid #6c7f72;border-radius:4px}.ecology-editor footer{background:white;border-top:1px solid #d2dfd4;padding:12px 18px;display:flex;justify-content:space-between;gap:8px;align-items:center}.ecology-editor .eco-caption{font-size:12px;max-width:50vw}.eco-editor-header{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;gap:12px}.eco-steps{text-align:center;padding:6px;font-size:13px}@media(max-width:700px){.eco-layout{grid-template-columns:1fr;grid-template-rows:minmax(140px,1fr) auto;padding:8px;gap:8px}.eco-tools{max-height:240px;padding:12px}.eco-editor-header{padding:8px;font-size:14px}.ecology-editor footer{padding:8px;font-size:12px}.ecology-editor .eco-caption{display:none}}`}</style>
-    <header className="eco-editor-header"><div><strong>{treeName} · {DIRECTION_LABELS[direction]}</strong><p className="eco-small">Diversidad · cuadrante exploratorio</p></div><button disabled={saving||creating} onClick={close}>Volver a resultados</button></header>
+    <header className="eco-editor-header"><div><strong>{treeName} · {DIRECTION_LABELS[direction]}</strong><p className="eco-small">Diversidad · {standardized?"frecuencia estandarizada":"cuadrante exploratorio"}</p></div><button disabled={saving||creating} onClick={close}>Volver a resultados</button></header>
     <nav className="eco-steps" aria-label="Paso actual">{["1. Cuadrante","2. Morfoespecies","3. Guardar"].map((s,i)=><span key={s} style={{padding:"5px 12px",fontWeight:step===i?700:400,background:step===i?"#cee9d8":"transparent",borderRadius:20}}>{s}</span>)}</nav>
     <main className="eco-layout"><div className="eco-photo">
       {!src?<p role="status" style={{padding:20}}>Abriendo la fotografía guardada…</p>:<>
@@ -141,6 +197,8 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
       {step===0?<><h2 style={{margin:0}}>Elige tu cuadrante</h2><p>{first?"Ahora marca la esquina opuesta.":"Haz clic en dos esquinas opuestas, dentro del tronco azul."}</p>
         <p className="eco-small">Amarillo = área que se medirá. El contorno del tronco y el análisis general no se modifican.</p>
         <p className="eco-small">Sin escala física: mediremos porcentaje de esta área, no cm² ni calidad del aire.</p>
+        {calibrated?<label className="eco-small"><input type="checkbox" checked={standardized} onChange={e=>{setStandardized(e.target.checked);setDirty(true);}}/> Usar marco físico calibrado de 10 × 50 cm (cinco celdas verticales)</label>
+          :<p className="eco-small">No hay referencia física verificable en esta vista; solo está disponible el análisis exploratorio.</p>}
         {first?<button onClick={()=>setFirst(null)}>Cancelar esquina</button>:null}
         {quadrat?<button onClick={()=>{setQuadrat(null);setFirst(null);setConfig(emptyEcologyConfig());setDirty(true);setZero(false);}}>Elegir otro cuadrante</button>:null}
       </>:step===1?<>
@@ -148,7 +206,8 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         {open?<MorphCatalogue catalog={catalog} reviews={reviews} selectedId={selectedId} disabled={!!picker.pending||saving} busy={creating} onSelect={choose} onCreate={()=>void create()} onRename={async(m,name)=>onCatalog(await services.renameMorph(m,name))}/>:null}
         {assigned?<GuidedColorControls catalogue groupNames={groupNames} picker={picker} config={config} onFocusPhoto={()=>photo.current?.focus()}/>:<p>Elige una morfoespecie del catálogo o crea una nueva. Después toca sus colores en la foto.</p>}
         {!config.samples.length?<label className="eco-small"><input type="checkbox" checked={zero} disabled={!!picker.pending} onChange={e=>{setZero(e.target.checked);setDirty(true);}}/> Revisé el cuadrante y no marqué ninguna morfoespecie.</label>:null}
-      </>:<><h2 style={{margin:0}}>Resumen del cuadrante</h2>
+      </>:<><h2 style={{margin:0}}>{standardized?"Revisión de presencia por celda":"Resumen del cuadrante"}</h2>
+        {standardized?<CellReviewMatrix catalog={catalog} config={config} decisions={cellDecisions} onChange={setCellDecisions}/>:null}
         {config.confirmed!.groups.filter(g=>g.id!=="unassigned"&&(picker.accepted?.counts[g.label]??0)>0).map(g=><p key={g.id} style={{overflowWrap:"anywhere"}}>{groupNames[g.id]??g.name}: <strong>{pct(picker.accepted!.counts[g.label])}</strong></p>)}
         <p>Sin clasificar: <strong>{pct(picker.accepted?.counts[1]??0)}</strong></p><p className="eco-small">Sin clasificar no significa corteza. Las áreas aceptadas no se cuentan dos veces.</p>
         <p className="eco-small">Morfoespecies reconocidas por ti; no son identificaciones taxonómicas verificadas. El resultado se vincula a este árbol, vista y jornada.</p>

@@ -19,13 +19,14 @@ export default function EcologySummary({ data, eventId, onReview, includeCapture
       {[[summary.trees.length, "Árboles de la jornada"], includeCapture
         ? [`${data.rows.reduce((n, r) => n + r.savedCount, 0)}/${summary.expectedViews}`, "Vistas guardadas N/E/S/O"]
         : [`${summary.treesReviewed}/${summary.trees.length}`, "Con algún cuadrante revisado"],
-        [`${summary.quadrats}/${summary.expectedViews}`, "Cuadrantes vigentes N/E/S/O"], [summary.quadrats ? summary.morphs.length : "—", "Morfoespecies registradas"]].map(([value, label]) =>
+        [`${summary.quadrats}/${summary.expectedViews}`, "Cuadrantes vigentes N/E/S/O"], [`${summary.frequencyTrees}/${summary.trees.length}`, "Árboles con frecuencia completa"], [summary.quadrats ? summary.morphs.length : "—", "Morfoespecies registradas"]].map(([value, label]) =>
         <div key={label} className="rounded-xl border bg-white p-4"><p className="text-2xl font-bold">{value}</p><p className="text-sm">{label}</p></div>)}
     </div>
     {!summary.trees.length ? <p className="rounded-lg bg-stone-50 p-4">Aún no hay árboles para resumir. <a className="underline" href={`/jornada/${encodeURIComponent(eventId)}`}>Volver a la jornada</a>.</p>
       : <div className={`rounded-xl p-4 text-sm ${missing ? "bg-amber-50" : "bg-emerald-50"}`}>
         <p className="font-semibold">{missing ? "Resumen parcial" : "Las cuatro vistas de cada árbol tienen cuadrante vigente"}</p>
         <p>{summary.treesComplete} de {summary.trees.length} árboles tienen los cuatro cuadrantes revisados.</p>
+        <p>Frecuencia: solo se informa con cuatro vistas calibradas y revisadas; {summary.frequencyTrees ? `${summary.frequencyTrees} árbol(es) tienen resultado de 0–20 celdas ocupadas.` : "permanece pendiente."}</p>
         {missing ? <p>{summary.pending} cuadrantes por elegir · {summary.changed} por actualizar tras cambiar el tronco · {summary.unavailable} vistas que requieren guardar o revisar su captura.</p> : null}
         <p className="mt-1">{missing ? "Cerrar la jornada no completa estos pendientes. Un dato sin revisar no equivale a cero." : "La revisión completa no equivale a validación de especies ni de calidad del aire."}</p>
       </div>}
@@ -56,7 +57,7 @@ export default function EcologySummary({ data, eventId, onReview, includeCapture
           {includeCapture ? <p className="text-sm">{tree.savedCount}/4 vistas guardadas</p> : null}
           <p className="text-sm">{savedCount}/4 cuadrantes revisados{savedCount ? ` · ${morphIds.length} morfoespecies registradas` : " · diversidad pendiente"}</p></div>
           <a className="text-sm underline" href={guidedResultHref(tree)}>Ver tronco completo y 360°</a></div>
-        <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">{views.map(v => <div key={v.direction} className={`rounded-lg p-3 text-sm ${v.state === "saved" ? "bg-emerald-50" : "bg-stone-50"}`}>
+        <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">{views.map((v, index) => <div key={v.direction} className={`rounded-lg p-3 text-sm ${v.state === "saved" ? "bg-emerald-50" : "bg-stone-50"}`}>
           <h4 className="font-semibold">{DIRECTION_LABELS[v.direction]}</h4>
           {includeCapture ? <p className="my-2 font-semibold">Tronco delimitado: {tree.views[v.direction].state === "saved"
             ? `${tree.views[v.direction].coverage!.toFixed(1)} %`
@@ -67,6 +68,7 @@ export default function EcologySummary({ data, eventId, onReview, includeCapture
               <li key={g.id} style={{ overflowWrap: "anywhere" }}>{morphDisplayName(data.catalog.find(m => m.id === g.id)!)}: {(100 * v.row!.review.counts[g.label] / v.row!.review.total).toFixed(1)} %</li>)}
               <li>Sin clasificar: {(100 * v.row!.review.counts[1] / v.row!.review.total).toFixed(1)} %</li></ul>
             {!v.row!.review.config.confirmed!.groups.some(g => g.id !== "unassigned" && v.row!.review.counts[g.label] > 0) ? <p>Revisado sin morfoespecies marcadas.</p> : null}
+            {v.row!.review.standardized ? <p className="mt-2 font-semibold">Frecuencia: {summary.trees.find(t => t.tree.sampleId === tree.sampleId)?.frequencies[index]?.occupiedCells ?? "Pendiente"} / 5 celdas</p> : null}
           </details> : null}
           {v.state === "unavailable" ? <a className="mt-2 inline-block underline" href={guidedResultHref(tree, false)}>Abrir captura</a>
             : <button type="button" className="mt-2 underline" onClick={() => onReview(tree.sampleId, v.direction)}>{v.state === "saved" ? "Revisar" : "Continuar"} {DIRECTION_LABELS[v.direction]}</button>}

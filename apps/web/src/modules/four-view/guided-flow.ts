@@ -3,6 +3,7 @@ import { parseColorConfig, type ColorConfig, type ColorResult } from "../region-
 import { manualRegion, applyEditedMask, requestRegionSuggestions, type SuggestionResponse } from "../region-suggestions/client";
 import type { Direction } from "./types";
 import type { GuidedCloudStore } from "./guided-cloud";
+import type { VerifiedCalibration } from "./cell-frequency";
 
 export const GUIDED_VERSION = 1;
 export interface GuidedContext { projectId: string; siteId: string; eventId: string; treeId: string }
@@ -22,6 +23,7 @@ export interface GuidedReview {
   config: ColorConfig;
   savedAt: string | null;
   analysis: { counts: number[]; total: number; lichen: number; width: number; height: number; ai: SuggestionResponse | null } | null;
+  calibration?: VerifiedCalibration;
 }
 export function guidedKey(ownerId: string, treeSampleId: string, direction: Direction, imageId: string) {
   if (![ownerId, treeSampleId, direction, imageId].every(Boolean)) throw new Error("Falta el contexto de la fotografía.");
@@ -44,7 +46,7 @@ export function parseGuidedReview(raw: string | null): GuidedReview | null {
       || a.counts.reduce((x: number, y: number) => x + y, 0) !== a.total
       || a.lichen !== a.counts.slice(3).reduce((x: number, y: number) => x + y, 0)
       || (a.ai && !Array.isArray(a.ai.suggestions)))) return null;
-    return { version: 1, outline: value.outline, config, analysis: a ?? null,
+    return { version: 1, outline: value.outline, config, analysis: a ?? null, calibration: value.calibration,
       savedAt: a && typeof value.savedAt === "string" && Number.isFinite(Date.parse(value.savedAt)) ? value.savedAt : null };
   } catch { return null; }
 }

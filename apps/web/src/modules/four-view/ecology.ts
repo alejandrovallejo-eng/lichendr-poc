@@ -1,6 +1,7 @@
 import { parseColorConfig, type ColorConfig, type ColorClass } from "../region-suggestions/trunk-colors";
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { reviewFingerprint } from "./guided-cloud";
+import type { StandardizedCellReview } from "./cell-frequency";
 
 export interface Morphospecies { id: string; event_id: string; ordinal: number; custom_name?: string | null; name_revision?: number }
 export interface Quadrat { x: number; y: number; width: number; height: number }
@@ -8,6 +9,7 @@ export interface EcologyReview {
   version: 1; scale: "uncalibrated"; sourceOutline: TrunkPoint[];
   quadrat: Quadrat; width: number; height: number; config: ColorConfig;
   counts: number[]; total: number; savedAt: string;
+  standardized?: StandardizedCellReview;
 }
 export interface EcologyRow { image_id: string; event_id: string; tree_sample_id: string; direction: string; review: EcologyReview; revision: number }
 export function morphName(ordinal: number) {
@@ -63,7 +65,14 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
       || r.counts[0] !== 0 || r.counts[2] !== 0 || r.counts.reduce((a, b) => a + b, 0) !== r.total) return null;
     for (let label = 3; label <= 10; label++) if (r.counts[label] && !config.samples.some(s => s.label === label)) return null;
     if (typeof r.savedAt !== "string" || !Number.isFinite(Date.parse(r.savedAt))) return null;
-    return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt };
+    if (r.standardized !== undefined) {
+      const standardized = r.standardized as StandardizedCellReview;
+      if (standardized.method !== "cell-frequency-v1"
+        || !standardized.frame || standardized.frame.widthCm !== 10 || standardized.frame.heightCm !== 50
+        || !Array.isArray(standardized.decisions) && typeof standardized.decisions !== "object"
+        || !Number.isSafeInteger(standardized.maskWidth) || !Number.isSafeInteger(standardized.maskHeight)) return null;
+    }
+    return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt, standardized: r.standardized };
   } catch { return null; }
 }
 export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number) {

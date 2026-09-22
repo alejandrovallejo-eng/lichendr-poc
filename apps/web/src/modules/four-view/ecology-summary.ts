@@ -1,6 +1,7 @@
 import type { EcologyData } from "./ecology-client";
 import { morphDisplayName, observedMorphs, sameEcologySource, type EcologyRow } from "./ecology";
 import { DIRECTIONS, type Direction } from "./types";
+import { confirmedFrequency } from "./cell-frequency";
 
 export function currentQuadrat(data: EcologyData, sampleId: string, direction: Direction): {
   state: "saved" | "pending" | "changed" | "unavailable"; row?: EcologyRow;
@@ -33,7 +34,11 @@ export function buildEcologySummary(data: EcologyData, eventId: string) {
     const views = DIRECTIONS.map(direction => ({ direction, ...currentQuadrat(data, tree.sampleId, direction) }));
     const saved = views.filter(v => v.state === "saved");
     const morphIds = [...new Set(saved.flatMap(v => observedMorphs(v.row!.review)))];
-    return { tree, views, savedCount: saved.length, morphIds };
+    const frequencies = views.map(view => view.row?.review.standardized
+      ? confirmedFrequency(view.row.review.standardized.decisions) : null);
+    const completeFrequencies = frequencies.every(Boolean) && frequencies.length === DIRECTIONS.length;
+    return { tree, views, savedCount: saved.length, morphIds, frequencies,
+      frequencyCells: completeFrequencies ? frequencies.reduce((sum, value) => sum + (value?.occupiedCells ?? 0), 0) : null };
   });
   const valid = trees.flatMap(t => t.views.filter(v => v.state === "saved").map(v => ({
     sampleId: t.tree.sampleId, treeCode: t.tree.tree.code, direction: v.direction, row: v.row!,
@@ -57,6 +62,8 @@ export function buildEcologySummary(data: EcologyData, eventId: string) {
     pending: trees.flatMap(t => t.views).filter(v => v.state === "pending").length,
     changed: trees.flatMap(t => t.views).filter(v => v.state === "changed").length,
     unavailable: trees.flatMap(t => t.views).filter(v => v.state === "unavailable").length,
+    frequencyViews: trees.flatMap(t => t.frequencies).filter(Boolean).length,
+    frequencyTrees: trees.filter(t => t.frequencyCells !== null).length,
     catalogueOnly: data.catalog.length - morphs.length,
     lastSavedAt: valid.map(v => v.row.review.savedAt).sort().at(-1) ?? null,
   };

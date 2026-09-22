@@ -37,6 +37,26 @@ export const ecologyServices = {
       },signal);
       for(const value of values){const review=parseGuidedReview(JSON.stringify(value.review));if(review)sources[value.image_id]=review;}
     }
+    const calibrated = await readResultPages<{image_id:string;processing_status:string;pixels_per_cm:number|null;
+      rectified_width_px:number|null;rectified_height_px:number|null;calibration_method:string|null;confirmed_corners:unknown}>(
+      async (from,to) => {
+        let query = db.from("capture_views")
+          .select("image_id,processing_status,pixels_per_cm,rectified_width_px,rectified_height_px,calibration_method,confirmed_corners")
+          .in("image_id",ids).eq("active",true).range(from,to);
+        if(signal) query=query.abortSignal(signal);
+        return await query;
+      },signal);
+    for(const view of calibrated) {
+      const source=sources[view.image_id];
+      const method=view.calibration_method==="manual_confirmed" ? "manual_confirmed"
+        : view.calibration_method==="automatic" ? "automatic" : null;
+      const corners=Array.isArray(view.confirmed_corners) && view.confirmed_corners.length===4;
+      if(source && view.processing_status==="calibrated" && method && corners
+        && typeof view.pixels_per_cm==="number" && typeof view.rectified_width_px==="number" && typeof view.rectified_height_px==="number") {
+        sources[view.image_id]={...source,calibration:{pixelsPerCm:view.pixels_per_cm,method,
+          width:view.rectified_width_px,height:view.rectified_height_px}};
+      }
+    }
     const reviews=saved.filter(r=>ids.includes(r.image_id)).map(parseEcologyRow);
     if(reviews.some(r=>r.review.config.confirmed!.groups.some(g=>g.id!=="unassigned"&&!catalog.some(m=>m.id===g.id))))throw new Error("No se pudo vincular una morfoespecie con el catálogo de esta jornada.");
     return {rows,catalog,reviews,sources};

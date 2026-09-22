@@ -1,6 +1,6 @@
 import { decodeMaskRle, encodeMaskRle } from "../region-suggestions/mask-codec";
 
-export const CELL_FREQUENCY_METHOD = "cell-frequency-v1";
+export const CELL_FREQUENCY_METHOD = "cell-frequency-v2";
 export const FRAME_WIDTH_CM = 10;
 export const FRAME_HEIGHT_CM = 50;
 export const FRAME_CELL_COUNT = 5;
@@ -25,6 +25,7 @@ export interface StandardizedCellReview {
   masksByMorph: Record<string, string>;
   decisions: CellDecisions;
   reviewedAt: string | null;
+  sourceFingerprint: string;
 }
 
 export function isVerifiedCalibration(value: unknown): value is VerifiedCalibration {
@@ -51,7 +52,9 @@ export function verticalFrameCells(frame: StandardizedCellReview["frame"], width
       left: Math.floor(frame.x * width),
       top: Math.floor((frame.y + frame.height * index / FRAME_CELL_COUNT) * height),
       right: Math.ceil((frame.x + frame.width) * width),
-      bottom: Math.ceil((frame.y + frame.height * (index + 1) / FRAME_CELL_COUNT) * height),
+      bottom: index === FRAME_CELL_COUNT - 1
+        ? Math.ceil((frame.y + frame.height) * height)
+        : Math.floor((frame.y + frame.height * (index + 1) / FRAME_CELL_COUNT) * height),
     },
   }));
 }
@@ -68,14 +71,17 @@ export function occupiedCellsFromMask(mask: Uint8Array, width: number, height: n
   }).map(cell => cell.index);
 }
 
-export function proposeCellDecisions(review: Pick<StandardizedCellReview, "masksByMorph" | "maskWidth" | "maskHeight" | "frame">): CellDecisions {
+export function proposeCellDecisions(review: Pick<StandardizedCellReview, "masksByMorph" | "maskWidth" | "maskHeight" | "frame"> & { morphIds?: string[] }): CellDecisions {
   const decisions: CellDecisions = {};
+  for (const morphId of review.morphIds ?? Object.keys(review.masksByMorph)) {
+    decisions[morphId] = Object.fromEntries(Array.from({ length: FRAME_CELL_COUNT }, (_, index) => [String(index), "not_evaluated"]));
+  }
   for (const [morphId, encoded] of Object.entries(review.masksByMorph)) {
     const decoded = decodeMaskRle(encoded);
     if (decoded.width !== review.maskWidth || decoded.height !== review.maskHeight) {
       throw new Error("La máscara aceptada no coincide con la fotografía.");
     }
-    decisions[morphId] = {};
+    decisions[morphId] ??= Object.fromEntries(Array.from({ length: FRAME_CELL_COUNT }, (_, index) => [String(index), "not_evaluated"]));
     for (const index of occupiedCellsFromMask(decoded.mask, decoded.width, decoded.height, review.frame)) {
       decisions[morphId][String(index)] = "proposed";
     }
@@ -83,11 +89,15 @@ export function proposeCellDecisions(review: Pick<StandardizedCellReview, "masks
   return decisions;
 }
 
-export function confirmedFrequency(decisions: CellDecisions, requiredViews = 1) {
-  const states = Object.values(decisions).flatMap(cells => Object.values(cells));
-  if (states.some(state => state === "proposed" || state === "not_evaluated")) return null;
+export function confirmedFrequency(decisions: CellDecisions, requiredViews = 1, morphIds?: string[]) {
+  const ids = morphIds ?? Object.keys(decisions);
+  if (!ids.length || ids.some(id => {
+    const cells = decisions[id];
+    return !cells || Array.from({ length: FRAME_CELL_COUNT }, (_, index) => cells[String(index)])
+      .some(state => state !== "observed" && state !== "not_observed");
+  })) return null;
   const occupied = Array.from({ length: FRAME_CELL_COUNT }, (_, index) =>
-    Object.values(decisions).some(cells => cells[String(index)] === "observed"),
+    ids.some(id => decisions[id][String(index)] === "observed"),
   ).filter(Boolean).length;
   return { occupiedCells: occupied, totalCells: FRAME_CELL_COUNT * requiredViews };
 }

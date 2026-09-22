@@ -72,10 +72,11 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const [open,setOpen]=useState(true),[original,setOriginal]=useState(false),[zero,setZero]=useState(!!usable&&!usable.config.samples.length);
   const [overlay,setOverlay]=useState(""),[proposal,setProposal]=useState("");
   const calibrated = isVerifiedCalibration(source.calibration)
-    && source.analysis?.width === source.calibration.width && source.analysis.height === source.calibration.height;
-  const [standardized,setStandardized]=useState(Boolean(existing?.review.standardized));
-  const [frameConfirmed,setFrameConfirmed]=useState(Boolean(existing?.review.standardized?.frameConfirmed));
-  const [cellDecisions,setCellDecisions]=useState<CellDecisions>(existing?.review.standardized?.decisions ?? {});
+    && source.calibration.width === source.analysis?.width && source.calibration.height === source.analysis?.height;
+  const [standardized,setStandardized]=useState(Boolean(usable?.standardized));
+  const [frameConfirmed,setFrameConfirmed]=useState(Boolean(usable?.standardized?.frameConfirmed));
+  const [cellDecisions,setCellDecisions]=useState<CellDecisions>(usable?.standardized?.decisions ?? {});
+  const [decisionFingerprint,setDecisionFingerprint]=useState(usable?.standardized?.sourceFingerprint ?? "");
   const [cursor,setCursor]=useState<TrunkPoint>({x:.5,y:.5}),[keyboard,setKeyboard]=useState(false);
   const photo=useRef<SVGSVGElement>(null),createId=useRef<string|null>(null),alive=useRef(true),savingRef=useRef(false);
   const lastAttempt=useRef<{fingerprint:string;savedAt:string}|null>(null);
@@ -85,18 +86,23 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const selectedId=picker.groups.find(g=>g.label===picker.label)?.id;
   const groupNames=Object.fromEntries(catalog.map(m=>[m.id,morphDisplayName(m)]));
   const assigned=selectedId!=="unassigned";
+  const frame = useMemo(() => ({x:0,y:0,width:1,height:1,widthCm:10 as const,heightCm:50 as const}),[]);
+  const acceptedMasks = useMemo(() => picker.accepted&&pixels ? encodeAcceptedMasks(picker.accepted.labels,pixels.width,pixels.height,
+    config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label}))) : {},[picker.accepted,pixels,config]);
+  const activeMorphIds = useMemo(() => config.confirmed?.groups.filter(g=>g.id!=="unassigned").map(g=>g.id) ?? [],[config]);
+  const currentSourceFingerprint = useMemo(() => reviewFingerprint({imageId, outline:source.outline,
+    width:pixels?.width ?? 0, height:pixels?.height ?? 0, calibration:source.calibration, frame,
+    masksByMorph:acceptedMasks}),[imageId,source.outline,source.calibration,frame,pixels?.width,pixels?.height,acceptedMasks]);
   const proposedCells = useMemo(() => {
     if (!standardized || !picker.accepted || !pixels) return {};
-    const masksByMorph=encodeAcceptedMasks(picker.accepted.labels,pixels.width,pixels.height,
-      config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label})));
-    return proposeCellDecisions({masksByMorph,maskWidth:pixels.width,maskHeight:pixels.height,
-      frame:{x:0,y:0,width:1,height:1,widthCm:10,heightCm:50}});
-  },[standardized,picker.accepted,pixels,config]);
+    return proposeCellDecisions({masksByMorph:acceptedMasks,maskWidth:pixels.width,maskHeight:pixels.height,frame,morphIds:activeMorphIds});
+  },[standardized,picker.accepted,pixels,acceptedMasks,frame,activeMorphIds]);
   const effectiveCellDecisions = useMemo(() => {
     const next={...proposedCells};
-    for(const [id,cells] of Object.entries(cellDecisions)) next[id]={...(next[id]??{}),...cells};
+    if (decisionFingerprint === currentSourceFingerprint)
+      for(const [id,cells] of Object.entries(cellDecisions)) next[id]={...(next[id]??{}),...cells};
     return next;
-  },[cellDecisions,proposedCells]);
+  },[cellDecisions,decisionFingerprint,currentSourceFingerprint,proposedCells]);
   useEffect(()=>{alive.current=true;let url="";const abort=new AbortController();
     void services.photo(ownerId,imageId).then(blob=>{if(!abort.signal.aborted){url=URL.createObjectURL(blob);setSrc(url);}}).catch(e=>{if(!abort.signal.aborted)setError(detail(e));});
     return()=>{alive.current=false;abort.abort();if(url)URL.revokeObjectURL(url);};
@@ -138,7 +144,8 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
       if(!first){setFirst(point);return;}
       const q=quadratFromPoints(first,point,pixels.width,pixels.height);setFirst(null);
       if(!validQuadrat(q,source.outline,pixels.width,pixels.height)){setError("El cuadrante debe quedar completamente dentro del tronco azul. Marca de nuevo dos esquinas opuestas.");return;}
-      setQuadrat(q);setConfig(emptyEcologyConfig());setDirty(true);setZero(false);
+      setQuadrat(q);setConfig(emptyEcologyConfig());setStandardized(false);setFrameConfirmed(false);setCellDecisions({});setDecisionFingerprint("");
+      setDirty(true);setZero(false);
     }else if(step===1&&assigned)picker.pick(point);
   };
   const close=()=>{if(saving||creating)return;if((dirty||picker.pending)&&!window.confirm("¿Salir sin guardar los cambios de este cuadrante? El análisis anterior se conserva."))return;onClose();};
@@ -147,11 +154,13 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     const standardizedReview: StandardizedCellReview | undefined = standardized && calibrated && source.calibration
       ? { method: CELL_FREQUENCY_METHOD, frame: { x: 0, y: 0, width: 1, height: 1, widthCm: 10, heightCm: 50 }, frameConfirmed,
         calibration: source.calibration, maskWidth: pixels.width, maskHeight: pixels.height,
-        masksByMorph: encodeAcceptedMasks(picker.accepted.labels, pixels.width, pixels.height,
-          config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label}))),
-        decisions: effectiveCellDecisions, reviewedAt: new Date().toISOString() } : undefined;
+        masksByMorph: acceptedMasks, decisions: effectiveCellDecisions, reviewedAt: new Date().toISOString(),
+        sourceFingerprint: currentSourceFingerprint } : undefined;
     if (standardized && (!standardizedReview || !frameConfirmed)) { setError("Confirma que la vista rectificada corresponde al marco físico de 10 × 50 cm."); return; }
-    if (standardized && Object.values(effectiveCellDecisions).flatMap(v=>Object.values(v)).some(v=>v==="proposed"||v==="not_evaluated")) {
+    if (standardized && (Object.keys(effectiveCellDecisions).length !== activeMorphIds.length
+      || activeMorphIds.some(id => !effectiveCellDecisions[id]
+        || Object.keys(effectiveCellDecisions[id]).length !== FRAME_CELL_COUNT)
+      || Object.values(effectiveCellDecisions).flatMap(v=>Object.values(v)).some(v=>v==="proposed"||v==="not_evaluated"))) {
       setError("Revisa cada celda y confirma presencia o no observada antes de guardar."); return;
     }
     const draft={version:1,scale:"uncalibrated",sourceOutline:source.outline,quadrat,width:pixels.width,height:pixels.height,
@@ -217,7 +226,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         {assigned?<GuidedColorControls catalogue groupNames={groupNames} picker={picker} config={config} onFocusPhoto={()=>photo.current?.focus()}/>:<p>Elige una morfoespecie del catálogo o crea una nueva. Después toca sus colores en la foto.</p>}
         {!config.samples.length?<label className="eco-small"><input type="checkbox" checked={zero} disabled={!!picker.pending} onChange={e=>{setZero(e.target.checked);setDirty(true);}}/> Revisé el cuadrante y no marqué ninguna morfoespecie.</label>:null}
       </>:<><h2 style={{margin:0}}>{standardized?"Revisión de presencia por celda":"Resumen del cuadrante"}</h2>
-        {standardized?<CellReviewMatrix catalog={catalog} config={config} decisions={cellDecisions} proposed={proposedCells} onChange={setCellDecisions}/>:null}
+        {standardized?<CellReviewMatrix catalog={catalog} config={config} decisions={decisionFingerprint===currentSourceFingerprint?cellDecisions:{}} proposed={proposedCells} onChange={next=>{setCellDecisions(next);setDecisionFingerprint(currentSourceFingerprint);setDirty(true);}}/>:null}
         {config.confirmed!.groups.filter(g=>g.id!=="unassigned"&&(picker.accepted?.counts[g.label]??0)>0).map(g=><p key={g.id} style={{overflowWrap:"anywhere"}}>{groupNames[g.id]??g.name}: <strong>{pct(picker.accepted!.counts[g.label])}</strong></p>)}
         <p>Sin clasificar: <strong>{pct(picker.accepted?.counts[1]??0)}</strong></p><p className="eco-small">Sin clasificar no significa corteza. Las áreas aceptadas no se cuentan dos veces.</p>
         <p className="eco-small">Morfoespecies reconocidas por ti; no son identificaciones taxonómicas verificadas. El resultado se vincula a este árbol, vista y jornada.</p>

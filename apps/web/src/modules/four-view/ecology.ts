@@ -1,7 +1,8 @@
 import { parseColorConfig, type ColorConfig, type ColorClass } from "../region-suggestions/trunk-colors";
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
+import { decodeMaskRle } from "../region-suggestions/mask-codec";
 import { reviewFingerprint } from "./guided-cloud";
-import { isVerifiedCalibration, type StandardizedCellReview } from "./cell-frequency";
+import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, isVerifiedCalibration, type CellDecision, type StandardizedCellReview } from "./cell-frequency";
 
 export interface Morphospecies { id: string; event_id: string; ordinal: number; custom_name?: string | null; name_revision?: number }
 export interface Quadrat { x: number; y: number; width: number; height: number }
@@ -67,13 +68,43 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
     if (typeof r.savedAt !== "string" || !Number.isFinite(Date.parse(r.savedAt))) return null;
     if (r.standardized !== undefined) {
       const standardized = r.standardized as StandardizedCellReview;
-      if (standardized.method !== "cell-frequency-v1"
+      const groups = config.confirmed!.groups.filter(g => g.id !== "unassigned");
+      const decisions = standardized.decisions;
+      const validDecision = (state: unknown): state is CellDecision =>
+        state === "observed" || state === "not_observed" || state === "proposed" || state === "not_evaluated";
+      const validFrame = standardized.frame && [standardized.frame.x, standardized.frame.y, standardized.frame.width, standardized.frame.height]
+        .every(n => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1)
+        && standardized.frame.width > 0 && standardized.frame.height > 0
+        && standardized.frame.x + standardized.frame.width <= 1
+        && standardized.frame.y + standardized.frame.height <= 1
+        && Math.abs(standardized.frame.width * standardized.maskWidth / (standardized.frame.height * standardized.maskHeight) - .2) < .01;
+      const validMasks = standardized.masksByMorph && typeof standardized.masksByMorph === "object"
+        && Object.entries(standardized.masksByMorph).every(([id, mask]) => groups.some(g => g.id === id) && typeof mask === "string" && mask.length > 0);
+      const decodableMasks = validMasks && Object.values(standardized.masksByMorph).every(mask => {
+        try {
+          const decoded = decodeMaskRle(mask);
+          return decoded.width === standardized.maskWidth && decoded.height === standardized.maskHeight
+            && decoded.mask.length === standardized.maskWidth * standardized.maskHeight;
+        } catch { return false; }
+      });
+      const validDecisions = decisions && typeof decisions === "object"
+        && Object.keys(decisions).every(id => groups.some(g => g.id === id))
+        && groups.every(g => {
+          const cells = decisions[g.id];
+          return cells && typeof cells === "object"
+            && Object.keys(cells).length === FRAME_CELL_COUNT
+            && Array.from({ length: FRAME_CELL_COUNT }, (_, index) => validDecision(cells[String(index)])).every(Boolean);
+        });
+      const validReviewedAt = standardized.reviewedAt === null
+        || (typeof standardized.reviewedAt === "string" && Number.isFinite(Date.parse(standardized.reviewedAt)));
+      if (standardized.method !== CELL_FREQUENCY_METHOD
         || !standardized.frame || standardized.frame.widthCm !== 10 || standardized.frame.heightCm !== 50
         || standardized.frameConfirmed !== true
         || !isVerifiedCalibration(standardized.calibration)
+        || !validFrame
         || !Number.isSafeInteger(standardized.maskWidth) || !Number.isSafeInteger(standardized.maskHeight)
-        || !standardized.masksByMorph || typeof standardized.masksByMorph !== "object"
-        || !standardized.decisions || typeof standardized.decisions !== "object") return null;
+        || !validMasks || !decodableMasks || !validDecisions || typeof standardized.sourceFingerprint !== "string" || !standardized.sourceFingerprint
+        || !validReviewedAt) return null;
     }
     return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt, standardized: r.standardized };
   } catch { return null; }

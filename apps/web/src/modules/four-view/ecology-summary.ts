@@ -34,9 +34,12 @@ export function buildEcologySummary(data: EcologyData, eventId: string) {
     const views = DIRECTIONS.map(direction => ({ direction, ...currentQuadrat(data, tree.sampleId, direction) }));
     const saved = views.filter(v => v.state === "saved");
     const morphIds = [...new Set(saved.flatMap(v => observedMorphs(v.row!.review)))];
-    const frequencies = views.map(view => view.row?.review.standardized
-      ? confirmedFrequency(view.row.review.standardized.decisions) : null);
-    const completeFrequencies = frequencies.every(Boolean) && frequencies.length === DIRECTIONS.length;
+    const frequencies = views.map(view => view.state === "saved" && view.row?.review.standardized
+      ? confirmedFrequency(view.row.review.standardized.decisions,
+        1, view.row.review.config.confirmed?.groups.filter(g => g.id !== "unassigned").map(g => g.id)) : null);
+    const completeFrequencies = views.length === DIRECTIONS.length
+      && views.every(view => view.state === "saved")
+      && frequencies.every(Boolean);
     return { tree, views, savedCount: saved.length, morphIds, frequencies,
       frequencyCells: completeFrequencies ? frequencies.reduce((sum, value) => sum + (value?.occupiedCells ?? 0), 0) : null };
   });

@@ -22,13 +22,23 @@ test("cell proposals use mask pixels, including a mask crossing cells", () => {
     frame, maskWidth: 10, maskHeight: 50,
     masksByMorph: { same: encodeMaskRle(mask, 10, 50) },
   });
-  assert.deepEqual(decisions.same, { "0": "proposed", "1": "proposed" });
+  assert.deepEqual(decisions.same, {
+    "0": "proposed", "1": "proposed", "2": "not_evaluated", "3": "not_evaluated", "4": "not_evaluated",
+  });
 });
 
 test("tones of one morphospecies deduplicate and pending is not zero", () => {
   assert.equal(confirmedFrequency({ same: { "0": "proposed", "1": "not_observed" } }), null);
+  assert.equal(confirmedFrequency({ same: { "0": "observed" } }), null);
   assert.deepEqual(confirmedFrequency({
-    same: { "0": "observed", "1": "not_observed" },
-    toneTwoOfSame: { "0": "observed", "1": "not_observed" },
+    same: { "0": "observed", "1": "not_observed", "2": "not_observed", "3": "not_observed", "4": "not_observed" },
+    toneTwoOfSame: { "0": "observed", "1": "not_observed", "2": "not_observed", "3": "not_observed", "4": "not_observed" },
   }), { occupiedCells: 1, totalCells: 5 });
+});
+
+test("an explicit five-cell absence is complete while an empty matrix is pending", () => {
+  assert.equal(confirmedFrequency({}), null);
+  assert.deepEqual(confirmedFrequency({
+    same: { "0": "not_observed", "1": "not_observed", "2": "not_observed", "3": "not_observed", "4": "not_observed" },
+  }), { occupiedCells: 0, totalCells: 5 });
 });

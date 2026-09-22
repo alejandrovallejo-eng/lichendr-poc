@@ -72,12 +72,19 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
       const decisions = standardized.decisions;
       const validDecision = (state: unknown): state is CellDecision =>
         state === "observed" || state === "not_observed" || state === "proposed" || state === "not_evaluated";
-      const validFrame = standardized.frame && [standardized.frame.x, standardized.frame.y, standardized.frame.width, standardized.frame.height]
-        .every(n => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1)
-        && standardized.frame.width > 0 && standardized.frame.height > 0
-        && standardized.frame.x + standardized.frame.width <= 1
-        && standardized.frame.y + standardized.frame.height <= 1
-        && Math.abs(standardized.frame.width * standardized.maskWidth / (standardized.frame.height * standardized.maskHeight) - .2) < .01;
+      const corners = standardized.frame?.corners;
+      const isPoint = (value: unknown): value is { x: number; y: number } => {
+        const point = value as { x?: unknown; y?: unknown } | null;
+        return Boolean(point && typeof point.x === "number" && typeof point.y === "number"
+          && Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1);
+      };
+      const cross = (a: {x:number;y:number}, b: {x:number;y:number}, c: {x:number;y:number}) =>
+        (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
+      const validFrame = Array.isArray(corners) && corners.length === 4 && corners.every(isPoint)
+        && cross(corners[0],corners[1],corners[2]) > 0
+        && cross(corners[1],corners[2],corners[3]) > 0
+        && cross(corners[2],corners[3],corners[0]) > 0
+        && cross(corners[3],corners[0],corners[1]) > 0;
       const validMasks = standardized.masksByMorph && typeof standardized.masksByMorph === "object"
         && Object.entries(standardized.masksByMorph).every(([id, mask]) => groups.some(g => g.id === id) && typeof mask === "string" && mask.length > 0);
       const decodableMasks = validMasks && Object.values(standardized.masksByMorph).every(mask => {
@@ -109,8 +116,17 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
     return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt, standardized: r.standardized };
   } catch { return null; }
 }
-export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number) {
-  return review.width === width && review.height === height && reviewFingerprint(review.sourceOutline) === reviewFingerprint(outline);
+export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number, source?: { imageId?: string; calibration?: unknown }) {
+  if (review.width !== width || review.height !== height || reviewFingerprint(review.sourceOutline) !== reviewFingerprint(outline)) return false;
+  if (!review.standardized || !source?.calibration) return !review.standardized;
+  return isVerifiedCalibration(source.calibration)
+    && review.standardized.calibration.imageId === source.calibration.imageId
+    && review.standardized.calibration.transformationId === source.calibration.transformationId
+    && review.standardized.calibration.method === source.calibration.method
+    && review.standardized.calibration.pixelsPerCm === source.calibration.pixelsPerCm
+    && review.standardized.calibration.width === source.calibration.width
+    && review.standardized.calibration.height === source.calibration.height
+    && review.standardized.sourceFingerprint.includes(source.calibration.transformationId);
 }
 export function observedMorphs(review: EcologyReview): string[] {
   return review.config.confirmed!.groups.filter(g => g.id !== "unassigned" && review.counts[g.label] > 0).map(g => g.id);

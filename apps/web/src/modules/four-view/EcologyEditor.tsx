@@ -10,7 +10,7 @@ import { emptyEcologyConfig, morphDisplayName, parseEcologyReview, quadratFromPo
 import { DIRECTION_LABELS, type Direction } from "./types";
 import { reviewFingerprint } from "./guided-cloud";
 import MorphNameEditor from "./MorphNameEditor";
-import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, isVerifiedCalibration, proposeCellDecisions, type CellDecision, type CellDecisions, type StandardizedCellReview } from "./cell-frequency";
+import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, frameCellPolygons, isVerifiedCalibration, proposeCellDecisions, type CellDecision, type CellDecisions, type FrameQuad, type StandardizedCellReview } from "./cell-frequency";
 
 function CellReviewMatrix({ catalog, config, decisions, proposed, onChange }: {
   catalog: Morphospecies[]; config: ColorConfig; decisions: CellDecisions;
@@ -63,7 +63,9 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   existing?:EcologyRow;catalog:Morphospecies[];reviews:EcologyRow[];services:EcologyServices;
   onCatalog:(m:Morphospecies)=>void;onSaved:(r:EcologyRow)=>void;onClose:()=>void;
 }) {
-  const usable=existing&&source.analysis&&sameEcologySource(existing.review,source.outline,source.analysis.width,source.analysis.height)?existing.review:null;
+  const currentWidth=source.calibration?.width ?? source.analysis?.width ?? 0;
+  const currentHeight=source.calibration?.height ?? source.analysis?.height ?? 0;
+  const usable=existing&&source.analysis&&sameEcologySource(existing.review,source.outline,currentWidth,currentHeight,source)?existing.review:null;
   const [quadrat,setQuadrat]=useState<Quadrat|null>(usable?.quadrat??null);
   const [config,setConfig]=useState<ColorConfig>(usable?.config??emptyEcologyConfig);
   const [step,setStep]=useState(usable?1:0),[first,setFirst]=useState<TrunkPoint|null>(null);
@@ -71,12 +73,14 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const [error,setError]=useState(""),[dirty,setDirty]=useState(false),[saving,setSaving]=useState(false),[creating,setCreating]=useState(false);
   const [open,setOpen]=useState(true),[original,setOriginal]=useState(false),[zero,setZero]=useState(!!usable&&!usable.config.samples.length);
   const [overlay,setOverlay]=useState(""),[proposal,setProposal]=useState("");
-  const calibrated = isVerifiedCalibration(source.calibration)
-    && source.calibration.width === source.analysis?.width && source.calibration.height === source.analysis?.height;
+  const calibrated = isVerifiedCalibration(source.calibration);
   const [standardized,setStandardized]=useState(Boolean(usable?.standardized));
   const [frameConfirmed,setFrameConfirmed]=useState(Boolean(usable?.standardized?.frameConfirmed));
   const [cellDecisions,setCellDecisions]=useState<CellDecisions>(usable?.standardized?.decisions ?? {});
   const [decisionFingerprint,setDecisionFingerprint]=useState(usable?.standardized?.sourceFingerprint ?? "");
+  const [frameCorners,setFrameCorners]=useState<FrameQuad | null>(usable?.standardized?.frame.corners ?? null);
+  const [registeringFrame,setRegisteringFrame]=useState(false);
+  const [pendingFrameCorners,setPendingFrameCorners]=useState<TrunkPoint[]>([]);
   const [cursor,setCursor]=useState<TrunkPoint>({x:.5,y:.5}),[keyboard,setKeyboard]=useState(false);
   const photo=useRef<SVGSVGElement>(null),createId=useRef<string|null>(null),alive=useRef(true),savingRef=useRef(false);
   const lastAttempt=useRef<{fingerprint:string;savedAt:string}|null>(null);
@@ -86,7 +90,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const selectedId=picker.groups.find(g=>g.label===picker.label)?.id;
   const groupNames=Object.fromEntries(catalog.map(m=>[m.id,morphDisplayName(m)]));
   const assigned=selectedId!=="unassigned";
-  const frame = useMemo(() => ({x:0,y:0,width:1,height:1,widthCm:10 as const,heightCm:50 as const}),[]);
+  const frame = useMemo(() => frameCorners ? ({corners:frameCorners,widthCm:10 as const,heightCm:50 as const}) : null,[frameCorners]);
   const acceptedMasks = useMemo(() => picker.accepted&&pixels ? encodeAcceptedMasks(picker.accepted.labels,pixels.width,pixels.height,
     config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label}))) : {},[picker.accepted,pixels,config]);
   const activeMorphIds = useMemo(() => config.confirmed?.groups.filter(g=>g.id!=="unassigned").map(g=>g.id) ?? [],[config]);
@@ -94,7 +98,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     width:pixels?.width ?? 0, height:pixels?.height ?? 0, calibration:source.calibration, frame,
     masksByMorph:acceptedMasks}),[imageId,source.outline,source.calibration,frame,pixels?.width,pixels?.height,acceptedMasks]);
   const proposedCells = useMemo(() => {
-    if (!standardized || !picker.accepted || !pixels) return {};
+    if (!standardized || !picker.accepted || !pixels || !frame) return {};
     return proposeCellDecisions({masksByMorph:acceptedMasks,maskWidth:pixels.width,maskHeight:pixels.height,frame,morphIds:activeMorphIds});
   },[standardized,picker.accepted,pixels,acceptedMasks,frame,activeMorphIds]);
   const effectiveCellDecisions = useMemo(() => {
@@ -104,9 +108,9 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     return next;
   },[cellDecisions,decisionFingerprint,currentSourceFingerprint,proposedCells]);
   useEffect(()=>{alive.current=true;let url="";const abort=new AbortController();
-    void services.photo(ownerId,imageId).then(blob=>{if(!abort.signal.aborted){url=URL.createObjectURL(blob);setSrc(url);}}).catch(e=>{if(!abort.signal.aborted)setError(detail(e));});
+    void services.photo(ownerId,imageId,source.calibration?.proxyPath).then(blob=>{if(!abort.signal.aborted){url=URL.createObjectURL(blob);setSrc(url);}}).catch(e=>{if(!abort.signal.aborted)setError(detail(e));});
     return()=>{alive.current=false;abort.abort();if(url)URL.revokeObjectURL(url);};
-  },[services,ownerId,imageId]);
+  },[services,ownerId,imageId,source.calibration?.proxyPath,currentWidth,currentHeight]);
   useEffect(()=>{
     const guard=(e:BeforeUnloadEvent)=>{if(dirty||picker.pending||saving||creating){e.preventDefault();e.returnValue="";}};
     window.addEventListener("beforeunload",guard);return()=>window.removeEventListener("beforeunload",guard);
@@ -140,23 +144,27 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   };
   const pick=(point:TrunkPoint)=>{
     if(!pixels||saving||creating)return;setError("");
-    if(step===0){
+    if(registeringFrame){
+      const next=[...pendingFrameCorners,point];
+      if(next.length===4){setFrameCorners(next as FrameQuad);setPendingFrameCorners([]);setRegisteringFrame(false);setFrameConfirmed(false);setCellDecisions({});setDecisionFingerprint("");setDirty(true);}
+      else setPendingFrameCorners(next);
+    }else if(step===0){
       if(!first){setFirst(point);return;}
       const q=quadratFromPoints(first,point,pixels.width,pixels.height);setFirst(null);
       if(!validQuadrat(q,source.outline,pixels.width,pixels.height)){setError("El cuadrante debe quedar completamente dentro del tronco azul. Marca de nuevo dos esquinas opuestas.");return;}
-      setQuadrat(q);setConfig(emptyEcologyConfig());setStandardized(false);setFrameConfirmed(false);setCellDecisions({});setDecisionFingerprint("");
+      setQuadrat(q);setConfig(emptyEcologyConfig());setStandardized(false);setFrameConfirmed(false);setFrameCorners(null);setCellDecisions({});setDecisionFingerprint("");
       setDirty(true);setZero(false);
     }else if(step===1&&assigned)picker.pick(point);
   };
   const close=()=>{if(saving||creating)return;if((dirty||picker.pending)&&!window.confirm("¿Salir sin guardar los cambios de este cuadrante? El análisis anterior se conserva."))return;onClose();};
   const save=async()=>{
     if(savingRef.current||!pixels||!quadrat||!picker.accepted||picker.pending||(!config.samples.length&&!zero))return;
-    const standardizedReview: StandardizedCellReview | undefined = standardized && calibrated && source.calibration
-      ? { method: CELL_FREQUENCY_METHOD, frame: { x: 0, y: 0, width: 1, height: 1, widthCm: 10, heightCm: 50 }, frameConfirmed,
+    const standardizedReview: StandardizedCellReview | undefined = standardized && calibrated && source.calibration && frame
+      ? { method: CELL_FREQUENCY_METHOD, frame, frameConfirmed,
         calibration: source.calibration, maskWidth: pixels.width, maskHeight: pixels.height,
         masksByMorph: acceptedMasks, decisions: effectiveCellDecisions, reviewedAt: new Date().toISOString(),
         sourceFingerprint: currentSourceFingerprint } : undefined;
-    if (standardized && (!standardizedReview || !frameConfirmed)) { setError("Confirma que la vista rectificada corresponde al marco físico de 10 × 50 cm."); return; }
+    if (standardized && (!standardizedReview || !frameConfirmed)) { setError("Registra las cuatro esquinas y confirma la referencia física de 10 × 50 cm."); return; }
     if (standardized && (Object.keys(effectiveCellDecisions).length !== activeMorphIds.length
       || activeMorphIds.some(id => !effectiveCellDecisions[id]
         || Object.keys(effectiveCellDecisions[id]).length !== FRAME_CELL_COUNT)
@@ -187,12 +195,12 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={src} alt="" style={{position:"absolute",width:1,height:1,opacity:0}} onError={()=>setError("No se pudo abrir la fotografía. Vuelve a resultados y reintenta.")} onLoad={e=>{
           try{const img=e.currentTarget,size=colorWorkingSize(img.naturalWidth,img.naturalHeight);
-            if(size.width!==source.analysis!.width||size.height!==source.analysis!.height)throw new Error("La copia de la foto cambió de tamaño. Revisa primero el análisis del tronco.");
+            if(size.width!==currentWidth||size.height!==currentHeight)throw new Error("La copia de la foto cambió de tamaño. Revisa primero la rectificación del marco.");
             const c=document.createElement("canvas");c.width=size.width;c.height=size.height;const ctx=c.getContext("2d",{willReadFrequently:true});if(!ctx)throw new Error("No se pudieron leer los colores.");
             ctx.drawImage(img,0,0,c.width,c.height);setPixels({...size,rgba:ctx.getImageData(0,0,c.width,c.height).data});
           }catch(e){setError(detail(e));}
         }}/>
-        <svg ref={photo} tabIndex={0} role="group" aria-label={step===0?"Fotografía: elegir dos esquinas del cuadrante":"Fotografía: elegir tonos de morfoespecies"}
+        <svg ref={photo} tabIndex={0} role="group" aria-label={registeringFrame?"Fotografía: registrar cuatro esquinas del marco físico":step===0?"Fotografía: elegir dos esquinas del cuadrante":"Fotografía: elegir tonos de morfoespecies"}
           viewBox={`${x0} ${y0} ${x1-x0} ${y1-y0}`} style={{width:"100%",height:"100%",touchAction:"none",cursor:step<2?"crosshair":"default"}}
           onPointerDown={e=>{const matrix=e.currentTarget.getScreenCTM();if(!matrix)return;const p=new DOMPoint(e.clientX,e.clientY).matrixTransform(matrix.inverse());
             if(p.x<0||p.y<0||p.x>=w||p.y>=h)return;const point={x:p.x/w,y:p.y/h};setCursor(point);setKeyboard(false);pick(point);}}
@@ -204,6 +212,8 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
           {!original&&step===1&&proposal?<image href={proposal} width={w} height={h} aria-label="Zonas propuestas en fucsia"/>:null}
           <polygon points={source.outline.map(p=>`${p.x*w},${p.y*h}`).join(" ")} fill="none" stroke="#00aeff" strokeWidth="2" vectorEffect="non-scaling-stroke"/>
           {quadrat?<rect {...quadrat} fill="none" stroke="#ffd900" strokeWidth="3" vectorEffect="non-scaling-stroke"/>:null}
+          {frameCorners ? frameCellPolygons(frameCorners).map((polygon,index)=><polygon key={`frame-cell-${index}`} points={polygon.map(p=>`${p.x*w},${p.y*h}`).join(" ")} fill={index%2?"#2b8a6e18":"#ffd90018"} stroke="#00674d" strokeWidth="2" vectorEffect="non-scaling-stroke"/>) : null}
+          {pendingFrameCorners.map((point,index)=><circle key={`frame-point-${index}`} cx={point.x*w} cy={point.y*h} r="5" fill="#00674d" stroke="white"/>)}
           {first?<circle cx={first.x*w} cy={first.y*h} r="5" fill="#ffd900" stroke="black"/>:null}
           {step===1&&!original?config.samples.map((s,i)=><circle key={i} cx={s.x*w} cy={s.y*h} r="3" fill={`rgb(${s.rgb.join(",")})`} stroke="white"/>):null}
           {step===1&&!original&&picker.pending?<GuidedToneMarker sample={picker.pending} width={w} height={h}/>:null}
@@ -216,10 +226,12 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         <p className="eco-small">Amarillo = área que se medirá. El contorno del tronco y el análisis general no se modifican.</p>
         <p className="eco-small">Sin escala física: mediremos porcentaje de esta área, no cm² ni calidad del aire.</p>
         {calibrated?<><label className="eco-small"><input type="checkbox" checked={standardized} onChange={e=>{setStandardized(e.target.checked);setDirty(true);}}/> Usar marco físico calibrado de 10 × 50 cm (cinco celdas verticales)</label>
-          {standardized?<label className="eco-small"><input type="checkbox" checked={frameConfirmed} onChange={e=>{setFrameConfirmed(e.target.checked);setDirty(true);}}/> Confirmo la posición del marco físico visible en esta vista rectificada.</label>:null}</>
+          {standardized?<><button type="button" onClick={()=>{setRegisteringFrame(true);setPendingFrameCorners([]);setFrameConfirmed(false);setDirty(true);}}>Registrar cuatro esquinas del marco</button>
+            <p className="eco-small">{frameCorners ? "Marco registrado: las celdas se dibujan sobre sus esquinas." : "Haz clic en orden: superior izquierda, superior derecha, inferior derecha, inferior izquierda."}</p>
+            <label className="eco-small"><input type="checkbox" checked={frameConfirmed} disabled={!frameCorners} onChange={e=>{setFrameConfirmed(e.target.checked);setDirty(true);}}/> Confirmo la posición del marco físico visible en esta vista.</label></>:null}</>
           :<p className="eco-small">No hay referencia física verificable en esta vista; solo está disponible el análisis exploratorio.</p>}
         {first?<button onClick={()=>setFirst(null)}>Cancelar esquina</button>:null}
-        {quadrat?<button onClick={()=>{setQuadrat(null);setFirst(null);setConfig(emptyEcologyConfig());setDirty(true);setZero(false);}}>Elegir otro cuadrante</button>:null}
+        {quadrat?<button onClick={()=>{setQuadrat(null);setFirst(null);setConfig(emptyEcologyConfig());setFrameCorners(null);setStandardized(false);setDirty(true);setZero(false);}}>Elegir otro cuadrante</button>:null}
       </>:step===1?<>
         <button aria-expanded={open} aria-controls="morph-catalogue" disabled={!!picker.pending||saving||creating} onClick={()=>setOpen(!open)}>{open?"Cerrar catálogo":"Abrir catálogo de la jornada"}</button>
         {open?<MorphCatalogue catalog={catalog} reviews={reviews} selectedId={selectedId} disabled={!!picker.pending||saving} busy={creating} onSelect={choose} onCreate={()=>void create()} onRename={async(m,name)=>onCatalog(await services.renameMorph(m,name))}/>:null}

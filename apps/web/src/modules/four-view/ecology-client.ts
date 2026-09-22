@@ -6,6 +6,7 @@ import { parseGuidedReview, type GuidedReview } from "./guided-flow";
 import { normalizeMorphName, parseEcologyReview, type EcologyReview, type EcologyRow, type Morphospecies } from "./ecology";
 import { guidedServices } from "./guided-service";
 import type { Direction } from "./types";
+type NormalizedCorner = { x: number; y: number };
 const db = supabase as SupabaseClient;
 const message = (code?: string) => code === "40001" ? "Otra pestaña guardó cambios. Cierra este editor y vuelve a abrir la vista para revisar la versión actual."
   : code === "42501" || code === "22023" ? "La foto, el tronco o la jornada cambiaron. Vuelve a los resultados y abre la vista actual."
@@ -38,10 +39,11 @@ export const ecologyServices = {
       for(const value of values){const review=parseGuidedReview(JSON.stringify(value.review));if(review)sources[value.image_id]=review;}
     }
     const calibrated = await readResultPages<{image_id:string;processing_status:string;pixels_per_cm:number|null;
-      rectified_width_px:number|null;rectified_height_px:number|null;calibration_method:string|null;confirmed_corners:unknown}>(
+      rectified_width_px:number|null;rectified_height_px:number|null;calibration_method:string|null;confirmed_corners:unknown;
+      rectified_storage_path:string|null;source:string|null}>(
       async (from,to) => {
         let query = db.from("capture_views")
-          .select("image_id,processing_status,pixels_per_cm,rectified_width_px,rectified_height_px,calibration_method,confirmed_corners")
+          .select("image_id,processing_status,pixels_per_cm,rectified_width_px,rectified_height_px,calibration_method,confirmed_corners,rectified_storage_path,source")
           .in("image_id",ids).eq("active",true).range(from,to);
         if(signal) query=query.abortSignal(signal);
         return await query;
@@ -50,18 +52,27 @@ export const ecologyServices = {
       const source=sources[view.image_id];
       const method=view.calibration_method==="manual_confirmed" ? "manual_confirmed"
         : view.calibration_method==="automatic" ? "automatic" : null;
-      const corners=Array.isArray(view.confirmed_corners) && view.confirmed_corners.length===4;
+      const corners=Array.isArray(view.confirmed_corners) && view.confirmed_corners.length===4
+        && view.confirmed_corners.every((point: unknown) => {
+          const corner = point as Partial<NormalizedCorner>;
+          return corner && Number.isFinite(corner.x) && Number.isFinite(corner.y)
+            && (corner.x ?? -1) >= 0 && (corner.x ?? 2) <= 1 && (corner.y ?? -1) >= 0 && (corner.y ?? 2) <= 1;
+        });
       if(source && view.processing_status==="calibrated" && method && corners
-        && typeof view.pixels_per_cm==="number" && typeof view.rectified_width_px==="number" && typeof view.rectified_height_px==="number") {
+        && typeof view.pixels_per_cm==="number" && typeof view.rectified_width_px==="number" && typeof view.rectified_height_px==="number"
+        && typeof view.rectified_storage_path==="string" && view.rectified_storage_path.length > 0) {
         sources[view.image_id]={...source,calibration:{pixelsPerCm:view.pixels_per_cm,method,
-          width:view.rectified_width_px,height:view.rectified_height_px}};
+          width:view.rectified_width_px,height:view.rectified_height_px,imageId:view.image_id,
+          proxyPath:view.rectified_storage_path ?? `analysis-proxy:${view.image_id}`,
+          transformationId:view.rectified_storage_path ?? view.source ?? `capture-view:${view.image_id}`,
+          sourceCorners:view.confirmed_corners as [NormalizedCorner, NormalizedCorner, NormalizedCorner, NormalizedCorner]}};
       }
     }
     const reviews=saved.filter(r=>ids.includes(r.image_id)).map(parseEcologyRow);
     if(reviews.some(r=>r.review.config.confirmed!.groups.some(g=>g.id!=="unassigned"&&!catalog.some(m=>m.id===g.id))))throw new Error("No se pudo vincular una morfoespecie con el catálogo de esta jornada.");
     return {rows,catalog,reviews,sources};
   },
-  photo: guidedServices.storedPhoto,
+  photo: guidedServices.photo,
   async createMorph(eventId:string,id:string):Promise<Morphospecies>{
     const {data,error}=await db.rpc("create_jornada_morphospecies",{p_event_id:eventId,p_id:id}).single();
     if(error)throw new Error(error.code==="22023"?"El catálogo admite hasta 64 morfoespecies.":message(error.code));

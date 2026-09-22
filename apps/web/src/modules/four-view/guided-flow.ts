@@ -12,7 +12,7 @@ export interface GuidedServices {
   cloud: GuidedCloudStore;
   load(context: GuidedContext): Promise<GuidedSession>;
   upload(context: GuidedContext, direction: Direction, file: File, requestKey: string): Promise<{imageId:string;treeSampleId:string}>;
-  photo(ownerId: string, imageId: string): Promise<Blob>;
+  photo(ownerId: string, imageId: string, preferredPath?: string): Promise<Blob>;
   // Read an existing private proxy only. The summary must not prepare images,
   // invoke a model, or write any records just to display saved results.
   storedPhoto(ownerId: string, imageId: string): Promise<Blob>;

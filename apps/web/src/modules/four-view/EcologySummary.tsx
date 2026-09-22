@@ -55,9 +55,11 @@ export default function EcologySummary({ data, eventId, onReview, includeCapture
       {summary.trees.map(({ tree, views, savedCount, morphIds }) => <article id={`arbol-${tree.sampleId}`} key={tree.sampleId} className="rounded-xl border bg-white p-4">
         <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-bold">{tree.tree.code}</h3>
           {includeCapture ? <p className="text-sm">{tree.savedCount}/4 vistas guardadas</p> : null}
-          <p className="text-sm">{savedCount}/4 cuadrantes revisados{savedCount ? ` · ${morphIds.length} morfoespecies registradas` : " · diversidad pendiente"}</p></div>
+          <p className="text-sm">{savedCount}/4 cuadrantes revisados{savedCount ? ` · ${morphIds.length} morfoespecies registradas` : " · diversidad pendiente"}</p>
+          {Object.entries(summary.trees.find(t => t.tree.sampleId === tree.sampleId)?.frequencyByMorph ?? {}).map(([id,result]) =>
+            <p key={id} className="text-sm">{morphDisplayName(data.catalog.find(m => m.id === id)!)}: {result ? `${result.occupiedCells} / 20 celdas` : "Frecuencia pendiente"}</p>)}</div>
           <a className="text-sm underline" href={guidedResultHref(tree)}>Ver tronco completo y 360°</a></div>
-        <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">{views.map((v, index) => <div key={v.direction} className={`rounded-lg p-3 text-sm ${v.state === "saved" ? "bg-emerald-50" : "bg-stone-50"}`}>
+        <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">{views.map(v => <div key={v.direction} className={`rounded-lg p-3 text-sm ${v.state === "saved" ? "bg-emerald-50" : "bg-stone-50"}`}>
           <h4 className="font-semibold">{DIRECTION_LABELS[v.direction]}</h4>
           {includeCapture ? <p className="my-2 font-semibold">Tronco delimitado: {tree.views[v.direction].state === "saved"
             ? `${tree.views[v.direction].coverage!.toFixed(1)} %`
@@ -68,7 +70,10 @@ export default function EcologySummary({ data, eventId, onReview, includeCapture
               <li key={g.id} style={{ overflowWrap: "anywhere" }}>{morphDisplayName(data.catalog.find(m => m.id === g.id)!)}: {(100 * v.row!.review.counts[g.label] / v.row!.review.total).toFixed(1)} %</li>)}
               <li>Sin clasificar: {(100 * v.row!.review.counts[1] / v.row!.review.total).toFixed(1)} %</li></ul>
             {!v.row!.review.config.confirmed!.groups.some(g => g.id !== "unassigned" && v.row!.review.counts[g.label] > 0) ? <p>Revisado sin morfoespecies marcadas.</p> : null}
-            {v.row!.review.standardized ? <p className="mt-2 font-semibold">Frecuencia: {summary.trees.find(t => t.tree.sampleId === tree.sampleId)?.frequencies[index]?.occupiedCells ?? "Pendiente"} / 5 celdas</p> : null}
+            {v.row!.review.standardized ? <ul className="mt-2 font-semibold" aria-label="Frecuencia por morfoespecie">{v.row!.review.config.confirmed!.groups.filter(g => g.id !== "unassigned").map(g => {
+              const result=summary.trees.find(t => t.tree.sampleId === tree.sampleId)?.frequencyByMorph[g.id];
+              return <li key={g.id}>{morphDisplayName(data.catalog.find(m => m.id === g.id)!)}: {result ? `${result.occupiedCells} / 5 celdas` : "Pendiente"}</li>;
+            })}</ul> : null}
           </details> : null}
           {v.state === "unavailable" ? <a className="mt-2 inline-block underline" href={guidedResultHref(tree, false)}>Abrir captura</a>
             : <button type="button" className="mt-2 underline" onClick={() => onReview(tree.sampleId, v.direction)}>{v.state === "saved" ? "Revisar" : "Continuar"} {DIRECTION_LABELS[v.direction]}</button>}

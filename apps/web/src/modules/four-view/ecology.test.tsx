@@ -40,8 +40,8 @@ test("explicit empty review is unknown, not bark; invalid counts and samples rej
 test("standardized reviews require five explicit decisions and decodable bounded masks",()=>{
   const morph=selectMorph(emptyEcologyConfig(),a), mask=encodeMaskRle(new Uint8Array(10*50),10,50);
   const decisions={ [a.id]: { "0":"not_observed","1":"not_observed","2":"not_observed","3":"not_observed","4":"not_observed" } };
-  const standardized={method:"cell-frequency-v2",frame:{x:0,y:0,width:1,height:1,widthCm:10,heightCm:50},
-    frameConfirmed:true,calibration:{pixelsPerCm:1,method:"manual_confirmed",width:10,height:50},
+  const standardized={method:"cell-frequency-v2",frame:{corners:[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}],widthCm:10,heightCm:50},
+    frameConfirmed:true,calibration:{pixelsPerCm:1,method:"manual_confirmed",width:10,height:50,imageId:"img",proxyPath:"analysis-proxy:img",transformationId:"rectified:img",sourceCorners:[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]},
     maskWidth:10,maskHeight:50,masksByMorph:{[a.id]:mask},decisions,reviewedAt:"2026-09-16T12:00:00Z",sourceFingerprint:"source"};
   const raw={...document(),config:morph.config,standardized};
   assert.ok(parseEcologyReview(raw));

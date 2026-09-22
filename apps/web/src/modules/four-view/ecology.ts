@@ -1,7 +1,7 @@
 import { parseColorConfig, type ColorConfig, type ColorClass } from "../region-suggestions/trunk-colors";
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
 import { reviewFingerprint } from "./guided-cloud";
-import type { StandardizedCellReview } from "./cell-frequency";
+import { isVerifiedCalibration, type StandardizedCellReview } from "./cell-frequency";
 
 export interface Morphospecies { id: string; event_id: string; ordinal: number; custom_name?: string | null; name_revision?: number }
 export interface Quadrat { x: number; y: number; width: number; height: number }
@@ -69,8 +69,11 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
       const standardized = r.standardized as StandardizedCellReview;
       if (standardized.method !== "cell-frequency-v1"
         || !standardized.frame || standardized.frame.widthCm !== 10 || standardized.frame.heightCm !== 50
-        || !Array.isArray(standardized.decisions) && typeof standardized.decisions !== "object"
-        || !Number.isSafeInteger(standardized.maskWidth) || !Number.isSafeInteger(standardized.maskHeight)) return null;
+        || standardized.frameConfirmed !== true
+        || !isVerifiedCalibration(standardized.calibration)
+        || !Number.isSafeInteger(standardized.maskWidth) || !Number.isSafeInteger(standardized.maskHeight)
+        || !standardized.masksByMorph || typeof standardized.masksByMorph !== "object"
+        || !standardized.decisions || typeof standardized.decisions !== "object") return null;
     }
     return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt, standardized: r.standardized };
   } catch { return null; }

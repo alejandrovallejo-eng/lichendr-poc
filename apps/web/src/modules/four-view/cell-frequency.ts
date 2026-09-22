@@ -18,6 +18,7 @@ export interface VerifiedCalibration {
 export interface StandardizedCellReview {
   method: typeof CELL_FREQUENCY_METHOD;
   frame: { x: number; y: number; width: number; height: number; widthCm: 10; heightCm: 50 };
+  frameConfirmed: boolean;
   calibration: VerifiedCalibration;
   maskWidth: number;
   maskHeight: number;
@@ -28,11 +29,15 @@ export interface StandardizedCellReview {
 
 export function isVerifiedCalibration(value: unknown): value is VerifiedCalibration {
   const calibration = value as Partial<VerifiedCalibration> | null;
+  const pixelsPerCm = calibration?.pixelsPerCm;
+  const width = calibration?.width;
+  const height = calibration?.height;
+  const method = calibration?.method;
   return Boolean(calibration
-    && Number.isFinite(calibration.pixelsPerCm) && calibration.pixelsPerCm > 0
-    && Number.isSafeInteger(calibration.width) && calibration.width > 0
-    && Number.isSafeInteger(calibration.height) && calibration.height > 0
-    && ["automatic", "manual_confirmed", "legacy_four_view"].includes(calibration.method));
+    && typeof pixelsPerCm === "number" && Number.isFinite(pixelsPerCm) && pixelsPerCm > 0
+    && typeof width === "number" && Number.isSafeInteger(width) && width > 0
+    && typeof height === "number" && Number.isSafeInteger(height) && height > 0
+    && typeof method === "string" && ["automatic", "manual_confirmed", "legacy_four_view"].includes(method));
 }
 
 export function verticalFrameCells(frame: StandardizedCellReview["frame"], width: number, height: number) {

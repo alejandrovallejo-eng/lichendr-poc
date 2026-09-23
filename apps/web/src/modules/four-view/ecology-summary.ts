@@ -1,7 +1,7 @@
 import type { EcologyData } from "./ecology-client";
 import { morphDisplayName, observedMorphs, sameEcologySource, type EcologyRow } from "./ecology";
 import { DIRECTIONS, type Direction } from "./types";
-import { confirmedFrequency, confirmedFrequencyByMorph, isVerifiedCalibration } from "./cell-frequency";
+import { confirmedFrequency, confirmedFrequencyByMorph } from "./cell-frequency";
 
 export function currentQuadrat(data: EcologyData, sampleId: string, direction: Direction): {
   state: "saved" | "pending" | "changed" | "unavailable"; row?: EcologyRow;
@@ -14,9 +14,7 @@ export function currentQuadrat(data: EcologyData, sampleId: string, direction: D
   if (!source?.analysis || !source.savedAt || matches.length > 1) return { state: "unavailable" };
   const saved = matches[0];
   if (!saved) return { state: "pending" };
-  const width = isVerifiedCalibration(source.calibration) ? source.calibration.width : source.analysis.width;
-  const height = isVerifiedCalibration(source.calibration) ? source.calibration.height : source.analysis.height;
-  return sameEcologySource(saved.review, source.outline, width, height, source)
+  return sameEcologySource(saved.review, source.outline, source.analysis.width, source.analysis.height, source)
     ? { state: "saved", row: saved } : { state: "changed", row: saved };
 }
 
@@ -45,7 +43,8 @@ export function buildEcologySummary(data: EcologyData, eventId: string) {
     const completeFrequencies = views.length === DIRECTIONS.length
       && views.every(view => view.state === "saved")
       && frequencies.every(Boolean);
-    return { tree, views, savedCount: saved.length, morphIds, frequencies,
+    const viewFrequencyByMorph = views.map((view, index) => ({ ...view, frequencyByMorph: frequencyByMorph[index] }));
+    return { tree, views: viewFrequencyByMorph, savedCount: saved.length, morphIds, frequencies,
       frequencyCells: completeFrequencies ? frequencies.reduce((sum, value) => sum + (value?.occupiedCells ?? 0), 0) : null,
       frequencyByMorph: Object.fromEntries([...new Set(views.flatMap((view,index) =>
         Object.keys(frequencyByMorph[index] ?? {})))].map(id => {

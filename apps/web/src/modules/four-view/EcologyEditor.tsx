@@ -10,7 +10,7 @@ import { emptyEcologyConfig, morphDisplayName, parseEcologyReview, quadratFromPo
 import { DIRECTION_LABELS, type Direction } from "./types";
 import { reviewFingerprint } from "./guided-cloud";
 import MorphNameEditor from "./MorphNameEditor";
-import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, frameCellPolygons, isVerifiedCalibration, proposeCellDecisions, type CellDecision, type CellDecisions, type FrameQuad, type StandardizedCellReview } from "./cell-frequency";
+import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, frameCellPolygons, isVerifiedCalibration, projectSourcePointToRectified, proposeCellDecisions, type CellDecision, type CellDecisions, type FrameQuad, type StandardizedCellReview } from "./cell-frequency";
 
 function CellReviewMatrix({ catalog, config, decisions, proposed, onChange }: {
   catalog: Morphospecies[]; config: ColorConfig; decisions: CellDecisions;
@@ -84,7 +84,11 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const [cursor,setCursor]=useState<TrunkPoint>({x:.5,y:.5}),[keyboard,setKeyboard]=useState(false);
   const photo=useRef<SVGSVGElement>(null),createId=useRef<string|null>(null),alive=useRef(true),savingRef=useRef(false);
   const lastAttempt=useRef<{fingerprint:string;savedAt:string}|null>(null);
-  const outline=useMemo(()=>quadrat&&pixels?quadratOutline(quadrat,pixels.width,pixels.height):[],[quadrat,pixels]);
+  const displayOutline=useMemo(() => {
+    if (!isVerifiedCalibration(source.calibration)) return source.outline;
+    return source.outline.map(point => projectSourcePointToRectified(source.calibration!.sourceCorners, point)).filter((point): point is TrunkPoint => Boolean(point));
+  }, [source.outline, source.calibration]);
+  const outline=useMemo(()=>quadrat&&pixels?quadratOutline(quadrat,pixels.width,pixels.height):displayOutline,[quadrat,pixels,displayOutline]);
   const edit=(next:ColorConfig)=>{setConfig(next);setDirty(true);setZero(false);};
   const picker=useGuidedColorPicker(pixels,outline,config,!!quadrat&&!saving,edit);
   const selectedId=picker.groups.find(g=>g.label===picker.label)?.id;
@@ -94,9 +98,9 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const acceptedMasks = useMemo(() => picker.accepted&&pixels ? encodeAcceptedMasks(picker.accepted.labels,pixels.width,pixels.height,
     config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label}))) : {},[picker.accepted,pixels,config]);
   const activeMorphIds = useMemo(() => config.confirmed?.groups.filter(g=>g.id!=="unassigned").map(g=>g.id) ?? [],[config]);
-  const currentSourceFingerprint = useMemo(() => reviewFingerprint({imageId, outline:source.outline,
+  const currentSourceFingerprint = useMemo(() => reviewFingerprint({imageId, outline:displayOutline,
     width:pixels?.width ?? 0, height:pixels?.height ?? 0, calibration:source.calibration, frame,
-    masksByMorph:acceptedMasks}),[imageId,source.outline,source.calibration,frame,pixels?.width,pixels?.height,acceptedMasks]);
+    masksByMorph:acceptedMasks}),[imageId,displayOutline,source.calibration,frame,pixels?.width,pixels?.height,acceptedMasks]);
   const proposedCells = useMemo(() => {
     if (!standardized || !picker.accepted || !pixels || !frame) return {};
     return proposeCellDecisions({masksByMorph:acceptedMasks,maskWidth:pixels.width,maskHeight:pixels.height,frame,morphIds:activeMorphIds});
@@ -151,7 +155,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     }else if(step===0){
       if(!first){setFirst(point);return;}
       const q=quadratFromPoints(first,point,pixels.width,pixels.height);setFirst(null);
-      if(!validQuadrat(q,source.outline,pixels.width,pixels.height)){setError("El cuadrante debe quedar completamente dentro del tronco azul. Marca de nuevo dos esquinas opuestas.");return;}
+      if(!validQuadrat(q,displayOutline,pixels.width,pixels.height)){setError("El cuadrante debe quedar completamente dentro del tronco azul. Marca de nuevo dos esquinas opuestas.");return;}
       setQuadrat(q);setConfig(emptyEcologyConfig());setStandardized(false);setFrameConfirmed(false);setFrameCorners(null);setCellDecisions({});setDecisionFingerprint("");
       setDirty(true);setZero(false);
     }else if(step===1&&assigned)picker.pick(point);
@@ -171,7 +175,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
       || Object.values(effectiveCellDecisions).flatMap(v=>Object.values(v)).some(v=>v==="proposed"||v==="not_evaluated"))) {
       setError("Revisa cada celda y confirma presencia o no observada antes de guardar."); return;
     }
-    const draft={version:1,scale:"uncalibrated",sourceOutline:source.outline,quadrat,width:pixels.width,height:pixels.height,
+    const draft={version:1,scale:"uncalibrated",sourceOutline:displayOutline,quadrat,width:pixels.width,height:pixels.height,
       config,counts:Array.from(picker.accepted.counts),total:picker.accepted.total, ...(standardizedReview ? {standardized:standardizedReview} : {})};
     const fingerprint=reviewFingerprint(draft);
     if(lastAttempt.current?.fingerprint!==fingerprint)lastAttempt.current={fingerprint,savedAt:new Date().toISOString()};
@@ -182,7 +186,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     catch(e){if(alive.current)setError(detail(e));}finally{savingRef.current=false;if(alive.current)setSaving(false);}
   };
   const w=pixels?.width??source.analysis!.width,h=pixels?.height??source.analysis!.height;
-  const focus=step===0?source.outline:quadrat?quadratOutline(quadrat,w,h):source.outline;
+  const focus=step===0?displayOutline:quadrat?quadratOutline(quadrat,w,h):displayOutline;
   const x0=Math.max(0,Math.min(...focus.map(p=>p.x))*w-20),y0=Math.max(0,Math.min(...focus.map(p=>p.y))*h-20);
   const x1=Math.min(w,Math.max(...focus.map(p=>p.x))*w+20),y1=Math.min(h,Math.max(...focus.map(p=>p.y))*h+20);
   const pct=(n:number)=>`${(100*n/Math.max(1,picker.accepted?.total??1)).toFixed(1)} %`;
@@ -210,7 +214,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
           <image href={src} width={w} height={h}/>
           {!original&&step>0&&overlay?<image href={overlay} width={w} height={h} opacity={picker.pending ? 0.3 : 1}/>:null}
           {!original&&step===1&&proposal?<image href={proposal} width={w} height={h} aria-label="Zonas propuestas en fucsia"/>:null}
-          <polygon points={source.outline.map(p=>`${p.x*w},${p.y*h}`).join(" ")} fill="none" stroke="#00aeff" strokeWidth="2" vectorEffect="non-scaling-stroke"/>
+          <polygon points={displayOutline.map(p=>`${p.x*w},${p.y*h}`).join(" ")} fill="none" stroke="#00aeff" strokeWidth="2" vectorEffect="non-scaling-stroke"/>
           {quadrat?<rect {...quadrat} fill="none" stroke="#ffd900" strokeWidth="3" vectorEffect="non-scaling-stroke"/>:null}
           {frameCorners ? frameCellPolygons(frameCorners).map((polygon,index)=><polygon key={`frame-cell-${index}`} points={polygon.map(p=>`${p.x*w},${p.y*h}`).join(" ")} fill={index%2?"#2b8a6e18":"#ffd90018"} stroke="#00674d" strokeWidth="2" vectorEffect="non-scaling-stroke"/>) : null}
           {pendingFrameCorners.map((point,index)=><circle key={`frame-point-${index}`} cx={point.x*w} cy={point.y*h} r="5" fill="#00674d" stroke="white"/>)}

@@ -55,7 +55,9 @@ export function validQuadrat(q: Quadrat, outline: TrunkPoint[], width: number, h
 export function parseEcologyReview(value: unknown): EcologyReview | null {
   try {
     const r = value as EcologyReview;
-    if (!r || JSON.stringify(r).length > 200000 || r.version !== 1 || r.scale !== "uncalibrated" || !Array.isArray(r.sourceOutline) || !r.quadrat
+    const serialized = JSON.stringify(r);
+    const byteLength = typeof TextEncoder === "function" ? new TextEncoder().encode(serialized).byteLength : unescape(encodeURIComponent(serialized)).length;
+    if (!r || byteLength > 200000 || r.version !== 1 || r.scale !== "uncalibrated" || !Array.isArray(r.sourceOutline) || !r.quadrat
       || !validQuadrat(r.quadrat, r.sourceOutline, r.width, r.height)) return null;
     const config = parseColorConfig(JSON.stringify(r.config));
     if (!config || config.version !== 2 || config.confirmed?.legacyCount !== 0 || config.samples.some(s => s.label === 2)) return null;
@@ -119,14 +121,17 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
 export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number, source?: { imageId?: string; calibration?: unknown }) {
   if (review.width !== width || review.height !== height || reviewFingerprint(review.sourceOutline) !== reviewFingerprint(outline)) return false;
   if (!review.standardized || !source?.calibration) return !review.standardized;
-  return isVerifiedCalibration(source.calibration)
-    && review.standardized.calibration.imageId === source.calibration.imageId
-    && review.standardized.calibration.transformationId === source.calibration.transformationId
-    && review.standardized.calibration.method === source.calibration.method
-    && review.standardized.calibration.pixelsPerCm === source.calibration.pixelsPerCm
-    && review.standardized.calibration.width === source.calibration.width
-    && review.standardized.calibration.height === source.calibration.height
-    && review.standardized.sourceFingerprint.includes(source.calibration.transformationId);
+  const calibration = source.calibration;
+  if (!isVerifiedCalibration(calibration)) return false;
+  return review.standardized.calibration.imageId === calibration.imageId
+    && review.standardized.calibration.transformationId === calibration.transformationId
+    && review.standardized.calibration.method === calibration.method
+    && review.standardized.calibration.pixelsPerCm === calibration.pixelsPerCm
+    && review.standardized.calibration.width === calibration.width
+    && review.standardized.calibration.height === calibration.height
+    && review.standardized.calibration.sourceCorners.every((point, index) =>
+      point.x === calibration.sourceCorners[index].x && point.y === calibration.sourceCorners[index].y)
+    && review.standardized.sourceFingerprint.includes(calibration.transformationId);
 }
 export function observedMorphs(review: EcologyReview): string[] {
   return review.config.confirmed!.groups.filter(g => g.id !== "unassigned" && review.counts[g.label] > 0).map(g => g.id);

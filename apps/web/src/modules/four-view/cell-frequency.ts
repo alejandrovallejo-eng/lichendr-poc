@@ -53,32 +53,65 @@ export function isVerifiedCalibration(value: unknown): value is VerifiedCalibrat
     && typeof method === "string" && ["automatic", "manual_confirmed", "legacy_four_view"].includes(method));
 }
 
-function bilinear(frame: FrameQuad, u: number, v: number): FramePoint {
-  const [tl, tr, br, bl] = frame;
-  return {
-    x: (1-u)*(1-v)*tl.x + u*(1-v)*tr.x + u*v*br.x + (1-u)*v*bl.x,
-    y: (1-u)*(1-v)*tl.y + u*(1-v)*tr.y + u*v*br.y + (1-u)*v*bl.y,
-  };
+function homography(frame: FrameQuad): [number, number, number, number, number, number, number, number] | null {
+  const matrix: number[][] = [], values: number[] = [];
+  frame.forEach((point, index) => {
+    const u = index === 0 || index === 3 ? 0 : 1, v = index < 2 ? 0 : 1;
+    matrix.push([u, v, 1, 0, 0, 0, -u * point.x, -v * point.x]); values.push(point.x);
+    matrix.push([0, 0, 0, u, v, 1, -u * point.y, -v * point.y]); values.push(point.y);
+  });
+  for (let column = 0; column < 8; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < 8; row += 1)
+      if (Math.abs(matrix[row][column]) > Math.abs(matrix[pivot][column])) pivot = row;
+    if (Math.abs(matrix[pivot][column]) < 1e-10) return null;
+    [matrix[column], matrix[pivot]] = [matrix[pivot], matrix[column]];
+    [values[column], values[pivot]] = [values[pivot], values[column]];
+    const divisor = matrix[column][column];
+    for (let j = column; j < 8; j += 1) matrix[column][j] /= divisor;
+    values[column] /= divisor;
+    for (let row = 0; row < 8; row += 1) if (row !== column) {
+      const factor = matrix[row][column];
+      for (let j = column; j < 8; j += 1) matrix[row][j] -= factor * matrix[column][j];
+      values[row] -= factor * values[column];
+    }
+  }
+  return values as [number, number, number, number, number, number, number, number];
+}
+
+function project(transform: ReturnType<typeof homography>, u: number, v: number): FramePoint {
+  if (!transform) return { x: NaN, y: NaN };
+  const [a, b, c, d, e, f, g, h] = transform, denominator = g * u + h * v + 1;
+  return { x: (a * u + b * v + c) / denominator, y: (d * u + e * v + f) / denominator };
 }
 
 function inverseBilinear(frame: FrameQuad, point: FramePoint): { u: number; v: number } | null {
+  const transform = homography(frame);
+  if (!transform) return null;
   let u = .5, v = .5;
   for (let i = 0; i < 12; i += 1) {
-    const p = bilinear(frame, u, v), eX = p.x - point.x, eY = p.y - point.y;
-    const du = { x: (bilinear(frame, u + .001, v).x - p.x) / .001, y: (bilinear(frame, u + .001, v).y - p.y) / .001 };
-    const dv = { x: (bilinear(frame, u, v + .001).x - p.x) / .001, y: (bilinear(frame, u, v + .001).y - p.y) / .001 };
+    const p = project(transform, u, v), eX = p.x - point.x, eY = p.y - point.y;
+    const du = { x: (project(transform, u + .001, v).x - p.x) / .001, y: (project(transform, u + .001, v).y - p.y) / .001 };
+    const dv = { x: (project(transform, u, v + .001).x - p.x) / .001, y: (project(transform, u, v + .001).y - p.y) / .001 };
     const det = du.x * dv.y - du.y * dv.x;
     if (Math.abs(det) < 1e-8) return null;
     u -= (eX * dv.y - eY * dv.x) / det;
     v -= (du.x * eY - du.y * eX) / det;
   }
+
   return u >= -1e-6 && u <= 1 + 1e-6 && v >= -1e-6 && v <= 1 + 1e-6 ? { u, v } : null;
 }
 
+export function projectSourcePointToRectified(frame: FrameQuad, point: FramePoint): FramePoint | null {
+  const projected = inverseBilinear(frame, point);
+  return projected ? { x: projected.u, y: projected.v } : null;
+}
+
 export function frameCellPolygons(frame: FrameQuad) {
+  const transform = homography(frame);
   return Array.from({ length: FRAME_CELL_COUNT }, (_, index) => {
     const top = index / FRAME_CELL_COUNT, bottom = (index + 1) / FRAME_CELL_COUNT;
-    return [bilinear(frame, 0, top), bilinear(frame, 1, top), bilinear(frame, 1, bottom), bilinear(frame, 0, bottom)];
+    return [project(transform, 0, top), project(transform, 1, top), project(transform, 1, bottom), project(transform, 0, bottom)];
   });
 }
 

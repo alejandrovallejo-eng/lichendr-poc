@@ -71,7 +71,7 @@ export default function EcologySummary({ data, eventId, onReview, includeCapture
               <li>Sin clasificar: {(100 * v.row!.review.counts[1] / v.row!.review.total).toFixed(1)} %</li></ul>
             {!v.row!.review.config.confirmed!.groups.some(g => g.id !== "unassigned" && v.row!.review.counts[g.label] > 0) ? <p>Revisado sin morfoespecies marcadas.</p> : null}
             {v.row!.review.standardized ? <ul className="mt-2 font-semibold" aria-label="Frecuencia por morfoespecie">{v.row!.review.config.confirmed!.groups.filter(g => g.id !== "unassigned").map(g => {
-              const result=summary.trees.find(t => t.tree.sampleId === tree.sampleId)?.frequencyByMorph[g.id];
+              const result=v.frequencyByMorph?.[g.id];
               return <li key={g.id}>{morphDisplayName(data.catalog.find(m => m.id === g.id)!)}: {result ? `${result.occupiedCells} / 5 celdas` : "Pendiente"}</li>;
             })}</ul> : null}
           </details> : null}

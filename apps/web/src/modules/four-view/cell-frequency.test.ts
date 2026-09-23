@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encodeMaskRle } from "../region-suggestions/mask-codec";
-import { confirmedFrequency, confirmedFrequencyByMorph, occupiedCellsFromMask, proposeCellDecisions, verticalFrameCells, type CellDecision } from "./cell-frequency";
+import { confirmedFrequency, confirmedFrequencyByMorph, frameCellPolygons, occupiedCellsFromMask, proposeCellDecisions, verticalFrameCells, type CellDecision } from "./cell-frequency";
 
 const frame = { corners: [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}] as [{x:number;y:number},{x:number;y:number},{x:number;y:number},{x:number;y:number}], widthCm: 10 as const, heightCm: 50 as const };
 
@@ -17,6 +17,17 @@ test("perspective frame keeps pixels outside the quad out of every cell", () => 
   const mask = new Uint8Array(10 * 10);
   mask[0] = 1;
   assert.deepEqual(occupiedCellsFromMask(mask, 10, 10, perspective), []);
+});
+
+test("perspective subdivisions keep an interior point in its physical cell", () => {
+  const perspective = { ...frame, corners: [{x:.15,y:.05},{x:.85,y:.1},{x:.95,y:.95},{x:.05,y:.8}] as typeof frame.corners };
+  const polygons = frameCellPolygons(perspective.corners);
+  const mask = new Uint8Array(100 * 100);
+  const edge = polygons[2][0], next = polygons[2][2];
+  const x = Math.round((edge.x * .25 + next.x * .75) * 100 - .5);
+  const y = Math.round((edge.y * .25 + next.y * .75) * 100 - .5);
+  mask[y * 100 + x] = 1;
+  assert.deepEqual(occupiedCellsFromMask(mask, 100, 100, perspective), [2]);
 });
 
 test("cell proposals use mask pixels, including a mask crossing cells", () => {

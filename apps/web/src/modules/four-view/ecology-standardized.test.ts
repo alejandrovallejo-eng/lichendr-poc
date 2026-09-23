@@ -40,9 +40,14 @@ test("standardized review survives a JSON round trip and rejects incomplete matr
     imageId: source.imageId,
     calibration: { ...source, transformationId: "rectified:changed" },
   }), false);
+  assert.equal(sameEcologySource(parsed!, outline, 10, 10, {
+    imageId: source.imageId,
+    calibration: { ...source, sourceCorners: [{ x: .01, y: 0 }, ...source.sourceCorners.slice(1)] },
+  }), false);
   assert.equal(parseEcologyReview({
     ...raw,
     standardized: { ...raw.standardized, decisions: { [morphA.id]: { "0": "observed" }, [morphB.id]: allAbsent() } },
   }), null);
   assert.equal(parseEcologyReview({ ...raw, padding: "x".repeat(200_001) }), null);
+  assert.equal(parseEcologyReview({ ...raw, padding: "😀".repeat(50_001) }), null);
 });

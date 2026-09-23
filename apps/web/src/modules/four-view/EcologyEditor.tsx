@@ -65,7 +65,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
 }) {
   const currentWidth=source.calibration?.width ?? source.analysis?.width ?? 0;
   const currentHeight=source.calibration?.height ?? source.analysis?.height ?? 0;
-  const usable=existing&&source.analysis&&sameEcologySource(existing.review,source.outline,currentWidth,currentHeight,source)?existing.review:null;
+  const usable=existing&&source.analysis&&sameEcologySource(existing.review,source.outline,currentWidth,currentHeight,{...source,imageId})?existing.review:null;
   const [quadrat,setQuadrat]=useState<Quadrat|null>(usable?.quadrat??null);
   const [config,setConfig]=useState<ColorConfig>(usable?.config??emptyEcologyConfig);
   const [step,setStep]=useState(usable?1:0),[first,setFirst]=useState<TrunkPoint|null>(null);
@@ -73,7 +73,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const [error,setError]=useState(""),[dirty,setDirty]=useState(false),[saving,setSaving]=useState(false),[creating,setCreating]=useState(false);
   const [open,setOpen]=useState(true),[original,setOriginal]=useState(false),[zero,setZero]=useState(!!usable&&!usable.config.samples.length);
   const [overlay,setOverlay]=useState(""),[proposal,setProposal]=useState("");
-  const calibrated = isVerifiedCalibration(source.calibration);
+  const canRegisterFrame = Boolean(source.analysis);
   const [standardized,setStandardized]=useState(Boolean(usable?.standardized));
   const [frameConfirmed,setFrameConfirmed]=useState(Boolean(usable?.standardized?.frameConfirmed));
   const [cellDecisions,setCellDecisions]=useState<CellDecisions>(usable?.standardized?.decisions ?? {});
@@ -95,12 +95,21 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const groupNames=Object.fromEntries(catalog.map(m=>[m.id,morphDisplayName(m)]));
   const assigned=selectedId!=="unassigned";
   const frame = useMemo(() => frameCorners ? ({corners:frameCorners,widthCm:10 as const,heightCm:50 as const}) : null,[frameCorners]);
+  const frameCalibration = useMemo(() => {
+    if (!frame || !pixels) return source.calibration;
+    if (source.calibration) return source.calibration;
+    const edge = (a: TrunkPoint, b: TrunkPoint) => Math.hypot((a.x - b.x) * pixels.width, (a.y - b.y) * pixels.height);
+    const scale = (edge(frame.corners[0], frame.corners[1]) + edge(frame.corners[3], frame.corners[2])) / 20;
+    return { pixelsPerCm: scale, method: "manual_confirmed" as const, width: pixels.width, height: pixels.height,
+      imageId, proxyPath: `analysis-proxy:${imageId}`, transformationId: `manual-frame:${imageId}`,
+      sourceCorners: frame.corners };
+  }, [frame, pixels, source.calibration, imageId]);
   const acceptedMasks = useMemo(() => picker.accepted&&pixels ? encodeAcceptedMasks(picker.accepted.labels,pixels.width,pixels.height,
     config.confirmed!.groups.filter(g=>g.id!=="unassigned").map(g=>({id:g.id,label:g.label}))) : {},[picker.accepted,pixels,config]);
   const activeMorphIds = useMemo(() => config.confirmed?.groups.filter(g=>g.id!=="unassigned").map(g=>g.id) ?? [],[config]);
   const currentSourceFingerprint = useMemo(() => reviewFingerprint({imageId, outline:displayOutline,
-    width:pixels?.width ?? 0, height:pixels?.height ?? 0, calibration:source.calibration, frame,
-    masksByMorph:acceptedMasks}),[imageId,displayOutline,source.calibration,frame,pixels?.width,pixels?.height,acceptedMasks]);
+    width:pixels?.width ?? 0, height:pixels?.height ?? 0, calibration:frameCalibration, frame,
+    masksByMorph:acceptedMasks}),[imageId,displayOutline,frameCalibration,frame,pixels?.width,pixels?.height,acceptedMasks]);
   const proposedCells = useMemo(() => {
     if (!standardized || !picker.accepted || !pixels || !frame) return {};
     return proposeCellDecisions({masksByMorph:acceptedMasks,maskWidth:pixels.width,maskHeight:pixels.height,frame,morphIds:activeMorphIds});
@@ -163,9 +172,9 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const close=()=>{if(saving||creating)return;if((dirty||picker.pending)&&!window.confirm("¿Salir sin guardar los cambios de este cuadrante? El análisis anterior se conserva."))return;onClose();};
   const save=async()=>{
     if(savingRef.current||!pixels||!quadrat||!picker.accepted||picker.pending||(!config.samples.length&&!zero))return;
-    const standardizedReview: StandardizedCellReview | undefined = standardized && calibrated && source.calibration && frame
+    const standardizedReview: StandardizedCellReview | undefined = standardized && frameCalibration && frame
       ? { method: CELL_FREQUENCY_METHOD, frame, frameConfirmed,
-        calibration: source.calibration, maskWidth: pixels.width, maskHeight: pixels.height,
+        calibration: frameCalibration, maskWidth: pixels.width, maskHeight: pixels.height,
         masksByMorph: acceptedMasks, decisions: effectiveCellDecisions, reviewedAt: new Date().toISOString(),
         sourceFingerprint: currentSourceFingerprint } : undefined;
     if (standardized && (!standardizedReview || !frameConfirmed)) { setError("Registra las cuatro esquinas y confirma la referencia física de 10 × 50 cm."); return; }
@@ -229,11 +238,11 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
       {step===0?<><h2 style={{margin:0}}>Elige tu cuadrante</h2><p>{first?"Ahora marca la esquina opuesta.":"Haz clic en dos esquinas opuestas, dentro del tronco azul."}</p>
         <p className="eco-small">Amarillo = área que se medirá. El contorno del tronco y el análisis general no se modifican.</p>
         <p className="eco-small">Sin escala física: mediremos porcentaje de esta área, no cm² ni calidad del aire.</p>
-        {calibrated?<><label className="eco-small"><input type="checkbox" checked={standardized} onChange={e=>{setStandardized(e.target.checked);setDirty(true);}}/> Usar marco físico calibrado de 10 × 50 cm (cinco celdas verticales)</label>
+        {canRegisterFrame?<><label className="eco-small"><input type="checkbox" checked={standardized} onChange={e=>{setStandardized(e.target.checked);setDirty(true);}}/> Usar marco físico conocido de 10 × 50 cm (cinco celdas verticales)</label>
           {standardized?<><button type="button" onClick={()=>{setRegisteringFrame(true);setPendingFrameCorners([]);setFrameConfirmed(false);setDirty(true);}}>Registrar cuatro esquinas del marco</button>
             <p className="eco-small">{frameCorners ? "Marco registrado: las celdas se dibujan sobre sus esquinas." : "Haz clic en orden: superior izquierda, superior derecha, inferior derecha, inferior izquierda."}</p>
             <label className="eco-small"><input type="checkbox" checked={frameConfirmed} disabled={!frameCorners} onChange={e=>{setFrameConfirmed(e.target.checked);setDirty(true);}}/> Confirmo la posición del marco físico visible en esta vista.</label></>:null}</>
-          :<p className="eco-small">No hay referencia física verificable en esta vista; solo está disponible el análisis exploratorio.</p>}
+          :<p className="eco-small">Se necesita una referencia física visible y conocida para usar el marco; mientras tanto solo está disponible el análisis exploratorio.</p>}
         {first?<button onClick={()=>setFirst(null)}>Cancelar esquina</button>:null}
         {quadrat?<button onClick={()=>{setQuadrat(null);setFirst(null);setConfig(emptyEcologyConfig());setFrameCorners(null);setStandardized(false);setDirty(true);setZero(false);}}>Elegir otro cuadrante</button>:null}
       </>:step===1?<>

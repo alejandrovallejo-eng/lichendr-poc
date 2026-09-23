@@ -17,11 +17,11 @@ function review() {
     frameConfirmed: true,
     calibration: {
       pixelsPerCm: 1, method: "manual_confirmed", width: 10, height: 50, imageId: "image",
-      proxyPath: "analysis-proxy:image", transformationId: "rectified:image", sourceCorners: outline,
+      proxyPath: "analysis-proxy:image", transformationId: "manual-frame:image", sourceCorners: outline,
     },
     maskWidth: 10, maskHeight: 50, masksByMorph: { [morphA.id]: mask, [morphB.id]: mask },
     decisions: { [morphA.id]: allAbsent(), [morphB.id]: allAbsent() },
-    reviewedAt: "2026-09-22T00:00:00Z", sourceFingerprint: "rectified:image",
+    reviewedAt: "2026-09-22T00:00:00Z", sourceFingerprint: "manual-frame:image",
   };
   return {
     version: 1, scale: "uncalibrated", sourceOutline: outline, quadrat: { x: 0, y: 0, width: 10, height: 10 },
@@ -36,6 +36,7 @@ test("standardized review survives a JSON round trip and rejects incomplete matr
   assert.ok(parsed);
   const source = parsed!.standardized!.calibration;
   assert.equal(sameEcologySource(parsed!, outline, 10, 10, { imageId: source.imageId, calibration: source }), true);
+  assert.equal(sameEcologySource(parsed!, outline, 10, 10, { imageId: source.imageId }), true);
   assert.equal(sameEcologySource(parsed!, outline, 10, 10, {
     imageId: source.imageId,
     calibration: { ...source, transformationId: "rectified:changed" },

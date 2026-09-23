@@ -14,7 +14,7 @@ export function currentQuadrat(data: EcologyData, sampleId: string, direction: D
   if (!source?.analysis || !source.savedAt || matches.length > 1) return { state: "unavailable" };
   const saved = matches[0];
   if (!saved) return { state: "pending" };
-  return sameEcologySource(saved.review, source.outline, source.analysis.width, source.analysis.height, source)
+  return sameEcologySource(saved.review, source.outline, source.analysis.width, source.analysis.height, { ...source, imageId: view.imageId })
     ? { state: "saved", row: saved } : { state: "changed", row: saved };
 }
 

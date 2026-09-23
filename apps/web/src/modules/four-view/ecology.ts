@@ -120,7 +120,12 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
 }
 export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number, source?: { imageId?: string; calibration?: unknown }) {
   if (review.width !== width || review.height !== height || reviewFingerprint(review.sourceOutline) !== reviewFingerprint(outline)) return false;
-  if (!review.standardized || !source?.calibration) return !review.standardized;
+  if (!review.standardized) return true;
+  if (!source?.calibration) {
+    return Boolean(source?.imageId
+      && review.standardized.calibration.imageId === source.imageId
+      && review.standardized.calibration.transformationId === `manual-frame:${source.imageId}`);
+  }
   const calibration = source.calibration;
   if (!isVerifiedCalibration(calibration)) return false;
   return review.standardized.calibration.imageId === calibration.imageId

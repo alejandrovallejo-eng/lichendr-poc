@@ -12,7 +12,7 @@ import {
 import { calculateWeightedCoverage } from "@/modules/analysis/metrics";
 import type { AnnotationQualityFlag } from "@/modules/annotations/studio-mask-utils";
 
-const SCIENTIFIC_NOTICE = "Los resultados son descriptivos y provisionales. No constituyen por sí solos una clasificación de calidad ambiental.";
+const SCIENTIFIC_NOTICE = "Indicador biológico relativo: LichenDR compara cobertura, frecuencia y diversidad entre zonas. No convierte cobertura en NO2, NH3, SO2, AQI ni demuestra causalidad sin mediciones externas.";
 
 const QUALITY_LABELS: Record<AnnotationQualityFlag, string> = {
   missing_trunk: "Tronco ausente",

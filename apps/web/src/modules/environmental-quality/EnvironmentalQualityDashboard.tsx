@@ -30,7 +30,7 @@ import {
   type ReadinessStatus,
 } from "./science";
 
-const SCIENTIFIC_NOTICE = "Los resultados actuales son descriptivos y todavía no constituyen una clasificación validada de calidad ambiental.";
+const SCIENTIFIC_NOTICE = "Indicador biológico relativo: LichenDR compara la condición biológica entre zonas. La cobertura liquénica no se convierte en concentraciones de contaminantes ni en AQI.";
 const EMPTY_DATASET: EnvironmentalDataset = {
   projects: [],
   sites: [],
@@ -331,6 +331,9 @@ export default function EnvironmentalQualityDashboard() {
     pollutantMeasurements: pollutants.length,
     representedTrees: new Set(samples.map((sample) => sample.tree_id)).size,
   }), [completed, pollutants.length, sampleContextById, samples, siteContextByEventId, sites, treeById]);
+  const candidateReferenceSites = useMemo(() => new Set(samples.flatMap((sample) => (
+    siteContextByEventId.get(sample.sampling_event_id)?.is_reference_candidate === true ? [sample.site_id] : []
+  ))).size, [samples, siteContextByEventId]);
 
   const missingMetadata = readiness.filter((item) => item.status !== "Completo" && item.status !== "No aplica");
   const effectiveSampleId = samples.some((sample) => sample.id === selectedSampleId) ? selectedSampleId : samples[0]?.id ?? "";
@@ -476,7 +479,7 @@ export default function EnvironmentalQualityDashboard() {
   return (
     <main className="space-y-6">
       <header>
-        <h1 className="text-2xl font-semibold">Calidad ambiental</h1>
+        <h1 className="text-2xl font-semibold">Indicador biológico relativo</h1>
         <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Preparación científica y base de calibración · Fase 1</p>
         <p className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-950">{SCIENTIFIC_NOTICE}</p>
       </header>
@@ -496,6 +499,16 @@ export default function EnvironmentalQualityDashboard() {
               {sites.map((site) => <option key={site.id} value={site.id}>{site.name}</option>)}
             </select>
           </label>
+        </div>
+      </section>
+
+      <section className="rounded-lg border p-4" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
+        <h2 className="font-semibold">Estado del piloto LichenDR</h2>
+        <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Meta piloto: 10 árboles completos para el alcance seleccionado. Es una regla operativa de LichenDR, no un mínimo universal de EN 16413.</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <Metric label="Árboles completos" value={`${new Set(completed.map((item) => item.treeId)).size}/10`} />
+          <Metric label="Árboles que faltan" value={String(Math.max(0, 10 - new Set(completed.map((item) => item.treeId)).size))} />
+          <Metric label="Sitios candidatos a referencia" value={String(candidateReferenceSites)} />
         </div>
       </section>
 
@@ -562,14 +575,15 @@ export default function EnvironmentalQualityDashboard() {
 
       <section className="space-y-4">
         <div>
-          <h2 className="text-xl font-semibold">C. Interpretación permitida</h2>
-          <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>Razones explícitas para no producir una clasificación ambiental.</p>
+          <h2 className="text-xl font-semibold">C. Interpretación del indicador biológico relativo</h2>
+          <p className="text-sm" style={{ color: "var(--ld-text-secondary)" }}>La lectura es comparativa y descriptiva; no es una clasificación definitiva.</p>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
           <article className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
             <h3 className="font-semibold text-emerald-950">Qué sí puede concluirse</h3>
             <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-emerald-950">
-              <li>Comparación descriptiva de cobertura y morfotipos visuales.</li>
+              <li>Comparación de cobertura, frecuencia y diversidad.</li>
+              <li>Diferencias relativas frente a sitios candidatos a referencia.</li>
               <li>Diferencias relativas observadas entre árboles o sitios representados.</li>
               <li>Evaluación de completitud y alertas de calidad de los datos.</li>
             </ul>
@@ -577,14 +591,14 @@ export default function EnvironmentalQualityDashboard() {
           <article className="rounded-lg border border-red-200 bg-red-50 p-4">
             <h3 className="font-semibold text-red-900">Qué no puede concluirse</h3>
             <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-red-900">
-              <li>Categoría validada de contaminación o calidad ambiental.</li>
-              <li>Atribución causal a un contaminante específico.</li>
+              <li>Concentraciones de NO2, NH3 o SO2 a partir de cobertura liquénica.</li>
+              <li>AQI, categorías de aire o atribución causal sin mediciones externas.</li>
               <li>Sensibilidad de especies; los morfotipos visuales no son especies.</li>
               <li>Categoría universal de calidad ambiental ni umbrales universales.</li>
             </ul>
           </article>
         </div>
-        <p className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">No se produce una clasificación porque cobertura, color y morfotipos no controlan por sí solos rasgos del árbol hospedero, protocolo, microclima, sitios de referencia ni contaminantes instrumentales. {missingMetadata.length} criterios permanecen faltantes o parciales en el alcance seleccionado.</p>
+        <p className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">No se infieren contaminantes ni causalidad: cobertura, frecuencia y diversidad requieren comparaciones consistentes, contexto de muestreo y mediciones externas para interpretaciones adicionales. {missingMetadata.length} criterios permanecen faltantes o parciales en el alcance seleccionado.</p>
       </section>
 
       <section className="space-y-4">

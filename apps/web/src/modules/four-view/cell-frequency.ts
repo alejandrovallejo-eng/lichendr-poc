@@ -172,6 +172,17 @@ export function confirmedFrequencyByMorph(decisions: CellDecisions, morphIds: st
   }));
 }
 
+export function pendingCellDecision(decisions: CellDecisions, morphIds: string[]) {
+  for (const morphId of morphIds) {
+    const cells = decisions[morphId];
+    for (let index = 0; index < FRAME_CELL_COUNT; index += 1) {
+      const state = cells?.[String(index)];
+      if (state !== "observed" && state !== "not_observed") return { morphId, cell: index + 1, state: state ?? "missing" };
+    }
+  }
+  return null;
+}
+
 export function encodeAcceptedMasks(
   labels: Uint8Array,
   width: number,

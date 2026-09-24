@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encodeMaskRle } from "../region-suggestions/mask-codec";
-import { confirmedFrequency, confirmedFrequencyByMorph, frameCellPolygons, occupiedCellsFromMask, proposeCellDecisions, verticalFrameCells, type CellDecision } from "./cell-frequency";
+import { confirmedFrequency, confirmedFrequencyByMorph, frameCellPolygons, occupiedCellsFromMask, pendingCellDecision, proposeCellDecisions, verticalFrameCells, type CellDecision } from "./cell-frequency";
 
 const frame = { corners: [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}] as [{x:number;y:number},{x:number;y:number},{x:number;y:number},{x:number;y:number}], widthCm: 10 as const, heightCm: 50 as const };
 
@@ -64,6 +64,14 @@ test("frequency remains separate for each morphospecies across views", () => {
     [String(index), (index === occupied ? "observed" : "not_observed") as CellDecision]));
   assert.deepEqual(confirmedFrequencyByMorph({ A: complete(0), B: complete(1) }, ["A", "B"]), {
     A: { occupiedCells: 1, totalCells: 5 }, B: { occupiedCells: 1, totalCells: 5 },
+  });
+
+  test("all five terminal cells are required independently for every group", () => {
+    const complete = (state: CellDecision) => Object.fromEntries(Array.from({ length: 5 }, (_, index) => [String(index), state]));
+    assert.equal(pendingCellDecision({ A: complete("observed") }, ["A"]), null);
+    assert.deepEqual(pendingCellDecision({ A: { ...complete("observed"), "4": "proposed" } }, ["A"]), { morphId: "A", cell: 5, state: "proposed" });
+    assert.deepEqual(pendingCellDecision({ A: complete("observed") }, ["A", "B"]), { morphId: "B", cell: 1, state: "missing" });
+    assert.deepEqual(pendingCellDecision({ A: complete("observed"), B: complete("not_observed") }, ["A", "B"]), null);
   });
   assert.equal(confirmedFrequencyByMorph({ A: complete(0), B: { "0": "observed" } }, ["A", "B"]).B, null);
 });

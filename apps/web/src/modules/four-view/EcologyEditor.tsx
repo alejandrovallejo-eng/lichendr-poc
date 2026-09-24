@@ -10,7 +10,7 @@ import { emptyEcologyConfig, frameContinuationReady, morphDisplayName, parseEcol
 import { DIRECTION_LABELS, type Direction } from "./types";
 import { reviewFingerprint } from "./guided-cloud";
 import MorphNameEditor from "./MorphNameEditor";
-import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, frameCellPolygons, isVerifiedCalibration, projectSourcePointToRectified, proposeCellDecisions, type CellDecision, type CellDecisions, type FrameQuad, type StandardizedCellReview } from "./cell-frequency";
+import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, encodeAcceptedMasks, frameCellPolygons, isVerifiedCalibration, pendingCellDecision, projectSourcePointToRectified, proposeCellDecisions, type CellDecision, type CellDecisions, type FrameQuad, type StandardizedCellReview } from "./cell-frequency";
 
 function CellReviewMatrix({ catalog, config, decisions, proposed, onChange }: {
   catalog: Morphospecies[]; config: ColorConfig; decisions: CellDecisions;
@@ -181,11 +181,11 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         masksByMorph: acceptedMasks, decisions: effectiveCellDecisions, reviewedAt: new Date().toISOString(),
         sourceFingerprint: currentSourceFingerprint } : undefined;
     if (standardized && (!standardizedReview || !frameConfirmed)) { setError("Registra las cuatro esquinas y confirma la referencia física de 10 × 50 cm."); return; }
-    if (standardized && (Object.keys(effectiveCellDecisions).length !== activeMorphIds.length
-      || activeMorphIds.some(id => !effectiveCellDecisions[id]
-        || Object.keys(effectiveCellDecisions[id]).length !== FRAME_CELL_COUNT)
-      || Object.values(effectiveCellDecisions).flatMap(v=>Object.values(v)).some(v=>v==="proposed"||v==="not_evaluated"))) {
-      setError("Revisa cada celda y confirma presencia o no observada antes de guardar."); return;
+    const pending = standardized ? pendingCellDecision(effectiveCellDecisions, activeMorphIds) : null;
+    if (pending) {
+      const morph = catalog.find(item => item.id === pending.morphId);
+      setError(`Revisa ${morph ? morphDisplayName(morph) : "la morfoespecie"} · celda ${pending.cell}: confirma Presencia o No observada antes de guardar.`);
+      return;
     }
     const draft={version:1,scale:"uncalibrated",sourceOutline:displayOutline,quadrat,width:pixels.width,height:pixels.height,
       config,counts:Array.from(picker.accepted.counts),total:picker.accepted.total, ...(standardizedReview ? {standardized:standardizedReview} : {})};

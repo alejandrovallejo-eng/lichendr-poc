@@ -5,7 +5,7 @@ import { colorWorkingSize, OVERLAY_RGB, type ColorConfig } from "../region-sugge
 import type { TrunkPoint } from "../region-suggestions/trunk-outline";
 import type { GuidedReview } from "./guided-flow";
 import type { EcologyServices } from "./ecology-client";
-import { emptyEcologyConfig, morphDisplayName, parseEcologyReview, quadratFromPoints, quadratOutline, referenceTones, sameEcologySource, selectMorph, validQuadrat,
+import { emptyEcologyConfig, frameContinuationReady, morphDisplayName, parseEcologyReview, quadratFromFrame, quadratFromPoints, quadratOutline, referenceTones, sameEcologySource, selectMorph, validQuadrat,
   type EcologyRow, type Morphospecies, type Quadrat } from "./ecology";
 import { DIRECTION_LABELS, type Direction } from "./types";
 import { reviewFingerprint } from "./guided-cloud";
@@ -95,6 +95,8 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
   const groupNames=Object.fromEntries(catalog.map(m=>[m.id,morphDisplayName(m)]));
   const assigned=selectedId!=="unassigned";
   const frame = useMemo(() => frameCorners ? ({corners:frameCorners,widthCm:10 as const,heightCm:50 as const}) : null,[frameCorners]);
+  const frameQuadrat = useMemo(() => frame && pixels ? quadratFromFrame(frame, displayOutline, pixels.width, pixels.height) : null,
+    [frame, displayOutline, pixels]);
   const frameCalibration = useMemo(() => {
     if (!frame || !pixels) return source.calibration;
     if (source.calibration) return source.calibration;
@@ -159,7 +161,8 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     if(!pixels||saving||creating)return;setError("");
     if(registeringFrame){
       const next=[...pendingFrameCorners,point];
-      if(next.length===4){setFrameCorners(next as FrameQuad);setPendingFrameCorners([]);setRegisteringFrame(false);setFrameConfirmed(false);setCellDecisions({});setDecisionFingerprint("");setDirty(true);}
+      if(next.length===4){setFrameCorners(next as FrameQuad);setQuadrat(quadratFromFrame({corners:next},displayOutline,pixels.width,pixels.height));setPendingFrameCorners([]);setRegisteringFrame(false);setFrameConfirmed(false);setCellDecisions({});setDecisionFingerprint("");setDirty(true);
+        if(!quadratFromFrame({corners:next},displayOutline,pixels.width,pixels.height))setError("El marco no define un cuadrante válido dentro del tronco. Revisa las cuatro esquinas.");}
       else setPendingFrameCorners(next);
     }else if(step===0){
       if(!first){setFirst(point);return;}
@@ -241,7 +244,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
         {canRegisterFrame?<><label className="eco-small"><input type="checkbox" checked={standardized} onChange={e=>{setStandardized(e.target.checked);setDirty(true);}}/> Usar marco físico conocido de 10 × 50 cm (cinco celdas verticales)</label>
           {standardized?<><button type="button" onClick={()=>{setRegisteringFrame(true);setPendingFrameCorners([]);setFrameConfirmed(false);setDirty(true);}}>Registrar cuatro esquinas del marco</button>
             <p className="eco-small">{frameCorners ? "Marco registrado: las celdas se dibujan sobre sus esquinas." : "Haz clic en orden: superior izquierda, superior derecha, inferior derecha, inferior izquierda."}</p>
-            <label className="eco-small"><input type="checkbox" checked={frameConfirmed} disabled={!frameCorners} onChange={e=>{setFrameConfirmed(e.target.checked);setDirty(true);}}/> Confirmo la posición del marco físico visible en esta vista.</label></>:null}</>
+            <label className="eco-small"><input type="checkbox" checked={frameConfirmed} disabled={!frameCorners} onChange={e=>{if(e.target.checked&&!frameQuadrat){setError("El marco confirmado no contiene un cuadrante válido dentro del tronco.");return;}setFrameConfirmed(e.target.checked);setDirty(true);}}/> Confirmo la posición del marco físico visible en esta vista.</label></>:null}</>
           :<p className="eco-small">Se necesita una referencia física visible y conocida para usar el marco; mientras tanto solo está disponible el análisis exploratorio.</p>}
         {first?<button onClick={()=>setFirst(null)}>Cancelar esquina</button>:null}
         {quadrat?<button onClick={()=>{setQuadrat(null);setFirst(null);setConfig(emptyEcologyConfig());setFrameCorners(null);setStandardized(false);setDirty(true);setZero(false);}}>Elegir otro cuadrante</button>:null}
@@ -261,7 +264,7 @@ export default function EcologyEditor({ownerId,eventId,sampleId,imageId,directio
     </aside></main>
     <footer><span className="eco-caption">{dirty?"Cambios sin guardar":"El análisis general del árbol se conserva"}</span>
       <div style={{display:"flex",gap:8}}>{step>0?<button disabled={saving||creating||!!picker.pending} onClick={()=>{if(step===1&&config.samples.length&&!window.confirm("Cambiar de cuadrante borrará los tonos de este análisis al elegir otra área. ¿Continuar?"))return;setStep(step-1);setOriginal(false);}}>Atrás</button>:null}
-      {step<2?<button className="g-primary" disabled={!pixels||!quadrat||!!first||!!picker.pending||creating||!picker.accepted||(step===1&&!config.samples.length&&!zero)} onClick={()=>{setStep(step+1);setOriginal(false);}}>{step===0?"Usar este cuadrante":"Revisar cobertura"}</button>
+      {step<2?<button className="g-primary" disabled={!pixels||!quadrat||!!first||!!picker.pending||creating||!picker.accepted||(step===0&&standardized&&!frameContinuationReady(Boolean(pixels),frame,frameConfirmed,frameQuadrat))||(step===1&&!config.samples.length&&!zero)} onClick={()=>{setStep(step+1);setOriginal(false);}}>{step===0?"Usar este cuadrante":"Revisar cobertura"}</button>
         :<button className="g-primary" disabled={saving||!picker.accepted} onClick={()=>void save()}>{saving?"Guardando…":"Guardar cuadrante"}</button>}</div>
     </footer>
   </section>;

@@ -1,12 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encodeMaskRle } from "../region-suggestions/mask-codec";
-import { emptyEcologyConfig, parseEcologyReview, sameEcologySource, selectMorph } from "./ecology";
+import { emptyEcologyConfig, frameContinuationReady, parseEcologyReview, quadratFromFrame, sameEcologySource, selectMorph } from "./ecology";
 
 const morphA = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", event_id: "event", ordinal: 1 };
 const morphB = { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", event_id: "event", ordinal: 2 };
-const outline = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
 const allAbsent = () => Object.fromEntries(Array.from({ length: 5 }, (_, index) => [String(index), "not_observed"]));
+const outline = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+
+test("a confirmed frame derives the usable quadrat without a second click and rejects invalid frames", () => {
+  assert.deepEqual(quadratFromFrame({ corners: [{ x: .2, y: .1 }, { x: .8, y: .1 }, { x: .8, y: .9 }, { x: .2, y: .9 }] }, outline, 100, 100),
+    { x: 20, y: 10, width: 60, height: 80 });
+  assert.equal(quadratFromFrame({ corners: [{ x: 0, y: 0 }, { x: .01, y: 0 }, { x: .01, y: .02 }, { x: 0, y: .02 }] }, outline, 100, 100), null);
+  assert.equal(quadratFromFrame({ corners: [{ x: .2, y: .1 }, { x: .8, y: .1 }, { x: .8, y: .9 }, { x: .2, y: .9 }] },
+    [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: .4 }, { x: 0, y: .4 }], 100, 100), null);
+  const valid = { x: 20, y: 10, width: 60, height: 80 };
+  assert.equal(frameContinuationReady(true, { corners: [{ x: .2, y: .1 }, { x: .8, y: .1 }, { x: .8, y: .9 }, { x: .2, y: .9 }] }, true, valid), true);
+  assert.equal(frameContinuationReady(true, { corners: [{ x: .2, y: .1 }] }, true, valid), false);
+  assert.equal(frameContinuationReady(true, { corners: [{ x: .2, y: .1 }, { x: .8, y: .1 }, { x: .8, y: .9 }, { x: .2, y: .9 }] }, true, null), false);
+});
 
 function review() {
   const config = selectMorph(selectMorph(emptyEcologyConfig(), morphA).config, morphB).config;

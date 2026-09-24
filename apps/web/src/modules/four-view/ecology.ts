@@ -45,6 +45,15 @@ export function quadratFromPoints(a: TrunkPoint, b: TrunkPoint, width: number, h
   const x1 = Math.floor(a.x * width), y1 = Math.floor(a.y * height), x2 = Math.floor(b.x * width), y2 = Math.floor(b.y * height);
   return { x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
 }
+export function quadratFromFrame(frame: { corners: TrunkPoint[] }, outline: TrunkPoint[], width: number, height: number): Quadrat | null {
+  if (frame.corners.length !== 4 || frame.corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+  const xs = frame.corners.map(p => p.x), ys = frame.corners.map(p => p.y);
+  const q = quadratFromPoints({ x: Math.min(...xs), y: Math.min(...ys) }, { x: Math.max(...xs), y: Math.max(...ys) }, width, height);
+  return validQuadrat(q, outline, width, height) ? q : null;
+}
+export function frameContinuationReady(imageReady: boolean, frame: { corners: TrunkPoint[] } | null, confirmed: boolean, quadrat: Quadrat | null): boolean {
+  return imageReady && Boolean(frame && frame.corners.length === 4) && confirmed && Boolean(quadrat);
+}
 export function validQuadrat(q: Quadrat, outline: TrunkPoint[], width: number, height: number): boolean {
   if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 1024) || trunkOutlineError(outline)) return false;
   if (![q.x, q.y, q.width, q.height].every(Number.isSafeInteger) || q.x < 0 || q.y < 0 || q.width < 4 || q.height < 4 || q.x + q.width > width || q.y + q.height > height) return false;

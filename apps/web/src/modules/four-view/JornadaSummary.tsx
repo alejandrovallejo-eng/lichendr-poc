@@ -11,6 +11,7 @@ export function JornadaSummaryView({ snapshot, onRefresh, environmental = false 
 }) {
   const { data, event } = snapshot;
   const query = new URLSearchParams({ eventId: event.id }).toString();
+  const environmentalListHref = "/environmental-quality?mode=guided";
   const context = data.rows[0];
   return <section className="space-y-5" aria-label="Resumen unificado de jornada">
     <header className="flex flex-wrap items-start justify-between gap-3">
@@ -19,7 +20,7 @@ export function JornadaSummaryView({ snapshot, onRefresh, environmental = false 
       <span className="rounded-full bg-emerald-50 px-3 py-1">Jornada {event.status === "completed" ? "cerrada" : "abierta"}</span>
     </header>
     <nav className="flex flex-wrap gap-4 text-sm" aria-label="Acciones del resumen">
-      <a className="underline" href={environmental ? "/environmental-quality" : "/analysis"}>Elegir otra jornada</a>
+      <a className="underline" href={environmental ? environmentalListHref : "/analysis"}>Elegir otra jornada</a>
       <a className="underline" href={`/jornada/${encodeURIComponent(event.id)}`}>{event.status === "completed" ? "Revisar o reabrir jornada" : "Continuar / cerrar jornada"}</a>
       <a className="underline" href={ecologyHref(event.id)}>Editar cuadrantes y catálogo</a>
       <button className="underline" type="button" onClick={onRefresh}>Actualizar resultados</button>

@@ -8,6 +8,7 @@ import JornadaSummary, { JornadaSummaryView } from "./JornadaSummary";
 import { GuidedResultsView } from "./GuidedResults";
 import { buildEcologySummary } from "./ecology-summary";
 import { emptyEcologyConfig, parseEcologyReview, selectMorph } from "./ecology";
+import { resolveEnvironmentalQualityView } from "../environmental-quality/EnvironmentalQualityEntry";
 import type { JornadaSummarySnapshot } from "./jornada-summary-client";
 import type { GuidedTreeResult } from "./guided-results";
 import type { GuidedReview } from "./guided-flow";
@@ -54,11 +55,20 @@ test("environmental entry consumes the same data and retains the explicit classi
   const snapshot = fixture();
   const html = renderToStaticMarkup(<JornadaSummaryView snapshot={snapshot} environmental />);
   assert.match(html, /8\/8/); assert.match(html, /Liquen claro/); assert.match(html, /analysis\?eventId=event/);
+  assert.match(html, /href="\/environmental-quality\?mode=guided"/);
   assert.match(html, /environmental-quality\?mode=classic/);
   const listing = renderToStaticMarkup(<GuidedResultsView rows={snapshot.data.rows} environmental />);
+  assert.match(listing, /name="mode" value="guided"/);
   assert.match(listing, /action="\/environmental-quality"/);
-  assert.match(listing, /environmental-quality\?eventId=event/);
+  assert.match(listing, /environmental-quality\?mode=guided&amp;eventId=event/);
   assert.doesNotMatch(html, /0 imágenes completadas/);
+});
+test("environmental-quality defaults to the dashboard unless guided context is explicit", () => {
+  assert.equal(resolveEnvironmentalQualityView(new URLSearchParams()), "dashboard");
+  assert.equal(resolveEnvironmentalQualityView(new URLSearchParams("mode=classic")), "classic");
+  assert.equal(resolveEnvironmentalQualityView(new URLSearchParams("mode=guided")), "guided");
+  assert.equal(resolveEnvironmentalQualityView(new URLSearchParams("eventId=event")), "guided");
+  assert.equal(resolveEnvironmentalQualityView(new URLSearchParams("samplingEventId=event")), "guided");
 });
 test("pending, stale and real zero remain distinguishable after closure", () => {
   const snapshot = fixture();

@@ -35,6 +35,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental
   const sites = unique(rows.filter(r => !draft.projectId || r.project.id === draft.projectId).map(r => r.site));
   const events = unique(rows.filter(r => (!draft.projectId || r.project.id === draft.projectId) && (!draft.siteId || r.site.id === draft.siteId)).map(r => r.event));
   const resultPath = environmental ? "/environmental-quality" : "/analysis";
+  const journeyHref = (eventId: string) => `${resultPath}?${new URLSearchParams(environmental ? { mode: "guided", eventId } : { eventId }).toString()}`;
   const selector = (name: "projectId" | "siteId" | "eventId", title: string, options: { id: string; name: string }[]) =>
     <label className="flex min-w-0 flex-col gap-1 text-sm"><span>{title}</span>
       <select name={name} value={draft[name] ?? ""} className="min-w-0 rounded border bg-white p-2" onChange={e => setDraft({ ...draft,
@@ -49,6 +50,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental
       <p className="mt-1 text-sm">Elige una jornada para ver juntos sus árboles, cuatro vistas, cobertura y diversidad.</p>
       {environmental ? <p className="mt-2 rounded-lg bg-emerald-50 p-3 text-sm">Aquí se incluyen tus capturas guiadas. La calidad del aire todavía no está estimada; los datos guardados se muestran sin convertirlos en una clasificación ambiental.</p> : null}</header>
     <form action={resultPath} method="get" className="grid items-end gap-3 rounded-lg border p-4 md:grid-cols-4" style={{ borderColor: "var(--ld-border)" }}>
+      {environmental ? <input type="hidden" name="mode" value="guided" /> : null}
       {selector("projectId", "Proyecto", projects)}{selector("siteId", "Sitio / zona", sites)}{selector("eventId", "Jornada", events)}
       {draft.treeSampleId ? <input type="hidden" name="treeSampleId" value={draft.treeSampleId} /> : null}
       <button type="submit" className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }}>Ver resultados</button>
@@ -68,7 +70,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental
           <h2 className="text-lg font-bold">{row.tree.code}</h2>
           <p className="text-sm">{row.project.name} · {row.site.name}</p>
           <a className="text-sm underline" href={`/jornada/${encodeURIComponent(row.event.id)}`}>{row.event.name} · {row.event.sampled_at.slice(0, 10)}</a>
-          <a className="mt-2 block font-semibold underline" href={`${resultPath}?${new URLSearchParams({ eventId: row.event.id })}`}>Abrir resumen de esta jornada</a>
+          <a className="mt-2 block font-semibold underline" href={journeyHref(row.event.id)}>Abrir resumen de esta jornada</a>
         </div><span className={`rounded-full px-3 py-1 text-sm ${row.complete ? "bg-emerald-100" : "bg-amber-50"}`}>
           {row.savedCount}/4 vistas guardadas{row.complete ? " · Completo" : " · Pendiente"}</span></div>
         <dl className="my-4 grid grid-cols-2 gap-2 md:grid-cols-4">{DIRECTIONS.map(d => <div key={d} className="rounded-lg bg-stone-50 p-3">

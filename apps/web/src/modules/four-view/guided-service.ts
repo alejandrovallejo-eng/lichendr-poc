@@ -31,11 +31,13 @@ export const guidedServices = {
       context: { projectId: context.projectId, siteId: context.siteId, eventId: context.eventId, treeSampleId } });
     return { imageId: view.image_id, treeSampleId };
   },
-  async photo(ownerId: string, imageId: string): Promise<Blob> {
+  async photo(ownerId: string, imageId: string, preferredPath?: string): Promise<Blob> {
     // Use the same oriented, bounded proxy for canvas and model geometry,
     // including HEIC. RLS still applies; no public URL or model token exposed.
-    await prepareStoredFourViewImage(imageId);
-    const { data, error } = await supabase.storage.from("lichen-images").download(`${ownerId}/analysis-proxies/${imageId}/v1.jpg`);
+    if (!preferredPath) await prepareStoredFourViewImage(imageId);
+    const path = preferredPath && !preferredPath.startsWith("analysis-proxy:")
+      ? preferredPath : `${ownerId}/analysis-proxies/${imageId}/v1.jpg`;
+    const { data, error } = await supabase.storage.from("lichen-images").download(path);
     if (error || !data) throw new Error("El original está guardado, pero no se pudo abrir su copia de análisis. Reintenta.");
     return data;
   },

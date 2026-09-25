@@ -1,6 +1,7 @@
 import type { EcologyData } from "./ecology-client";
 import { morphDisplayName, observedMorphs, sameEcologySource, type EcologyRow } from "./ecology";
 import { DIRECTIONS, type Direction } from "./types";
+import { confirmedFrequency, confirmedFrequencyByMorph } from "./cell-frequency";
 
 export function currentQuadrat(data: EcologyData, sampleId: string, direction: Direction): {
   state: "saved" | "pending" | "changed" | "unavailable"; row?: EcologyRow;
@@ -13,7 +14,7 @@ export function currentQuadrat(data: EcologyData, sampleId: string, direction: D
   if (!source?.analysis || !source.savedAt || matches.length > 1) return { state: "unavailable" };
   const saved = matches[0];
   if (!saved) return { state: "pending" };
-  return sameEcologySource(saved.review, source.outline, source.analysis.width, source.analysis.height)
+  return sameEcologySource(saved.review, source.outline, source.analysis.width, source.analysis.height, { ...source, imageId: view.imageId })
     ? { state: "saved", row: saved } : { state: "changed", row: saved };
 }
 
@@ -33,7 +34,23 @@ export function buildEcologySummary(data: EcologyData, eventId: string) {
     const views = DIRECTIONS.map(direction => ({ direction, ...currentQuadrat(data, tree.sampleId, direction) }));
     const saved = views.filter(v => v.state === "saved");
     const morphIds = [...new Set(saved.flatMap(v => observedMorphs(v.row!.review)))];
-    return { tree, views, savedCount: saved.length, morphIds };
+    const frequencyByMorph = views.map(view => view.state === "saved" && view.row?.review.standardized
+      ? confirmedFrequencyByMorph(view.row.review.standardized.decisions,
+        view.row.review.config.confirmed?.groups.filter(g => g.id !== "unassigned").map(g => g.id) ?? []) : {});
+    const frequencies = views.map(view => view.state === "saved" && view.row?.review.standardized
+      ? confirmedFrequency(view.row.review.standardized.decisions,
+        1, view.row.review.config.confirmed?.groups.filter(g => g.id !== "unassigned").map(g => g.id)) : null);
+    const completeFrequencies = views.length === DIRECTIONS.length
+      && views.every(view => view.state === "saved")
+      && frequencies.every(Boolean);
+    const viewFrequencyByMorph = views.map((view, index) => ({ ...view, frequencyByMorph: frequencyByMorph[index] }));
+    return { tree, views: viewFrequencyByMorph, savedCount: saved.length, morphIds, frequencies,
+      frequencyCells: completeFrequencies ? frequencies.reduce((sum, value) => sum + (value?.occupiedCells ?? 0), 0) : null,
+      frequencyByMorph: Object.fromEntries([...new Set(views.flatMap((view,index) =>
+        Object.keys(frequencyByMorph[index] ?? {})))].map(id => {
+          const values = frequencyByMorph.map(value => value[id]);
+          return [id, values.every(Boolean) ? { occupiedCells: values.reduce((sum, value) => sum + (value?.occupiedCells ?? 0), 0), totalCells: 20 } : null];
+        })) };
   });
   const valid = trees.flatMap(t => t.views.filter(v => v.state === "saved").map(v => ({
     sampleId: t.tree.sampleId, treeCode: t.tree.tree.code, direction: v.direction, row: v.row!,
@@ -57,6 +74,8 @@ export function buildEcologySummary(data: EcologyData, eventId: string) {
     pending: trees.flatMap(t => t.views).filter(v => v.state === "pending").length,
     changed: trees.flatMap(t => t.views).filter(v => v.state === "changed").length,
     unavailable: trees.flatMap(t => t.views).filter(v => v.state === "unavailable").length,
+    frequencyViews: trees.flatMap(t => t.frequencies).filter(Boolean).length,
+    frequencyTrees: trees.filter(t => t.frequencyCells !== null).length,
     catalogueOnly: data.catalog.length - morphs.length,
     lastSavedAt: valid.map(v => v.row.review.savedAt).sort().at(-1) ?? null,
   };

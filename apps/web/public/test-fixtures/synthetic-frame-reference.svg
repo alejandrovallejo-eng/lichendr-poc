@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="1200" viewBox="0 0 600 1200">
+  <title>Synthetic test image — visible 10 by 50 centimetre reference frame</title>
+  <rect width="600" height="1200" fill="#b7a27b"/>
+  <rect x="105" y="90" width="390" height="1020" fill="#6c5842" stroke="#fff" stroke-width="8"/>
+  <path d="M105 90H495V1110H105Z" fill="none" stroke="#e7d36b" stroke-width="12"/>
+  <path d="M183 90V1110M261 90V1110M339 90V1110M417 90V1110" stroke="#e7d36b" stroke-width="5"/>
+  <text x="125" y="70" font-family="sans-serif" font-size="28" fill="#111">SYNTHETIC TEST — 10 cm × 50 cm</text>
+  <text x="125" y="1160" font-family="sans-serif" font-size="24" fill="#111">Known reference only; not scientific validation</text>
+</svg>

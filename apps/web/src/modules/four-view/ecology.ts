@@ -1,6 +1,8 @@
 import { parseColorConfig, type ColorConfig, type ColorClass } from "../region-suggestions/trunk-colors";
 import { rasterizeTrunk, trunkOutlineError, type TrunkPoint } from "../region-suggestions/trunk-outline";
+import { decodeMaskRle } from "../region-suggestions/mask-codec";
 import { reviewFingerprint } from "./guided-cloud";
+import { CELL_FREQUENCY_METHOD, FRAME_CELL_COUNT, isVerifiedCalibration, type CellDecision, type StandardizedCellReview } from "./cell-frequency";
 
 export interface Morphospecies { id: string; event_id: string; ordinal: number; custom_name?: string | null; name_revision?: number }
 export interface Quadrat { x: number; y: number; width: number; height: number }
@@ -8,6 +10,7 @@ export interface EcologyReview {
   version: 1; scale: "uncalibrated"; sourceOutline: TrunkPoint[];
   quadrat: Quadrat; width: number; height: number; config: ColorConfig;
   counts: number[]; total: number; savedAt: string;
+  standardized?: StandardizedCellReview;
 }
 export interface EcologyRow { image_id: string; event_id: string; tree_sample_id: string; direction: string; review: EcologyReview; revision: number }
 export function morphName(ordinal: number) {
@@ -42,6 +45,15 @@ export function quadratFromPoints(a: TrunkPoint, b: TrunkPoint, width: number, h
   const x1 = Math.floor(a.x * width), y1 = Math.floor(a.y * height), x2 = Math.floor(b.x * width), y2 = Math.floor(b.y * height);
   return { x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
 }
+export function quadratFromFrame(frame: { corners: TrunkPoint[] }, outline: TrunkPoint[], width: number, height: number): Quadrat | null {
+  if (frame.corners.length !== 4 || frame.corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+  const xs = frame.corners.map(p => p.x), ys = frame.corners.map(p => p.y);
+  const q = quadratFromPoints({ x: Math.min(...xs), y: Math.min(...ys) }, { x: Math.max(...xs), y: Math.max(...ys) }, width, height);
+  return validQuadrat(q, outline, width, height) ? q : null;
+}
+export function frameContinuationReady(imageReady: boolean, frame: { corners: TrunkPoint[] } | null, confirmed: boolean, quadrat: Quadrat | null): boolean {
+  return imageReady && Boolean(frame && frame.corners.length === 4) && confirmed && Boolean(quadrat);
+}
 export function validQuadrat(q: Quadrat, outline: TrunkPoint[], width: number, height: number): boolean {
   if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 1024) || trunkOutlineError(outline)) return false;
   if (![q.x, q.y, q.width, q.height].every(Number.isSafeInteger) || q.x < 0 || q.y < 0 || q.width < 4 || q.height < 4 || q.x + q.width > width || q.y + q.height > height) return false;
@@ -52,7 +64,9 @@ export function validQuadrat(q: Quadrat, outline: TrunkPoint[], width: number, h
 export function parseEcologyReview(value: unknown): EcologyReview | null {
   try {
     const r = value as EcologyReview;
-    if (!r || JSON.stringify(r).length > 200000 || r.version !== 1 || r.scale !== "uncalibrated" || !Array.isArray(r.sourceOutline) || !r.quadrat
+    const serialized = JSON.stringify(r);
+    const byteLength = typeof TextEncoder === "function" ? new TextEncoder().encode(serialized).byteLength : unescape(encodeURIComponent(serialized)).length;
+    if (!r || byteLength > 200000 || r.version !== 1 || r.scale !== "uncalibrated" || !Array.isArray(r.sourceOutline) || !r.quadrat
       || !validQuadrat(r.quadrat, r.sourceOutline, r.width, r.height)) return null;
     const config = parseColorConfig(JSON.stringify(r.config));
     if (!config || config.version !== 2 || config.confirmed?.legacyCount !== 0 || config.samples.some(s => s.label === 2)) return null;
@@ -63,11 +77,75 @@ export function parseEcologyReview(value: unknown): EcologyReview | null {
       || r.counts[0] !== 0 || r.counts[2] !== 0 || r.counts.reduce((a, b) => a + b, 0) !== r.total) return null;
     for (let label = 3; label <= 10; label++) if (r.counts[label] && !config.samples.some(s => s.label === label)) return null;
     if (typeof r.savedAt !== "string" || !Number.isFinite(Date.parse(r.savedAt))) return null;
-    return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt };
+    if (r.standardized !== undefined) {
+      const standardized = r.standardized as StandardizedCellReview;
+      const groups = config.confirmed!.groups.filter(g => g.id !== "unassigned");
+      const decisions = standardized.decisions;
+      const validDecision = (state: unknown): state is CellDecision =>
+        state === "observed" || state === "not_observed" || state === "proposed" || state === "not_evaluated";
+      const corners = standardized.frame?.corners;
+      const isPoint = (value: unknown): value is { x: number; y: number } => {
+        const point = value as { x?: unknown; y?: unknown } | null;
+        return Boolean(point && typeof point.x === "number" && typeof point.y === "number"
+          && Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1);
+      };
+      const cross = (a: {x:number;y:number}, b: {x:number;y:number}, c: {x:number;y:number}) =>
+        (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
+      const validFrame = Array.isArray(corners) && corners.length === 4 && corners.every(isPoint)
+        && cross(corners[0],corners[1],corners[2]) > 0
+        && cross(corners[1],corners[2],corners[3]) > 0
+        && cross(corners[2],corners[3],corners[0]) > 0
+        && cross(corners[3],corners[0],corners[1]) > 0;
+      const validMasks = standardized.masksByMorph && typeof standardized.masksByMorph === "object"
+        && Object.entries(standardized.masksByMorph).every(([id, mask]) => groups.some(g => g.id === id) && typeof mask === "string" && mask.length > 0);
+      const decodableMasks = validMasks && Object.values(standardized.masksByMorph).every(mask => {
+        try {
+          const decoded = decodeMaskRle(mask);
+          return decoded.width === standardized.maskWidth && decoded.height === standardized.maskHeight
+            && decoded.mask.length === standardized.maskWidth * standardized.maskHeight;
+        } catch { return false; }
+      });
+      const validDecisions = decisions && typeof decisions === "object"
+        && Object.keys(decisions).every(id => groups.some(g => g.id === id))
+        && groups.every(g => {
+          const cells = decisions[g.id];
+          return cells && typeof cells === "object"
+            && Object.keys(cells).length === FRAME_CELL_COUNT
+            && Array.from({ length: FRAME_CELL_COUNT }, (_, index) => validDecision(cells[String(index)])).every(Boolean);
+        });
+      const validReviewedAt = standardized.reviewedAt === null
+        || (typeof standardized.reviewedAt === "string" && Number.isFinite(Date.parse(standardized.reviewedAt)));
+      if (standardized.method !== CELL_FREQUENCY_METHOD
+        || !standardized.frame || standardized.frame.widthCm !== 10 || standardized.frame.heightCm !== 50
+        || standardized.frameConfirmed !== true
+        || !isVerifiedCalibration(standardized.calibration)
+        || !validFrame
+        || !Number.isSafeInteger(standardized.maskWidth) || !Number.isSafeInteger(standardized.maskHeight)
+        || !validMasks || !decodableMasks || !validDecisions || typeof standardized.sourceFingerprint !== "string" || !standardized.sourceFingerprint
+        || !validReviewedAt) return null;
+    }
+    return { version: 1, scale: "uncalibrated", sourceOutline: r.sourceOutline, quadrat: q, width: r.width, height: r.height, config, counts: r.counts, total: r.total, savedAt: r.savedAt, standardized: r.standardized };
   } catch { return null; }
 }
-export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number) {
-  return review.width === width && review.height === height && reviewFingerprint(review.sourceOutline) === reviewFingerprint(outline);
+export function sameEcologySource(review: EcologyReview, outline: TrunkPoint[], width: number, height: number, source?: { imageId?: string; calibration?: unknown }) {
+  if (review.width !== width || review.height !== height || reviewFingerprint(review.sourceOutline) !== reviewFingerprint(outline)) return false;
+  if (!review.standardized) return true;
+  if (!source?.calibration) {
+    return Boolean(source?.imageId
+      && review.standardized.calibration.imageId === source.imageId
+      && review.standardized.calibration.transformationId === `manual-frame:${source.imageId}`);
+  }
+  const calibration = source.calibration;
+  if (!isVerifiedCalibration(calibration)) return false;
+  return review.standardized.calibration.imageId === calibration.imageId
+    && review.standardized.calibration.transformationId === calibration.transformationId
+    && review.standardized.calibration.method === calibration.method
+    && review.standardized.calibration.pixelsPerCm === calibration.pixelsPerCm
+    && review.standardized.calibration.width === calibration.width
+    && review.standardized.calibration.height === calibration.height
+    && review.standardized.calibration.sourceCorners.every((point, index) =>
+      point.x === calibration.sourceCorners[index].x && point.y === calibration.sourceCorners[index].y)
+    && review.standardized.sourceFingerprint.includes(calibration.transformationId);
 }
 export function observedMorphs(review: EcologyReview): string[] {
   return review.config.confirmed!.groups.filter(g => g.id !== "unassigned" && review.counts[g.label] > 0).map(g => g.id);

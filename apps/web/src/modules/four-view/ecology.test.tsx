@@ -9,6 +9,7 @@ import { GuidedColorControls, useGuidedColorPicker } from "./GuidedColorPicker";
 import { MorphCatalogue } from "./EcologyEditor";
 import { emptyEcologyConfig, morphName, morphDisplayName, normalizeMorphName, selectMorph, validQuadrat, quadratOutline, parseEcologyReview, observedMorphs, referenceTones, sameEcologySource, type EcologyRow, type Morphospecies } from "./ecology";
 import { classifyTrunkColors, proposeColorAddition, acceptColorAddition } from "../region-suggestions/trunk-colors";
+import { encodeMaskRle } from "../region-suggestions/mask-codec";
 const outline=[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}],q={x:2,y:2,width:4,height:4};
 const a={id:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",event_id:"event-one",ordinal:1};
 function document(){return {version:1,scale:"uncalibrated",sourceOutline:outline,quadrat:q,width:10,height:10,config:emptyEcologyConfig(),counts:[0,16,0,0,0,0,0,0,0,0,0],total:16,savedAt:"2026-09-16T12:00:00Z"};}
@@ -35,6 +36,17 @@ test("explicit empty review is unknown, not bark; invalid counts and samples rej
   assert.equal(parseEcologyReview({...raw,config:{...config,samples:[{x:.9,y:.9,label:3,rgb:[1,2,3],tolerance:12}]}}),null);
   assert.equal(sameEcologySource(review,outline,10,10),true);assert.equal(sameEcologySource(review,outline,20,10),false);
   assert.equal(sameEcologySource(review,[...outline].reverse(),10,10),false);
+});
+test("standardized reviews require five explicit decisions and decodable bounded masks",()=>{
+  const morph=selectMorph(emptyEcologyConfig(),a), mask=encodeMaskRle(new Uint8Array(10*50),10,50);
+  const decisions={ [a.id]: { "0":"not_observed","1":"not_observed","2":"not_observed","3":"not_observed","4":"not_observed" } };
+  const standardized={method:"cell-frequency-v2",frame:{corners:[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}],widthCm:10,heightCm:50},
+    frameConfirmed:true,calibration:{pixelsPerCm:1,method:"manual_confirmed",width:10,height:50,imageId:"img",proxyPath:"analysis-proxy:img",transformationId:"rectified:img",sourceCorners:[{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]},
+    maskWidth:10,maskHeight:50,masksByMorph:{[a.id]:mask},decisions,reviewedAt:"2026-09-16T12:00:00Z",sourceFingerprint:"source"};
+  const raw={...document(),config:morph.config,standardized};
+  assert.ok(parseEcologyReview(raw));
+  assert.equal(parseEcologyReview({...raw,standardized:{...standardized,decisions:{[a.id]:{"0":"not_observed"}}}}),null);
+  assert.equal(parseEcologyReview({...raw,standardized:{...standardized,masksByMorph:{[a.id]:"not-rle"}}}),null);
 });
 test("colour matching clips to quadrat; accepted additions do not double count or paint bark",async()=>{
   const rgba=new Uint8ClampedArray(10*10*4);for(let i=0;i<100;i++)rgba.set([100,120,50,255],i*4);

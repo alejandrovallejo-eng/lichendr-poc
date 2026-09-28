@@ -273,9 +273,11 @@ export default function DashboardHome() {
                 </div>
                 <div className="flex flex-wrap gap-3">
                   <Link href={journey.workHref} className="inline-flex rounded-lg px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar)" }}>
-                    {journey.event.status === "completed" ? "Ver trabajo" : journey.workLabel}
+                    {journey.workLabel}
                   </Link>
-                  {journey.resultsHref ? <Link href={journey.resultsHref} className="inline-flex rounded-lg border px-4 py-2 font-semibold" style={{ borderColor: "var(--ld-border)" }}>Ver resultados</Link> : null}
+                  {journey.event.status !== "completed" && journey.resultsHref
+                    ? <Link href={journey.resultsHref} className="inline-flex rounded-lg border px-4 py-2 font-semibold" style={{ borderColor: "var(--ld-border)" }}>Ver resultados</Link>
+                    : null}
                   <Link href={journey.indicatorHref} className="inline-flex rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--ld-border)" }}>
                     Indicador biológico
                   </Link>

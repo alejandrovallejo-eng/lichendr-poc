@@ -51,7 +51,7 @@ export async function loadDashboardHomeData(signal?: AbortSignal) {
   if (sampleError || !samples) throw new Error("No se pudo leer tu panel inicial. Reintenta sin cambiar tus datos.");
   const sampleIds = samples.map((sample) => sample.id);
   const { data: series, error: seriesError } = sampleIds.length
-    ? await db.from("capture_series").select("id,tree_sample_id,status,valid_view_count,pending_view_count,confirmed_at,updated_at")
+    ? await db.from("capture_series").select("id,tree_sample_id,status,valid_view_count,pending_view_count,confirmed_at,updated_at,created_at")
       .in("tree_sample_id", sampleIds).abortSignal(signal ?? new AbortController().signal)
     : { data: [], error: null };
   signal?.throwIfAborted();

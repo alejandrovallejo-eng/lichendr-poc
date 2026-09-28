@@ -34,7 +34,7 @@ test("dashboard snapshot keeps open journeys ahead and resumes the exact pending
     ],
     trees: [{ id: "tree-1", site_id: "site-1" }],
     samples: [{ id: "sample-1", tree_id: "tree-1", sampling_event_id: "event-1" }],
-    series: [{ id: "series-1", tree_sample_id: "sample-1", status: "annotation_pending", valid_view_count: 3, pending_view_count: 1, confirmed_at: null, updated_at: "2026-09-20T10:10:00Z" }],
+    series: [{ id: "series-1", tree_sample_id: "sample-1", status: "annotation_pending", valid_view_count: 3, pending_view_count: 1, confirmed_at: null, updated_at: "2026-09-20T10:10:00Z", created_at: "2026-09-20T10:00:00Z" }],
     rows: [row()],
   });
   assert.equal(snapshot.openJourneys.length, 1);
@@ -50,7 +50,7 @@ test("focus snapshot separates saved progress, capture progress and optional div
     events: [{ id: "event-1", site_id: "site-1", name: "Jornada 1", sampled_at: "2026-09-20T09:00:00Z", status: "draft", updated_at: "2026-09-20T10:10:00Z" }],
     trees: [{ id: "tree-1", site_id: "site-1" }],
     samples: [{ id: "sample-1", tree_id: "tree-1", sampling_event_id: "event-1" }],
-    series: [{ id: "series-1", tree_sample_id: "sample-1", status: "annotation_pending", valid_view_count: 3, pending_view_count: 1, confirmed_at: null, updated_at: "2026-09-20T10:10:00Z" }],
+    series: [{ id: "series-1", tree_sample_id: "sample-1", status: "annotation_pending", valid_view_count: 3, pending_view_count: 1, confirmed_at: null, updated_at: "2026-09-20T10:10:00Z", created_at: "2026-09-20T10:00:00Z" }],
     rows: [row()],
   }).openJourneys[0];
   const focus = buildDashboardFocusSnapshot(journey, {
@@ -72,4 +72,34 @@ test("focus snapshot separates saved progress, capture progress and optional div
   assert.match(focus.captura.detail, /3 de 4 vistas revisadas · Falta Oeste/);
   assert.equal(focus.diversidad.status, "Sin iniciar");
   assert.equal(focus.jornada.detail, "Jornada abierta");
+});
+
+test("latest activity ignores superseded capture series for the same sample", () => {
+  const snapshot = buildDashboardHomeSnapshot({
+    projects: [{ id: "project-1", name: "Proyecto", owner_id: "owner" }],
+    sites: [{ id: "site-1", name: "Sitio", project_id: "project-1" }],
+    events: [{ id: "event-1", site_id: "site-1", name: "Jornada 1", sampled_at: "2026-09-20T09:00:00Z", status: "draft", updated_at: "2026-09-20T10:10:00Z" }],
+    trees: [{ id: "tree-1", site_id: "site-1" }],
+    samples: [{ id: "sample-1", tree_id: "tree-1", sampling_event_id: "event-1" }],
+    series: [
+      { id: "series-old", tree_sample_id: "sample-1", status: "annotation_pending", valid_view_count: 0, pending_view_count: 4, confirmed_at: null, updated_at: "2026-09-20T11:30:00Z", created_at: "2026-09-20T08:00:00Z" },
+      { id: "series-new", tree_sample_id: "sample-1", status: "annotation_pending", valid_view_count: 3, pending_view_count: 1, confirmed_at: null, updated_at: "2026-09-20T10:10:00Z", created_at: "2026-09-20T10:00:00Z" },
+    ],
+    rows: [row({ lastSavedAt: null, savedCount: 0, uploadedCount: 0 })],
+  });
+  assert.equal(snapshot.openJourneys[0].latestActivityAt, "2026-09-20T10:10:00Z");
+});
+
+test("closed journeys keep results action instead of reopening capture", () => {
+  const snapshot = buildDashboardHomeSnapshot({
+    projects: [{ id: "project-1", name: "Proyecto", owner_id: "owner" }],
+    sites: [{ id: "site-1", name: "Sitio", project_id: "project-1" }],
+    events: [{ id: "event-1", site_id: "site-1", name: "Jornada 1", sampled_at: "2026-09-20T09:00:00Z", status: "completed", updated_at: "2026-09-20T10:10:00Z" }],
+    trees: [{ id: "tree-1", site_id: "site-1" }],
+    samples: [{ id: "sample-1", tree_id: "tree-1", sampling_event_id: "event-1" }],
+    series: [{ id: "series-1", tree_sample_id: "sample-1", status: "complete", valid_view_count: 4, pending_view_count: 0, confirmed_at: "2026-09-20T10:10:00Z", updated_at: "2026-09-20T10:10:00Z", created_at: "2026-09-20T10:00:00Z" }],
+    rows: [row({ complete: true, savedCount: 4, uploadedCount: 4, lastSavedAt: "2026-09-20T10:10:00Z" })],
+  });
+  assert.equal(snapshot.recentJourneys[0].workLabel, "Ver resultados");
+  assert.equal(snapshot.recentJourneys[0].workHref, "/analysis?eventId=event-1");
 });

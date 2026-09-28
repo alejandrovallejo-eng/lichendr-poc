@@ -21,6 +21,7 @@ export type CaptureSeriesRow = {
   pending_view_count: number;
   confirmed_at: string | null;
   updated_at: string;
+  created_at: string;
 };
 
 export interface DashboardJourneySummary {
@@ -138,6 +139,15 @@ function continueTarget(event: SamplingEventRow, rows: GuidedTreeResult[], sampl
   };
 }
 
+function latestSeriesBySample(series: readonly CaptureSeriesRow[]) {
+  const latest = new Map<string, CaptureSeriesRow>();
+  for (const row of [...series].sort((a, b) =>
+    b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))) {
+    if (!latest.has(row.tree_sample_id)) latest.set(row.tree_sample_id, row);
+  }
+  return latest;
+}
+
 export function buildDashboardHomeSnapshot(input: {
   projects: ResultProject[];
   sites: ResultSite[];
@@ -153,7 +163,7 @@ export function buildDashboardHomeSnapshot(input: {
   for (const row of input.rows) rowsByEvent.set(row.event.id, [...(rowsByEvent.get(row.event.id) ?? []), row]);
   const samplesByEvent = new Map<string, SampleRow[]>();
   for (const sample of input.samples) samplesByEvent.set(sample.sampling_event_id, [...(samplesByEvent.get(sample.sampling_event_id) ?? []), sample]);
-  const seriesBySample = new Map(input.series.map((series) => [series.tree_sample_id, series]));
+  const seriesBySample = latestSeriesBySample(input.series);
   const summaries = input.events.flatMap((event) => {
     const site = sites.get(event.site_id);
     const project = site ? projects.get(site.project_id) : null;

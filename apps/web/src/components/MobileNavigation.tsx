@@ -55,7 +55,7 @@ export default function MobileNavigation() {
         <summary className="cursor-pointer list-none px-4 py-3 font-semibold">Menú</summary>
         <nav className="space-y-4 px-4 pb-4">
           <MobileSection items={primaryNavigation} pathname={pathname} />
-          <MobileSection title="Resultados" items={resultsNavigation} pathname={pathname} />
+          <MobileSection title="Indicadores" items={resultsNavigation} pathname={pathname} />
           <MobileSection title="Gestión" items={managementNavigation} pathname={pathname} />
           <MobileSection title="Herramientas avanzadas" items={advancedNavigation} pathname={pathname} />
           <MobileSection title="Cuenta" items={accountNavigation} pathname={pathname} />

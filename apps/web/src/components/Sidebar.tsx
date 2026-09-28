@@ -44,7 +44,7 @@ export default function Sidebar() {
       </Link>
       <nav className="flex flex-col gap-3">
         <NavSection items={primaryNavigation} pathname={pathname} />
-        <NavSection title="Resultados" items={resultsNavigation} pathname={pathname} />
+        <NavSection title="Indicadores" items={resultsNavigation} pathname={pathname} />
         <NavSection title="Gestión" items={managementNavigation} pathname={pathname} />
         <NavSection title="Herramientas avanzadas" items={advancedNavigation} pathname={pathname} />
         <NavSection title="Cuenta" items={accountNavigation} pathname={pathname} />

@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2022",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "/tmp/lichendr-ready-tests"
+  },
+  "files": [
+    "src/modules/annotations/vision-ready.ts",
+    "src/modules/annotations/vision-ready.test.ts"
+  ]
+}

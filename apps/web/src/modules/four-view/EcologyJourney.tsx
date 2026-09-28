@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import ContextTrail from "@/components/ContextTrail";
 import EcologyEditor from "./EcologyEditor";
 import { ecologyServices, type EcologyData, type EcologyServices } from "./ecology-client";
 import { observedMorphs, morphDisplayName, type Morphospecies } from "./ecology";
@@ -35,9 +36,15 @@ export default function EcologyJourney({eventId,initialSampleId,services=ecology
   const valid=data.rows.flatMap(r=>DIRECTIONS.flatMap(d=>{const q=currentQuadrat(data,r.sampleId,d);return q.state==="saved"?[q.row!]:[];}));
   const allMorphs=new Set(valid.flatMap(r=>observedMorphs(r.review)));
   const sorted=[...data.rows].sort((a,b)=>Number(b.sampleId===initialSampleId)-Number(a.sampleId===initialSampleId));
+  const selectedTreeName = initialSampleId ? sorted.find((row) => row.sampleId === initialSampleId)?.tree.code ?? null : null;
   return <section className="space-y-5">
     <header><h1 className="text-2xl font-bold">Análisis de diversidad</h1><p>{data.rows[0]?.event.name??"Jornada"} · cuadrantes y morfoespecies</p>
-      {data.rows[0]?<p className="text-sm text-stone-600">{data.rows[0].project.name} · {data.rows[0].site.name}</p>:null}
+      {data.rows[0]?<ContextTrail className="mt-1" entries={[
+        { label: "Proyecto", value: data.rows[0].project.name },
+        { label: "Sitio", value: data.rows[0].site.name },
+        { label: "Jornada", value: data.rows[0].event.name },
+        { label: "Árbol", value: selectedTreeName },
+      ]} />:null}
       <div className="mt-2 flex flex-wrap gap-4"><a className="text-sm underline" href={`/analysis?eventId=${encodeURIComponent(eventId)}`}>Ver análisis general y 360°</a>
         <a className="text-sm underline" href={`/jornada/${encodeURIComponent(eventId)}`}>Volver a la jornada</a>
         <button type="button" className="text-sm underline" onClick={()=>setAttempt(attempt+1)}>Actualizar resultados</button></div></header>

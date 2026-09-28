@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import ContextTrail from "@/components/ContextTrail";
 import EcologySummary from "./EcologySummary";
 import { ecologyHref } from "./ecology";
 import { filterGuidedResults, type ResultFilters } from "./guided-results";
@@ -16,7 +17,12 @@ export function JornadaSummaryView({ snapshot, onRefresh, environmental = false 
   return <section className="space-y-5" aria-label="Resumen unificado de jornada">
     <header className="flex flex-wrap items-start justify-between gap-3">
       <div><h1 className="text-2xl font-bold">Resumen de la jornada</h1><p className="mt-1 font-semibold">{event.name}</p>
-        {context ? <p className="text-sm">{context.project.name} · {context.site.name} · {context.event.sampled_at.slice(0, 10)}</p> : null}</div>
+        {context ? <ContextTrail className="mt-1" entries={[
+          { label: "Proyecto", value: context.project.name },
+          { label: "Sitio", value: context.site.name },
+          { label: "Jornada", value: event.name },
+        ]} /> : null}
+        {context ? <p className="mt-1 text-sm">{context.event.sampled_at.slice(0, 10)}</p> : null}</div>
       <span className="rounded-full bg-emerald-50 px-3 py-1">Jornada {event.status === "completed" ? "cerrada" : "abierta"}</span>
     </header>
     <nav className="flex flex-wrap gap-4 text-sm" aria-label="Acciones del resumen">

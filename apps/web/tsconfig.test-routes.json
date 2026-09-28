@@ -9,9 +9,11 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "rewriteRelativeImportExtensions": true,
-    "outDir": "/tmp/lichendr-route-tests"
+    "outDir": "/tmp/lichendr-route-tests",
+    "allowImportingTsExtensions": false
   },
   "files": [
+    "src/types/heic-decode.d.ts",
     "src/modules/region-suggestions/server/serial.ts",
     "src/modules/region-suggestions/server/session-ticket.ts",
     "src/modules/region-suggestions/server/identity.ts",
@@ -20,5 +22,6 @@
     "src/modules/region-suggestions/server/sam-handlers.ts",
     "src/modules/region-suggestions/server/suggest.ts",
     "src/modules/region-suggestions/server/routes.test.ts"
-  ]
+  ],
+  "include": []
 }

@@ -9,7 +9,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "rewriteRelativeImportExtensions": true,
-    "outDir": "/tmp/lichendr-proxy-tests"
+    "outDir": "/tmp/lichendr-proxy-tests",
+    "allowImportingTsExtensions": false
   },
   "files": [
     "src/types/heic-decode.d.ts",
@@ -17,5 +18,6 @@
     "src/lib/vision-analysis-image.test.ts",
     "src/lib/vision-analysis-proxy.ts",
     "src/lib/vision-analysis-proxy.test.ts"
-  ]
+  ],
+  "include": []
 }

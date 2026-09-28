@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import ContextTrail from "@/components/ContextTrail";
 import { buildDashboardFocusSnapshot, loadDashboardFocusEcology, loadDashboardHomeData, type DashboardHomeSnapshot } from "./home-data";
+import { SessionMissingError } from "../four-view/guided-results-client";
 
 function formatDate(value: string) {
   return new Date(value).toLocaleDateString("es-DO", { year: "numeric", month: "short", day: "numeric" });
@@ -42,6 +43,7 @@ function ProgressRow({ label, status, detail, href }: {
 export default function DashboardHome() {
   const [snapshot, setSnapshot] = useState<DashboardHomeSnapshot | null>(null);
   const [error, setError] = useState("");
+  const [sessionMissing, setSessionMissing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [attempt, setAttempt] = useState(0);
   const [selectedOpenJourney, setSelectedOpenJourney] = useState("");
@@ -58,6 +60,7 @@ export default function DashboardHome() {
         if (controller.signal.aborted) return;
         setSnapshot(value);
         setError("");
+        setSessionMissing(false);
         setLoading(false);
         setSelectedOpenJourney((current) => current && value.openJourneys.some((journey) => journey.event.id === current)
           ? current
@@ -67,6 +70,7 @@ export default function DashboardHome() {
         if (!controller.signal.aborted) {
           setSnapshot(null);
           setLoading(false);
+          setSessionMissing(reason instanceof SessionMissingError);
           setError(reason instanceof Error ? reason.message : "No se pudo abrir tu panel inicial.");
         }
       });
@@ -100,6 +104,24 @@ export default function DashboardHome() {
   }, [selectedJourney]);
 
   if (error) {
+    if (sessionMissing) {
+      return (
+        <section className="rounded-2xl border bg-white p-6" style={{ borderColor: "var(--ld-border)" }}>
+          <h1 className="text-3xl font-semibold">Tu trabajo de campo</h1>
+          <p role="status" className="mt-3">Necesitas iniciar sesión para ver tus jornadas y continuar el trabajo guardado.</p>
+          <p className="mt-2 text-sm" style={{ color: "var(--ld-text-secondary)" }}>
+            Usa la misma cuenta de Google con la que guardaste tus datos para recuperar el contexto completo.
+          </p>
+          <Link
+            href="/cuenta"
+            className="mt-4 inline-flex rounded-lg px-4 py-2 font-semibold text-white"
+            style={{ background: "var(--ld-sidebar)" }}
+          >
+            Iniciar sesión
+          </Link>
+        </section>
+      );
+    }
     return (
       <section className="rounded-2xl border bg-white p-6" style={{ borderColor: "var(--ld-border)" }}>
         <h1 className="text-3xl font-semibold">Tu trabajo de campo</h1>

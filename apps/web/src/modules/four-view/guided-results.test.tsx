@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { DIRECTIONS } from "./types.ts";
 import { buildGuidedResults, filterGuidedResults, guidedProgress, guidedResultHref, type ResultSource } from "./guided-results.ts";
 import { loadGuidedResults, readResultPages } from "./guided-results-client.ts";
-import { GuidedResultsView } from "./GuidedResults.tsx";
+import { GuidedResultsView, GuidedTreeStatus } from "./GuidedResults.tsx";
 
 function review(lichen = 40, total = 100) {
   return { version: 1, outline: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }],
@@ -110,11 +110,33 @@ test("panel renders one tree, four values, context links and explicit scientific
     await act(async () => root.render(createElement(GuidedResultsView, { rows, filters: { eventId: "event" } })));
     assert.equal(host.querySelectorAll("article").length, 1); assert.equal(host.querySelectorAll("dt").length, 4);
     assert.match(host.textContent!, /3\/4 vistas guardadas/); assert.match(host.textContent!, /0.0%/); assert.match(host.textContent!, /Sin guardar/);
+    assert.match(host.textContent!, /Pendientes: Este \(sin guardar\)/);
+    assert.match(host.textContent!, /Ver vistas guardadas y pendientes/);
+    assert.doesNotMatch(host.textContent!, /Ver las 4 vistas y el 360°/);
     assert.match(host.textContent!, /No es cobertura de todo el árbol ni un índice de calidad del aire/);
     const summary = host.querySelector<HTMLAnchorElement>('a[href^="/images?mode=summary"]')!;
     assert.equal(new URL(summary.href).searchParams.get("treeSampleId"), "sample");
     assert.ok(host.querySelector('a[href="/jornada/event"]'));
     await act(async () => root.render(createElement(GuidedResultsView, { rows, filters: { eventId: "other" } })));
     assert.equal(host.querySelectorAll("article").length, 0); assert.match(host.textContent!, /No hay evaluaciones/);
+  } finally { await act(async () => root.unmount()); host.remove(); }
+});
+
+test("a partial tree and an unreadable status never show the complete green badge", async () => {
+  const data = source(); data.reviews[1].review = { ...review(), savedAt: null };
+  const row = buildGuidedResults(data, "owner")[0];
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(GuidedTreeStatus, { row })));
+    assert.match(host.textContent!, /3\/4 vistas guardadas · Pendiente/);
+    assert.match(host.textContent!, /Este \(sin guardar\)/);
+    assert.equal(host.querySelector(".bg-emerald-100"), null);
+    await act(async () => root.render(createElement(GuidedTreeStatus, { row, error: true })));
+    assert.match(host.textContent!, /Guardado sin verificar/);
+    assert.doesNotMatch(host.textContent!, /vistas guardadas|Pendientes:/);
+    assert.equal(host.querySelector(".bg-emerald-100"), null);
+    await act(async () => root.render(createElement(GuidedTreeStatus, { row: buildGuidedResults(source(), "owner")[0] })));
+    assert.match(host.textContent!, /4\/4 vistas guardadas · Completo/);
+    assert.ok(host.querySelector(".bg-emerald-100"));
   } finally { await act(async () => root.unmount()); host.remove(); }
 });

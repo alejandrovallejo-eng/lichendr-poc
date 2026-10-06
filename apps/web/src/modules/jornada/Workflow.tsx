@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import PageHeader from "@/components/PageHeader";
 import { useGuidedResults } from "../four-view/use-guided-results";
-import { GuidedProgress } from "../four-view/GuidedResults";
+import { GuidedProgress, GuidedTreeStatus } from "../four-view/GuidedResults";
 import { supabase } from "@/lib/supabase/client";
 import ClosureReview from "./ClosureReview";
 import { readClosure, changeClosure } from "./closure-client";
@@ -486,12 +486,8 @@ export default function JornadaWorkflow({ eventId }: Props) {
                         {row.tree.speciesName ?? "Especie no identificada"}
                       </p>
                     </div>
-                    <span
-                      className="inline-flex items-center gap-2 rounded px-3 py-1 text-xs font-medium"
-                      style={{ background: "#E4F1E9", color: "#17533C", border: "1px solid #C8DECF" }}
-                    >
-                      {guided.error ? "Guardado no disponible" : guided.rows ? `${guided.rows.find(result => result.sampleId === row.sample?.id)?.savedCount ?? 0}/4 vistas guardadas` : "Consultando guardado…"}
-                    </span>
+                    <GuidedTreeStatus row={guided.rows?.find(result => result.sampleId === row.sample?.id)}
+                      loading={!guided.rows} error={Boolean(guided.error)} />
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Link

@@ -312,6 +312,31 @@ test("tree summary shows each saved result and missing view, survives photo erro
   } finally {await act(async()=>root.unmount());host.remove();}
 });
 
+test("an East review read failure is not presented as an empty analysis and can be retried without writes", async () => {
+  let offline = true;
+  const services = { cloud: { async read(ref: { direction: string }) {
+    if (ref.direction === "E" && offline) throw new Error("Lectura temporal no disponible");
+    return { revision: 1, review: summaryReview(20) };
+  }, async write() { throw new Error("No writes allowed"); } },
+    async storedPhoto() { return new Blob(["photo"]); }, async photo() { throw new Error("No preparation allowed"); },
+    async upload() { throw new Error("No upload allowed"); }, async load() { throw new Error("Session already loaded"); } };
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(TreeSummary, { session: { ownerId: "owner", treeSampleId: "sample", views: { N: "n", E: "e", S: "s", W: "w" }, completed: false }, services, onEdit() { throw new Error("Do not edit an unreadable review"); } })));
+    assert.match(host.textContent!, /Guardado de las cuatro vistas sin verificar/);
+    assert.match(host.textContent!, /No se pudo comprobar el guardado de Este/);
+    assert.doesNotMatch(host.textContent!, /Árbol incompleto|3 de 4 vistas/);
+    const east = host.querySelector('[aria-label="Resultado de Este"]')!;
+    assert.doesNotMatch(east.textContent!, /falta confirmar su análisis/);
+    assert.equal(east.querySelector<HTMLButtonElement>('[aria-label="Completar Este"]')!.disabled, true);
+    offline = false;
+    await act(async () => Array.from(east.querySelectorAll("button")).find(b => b.textContent === "Reintentar lectura")!.click());
+    assert.match(host.textContent!, /4 de 4 vistas con análisis guardado/);
+    assert.match(host.querySelector('[aria-label="Resultado de Este"]')!.textContent!, /20.0 %/);
+    assert.doesNotMatch(host.textContent!, /sin verificar|Árbol incompleto/);
+  } finally { await act(async () => root.unmount()); host.remove(); }
+});
+
 test("saving the last missing direction opens all four views; summary edit/save returns there without AI", async () => {
   localStorage.clear();
   const oldContext=HTMLCanvasElement.prototype.getContext,oldData=HTMLCanvasElement.prototype.toDataURL;

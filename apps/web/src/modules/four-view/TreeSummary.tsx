@@ -9,8 +9,8 @@ import { ExperimentalComparison } from "./ExperimentalComparison";
 import { BioClipEvidence } from "./BioClipEvidence";
 import { GuidedGroupCoverage } from "./GuidedColorPicker";
 
-type Entry = { review: GuidedReview | null; src: string; loading: boolean; error: string };
-const empty = (): Entry => ({ review: null, src: "", loading: false, error: "" });
+type Entry = { review: GuidedReview | null; src: string; loading: boolean; error: string; reviewFailed: boolean };
+const empty = (): Entry => ({ review: null, src: "", loading: false, error: "", reviewFailed: false });
 const detail = (e: unknown) => e instanceof Error ? e.message : "No se pudo abrir esta vista. Reintenta.";
 
 // Only private storage reads and saved review reads. No upload, write, proxy
@@ -18,7 +18,7 @@ const detail = (e: unknown) => e instanceof Error ? e.message : "No se pudo abri
 export function TreeSummary({ session, services, onEdit }: {
   session: GuidedSession; services: GuidedServices; onEdit: (direction: Direction) => void;
 }) {
-  const [entries, setEntries] = useState<Record<Direction, Entry>>({ N: empty(), E: empty(), S: empty(), W: empty() });
+  const [entries, setEntries] = useState<Record<Direction, Entry>>(() => Object.fromEntries(DIRECTIONS.map(d => [d, { ...empty(), loading: Boolean(session.views[d]) }])) as Record<Direction, Entry>);
   const [attempt, setAttempt] = useState(0);
   const [expanded, setExpanded] = useState<Direction | null>(null);
   const [orbit, setOrbit] = useState(false);
@@ -29,44 +29,51 @@ export function TreeSummary({ session, services, onEdit }: {
   useEffect(() => {
     let active = true;
     const urls: string[] = [];
-    for (const direction of DIRECTIONS) {
-      const imageId = session.views[direction];
-      setEntries(prev => ({ ...prev, [direction]: { ...empty(), loading: Boolean(imageId) } }));
-      if (!imageId) continue;
-      // A photo failure must not hide a successfully loaded saved percentage.
-      void Promise.allSettled([
-        services.cloud.read({ ownerId: session.ownerId, treeSampleId: session.treeSampleId, direction, imageId }),
-        services.storedPhoto(session.ownerId, imageId),
-      ]).then(([row, photo]) => {
-        if (!active) return;
-        const src = photo.status === "fulfilled" ? URL.createObjectURL(photo.value) : "";
-        if (src) urls.push(src);
-        setEntries(prev => ({ ...prev, [direction]: {
-          review: row.status === "fulfilled" ? row.value?.review ?? null : null, src, loading: false,
-          error: [row, photo].filter(v => v.status === "rejected").map(v => detail((v as PromiseRejectedResult).reason)).join(" "),
-        } }));
-      });
-    }
+    void Promise.resolve().then(() => {
+      if (!active) return;
+      for (const direction of DIRECTIONS) {
+        const imageId = session.views[direction];
+        setEntries(prev => ({ ...prev, [direction]: { ...empty(), loading: Boolean(imageId) } }));
+        if (!imageId) continue;
+        // A photo failure must not hide a successfully loaded saved percentage.
+        void Promise.allSettled([
+          services.cloud.read({ ownerId: session.ownerId, treeSampleId: session.treeSampleId, direction, imageId }),
+          services.storedPhoto(session.ownerId, imageId),
+        ]).then(([row, photo]) => {
+          if (!active) return;
+          const src = photo.status === "fulfilled" ? URL.createObjectURL(photo.value) : "";
+          if (src) urls.push(src);
+          setEntries(prev => ({ ...prev, [direction]: {
+            review: row.status === "fulfilled" ? row.value?.review ?? null : null, src, loading: false, reviewFailed: row.status === "rejected",
+            error: [row, photo].filter(v => v.status === "rejected").map(v => detail((v as PromiseRejectedResult).reason)).join(" "),
+          } }));
+        });
+      }
+    });
     return () => { active = false; urls.forEach(url => URL.revokeObjectURL(url)); };
     // Stable view identity; changes to unrelated session flags do not reload.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.ownerId, session.treeSampleId, viewsKey, services, attempt]);
   useEffect(() => { heading.current?.focus(); }, [expanded, orbit]);
   const loaded = DIRECTIONS.every(d => !entries[d].loading);
-  const savedCount = DIRECTIONS.filter(d => entries[d].review?.savedAt).length;
+  const unverified = DIRECTIONS.filter(d => entries[d].reviewFailed);
+  const pending = DIRECTIONS.filter(d => !entries[d].review?.savedAt || !entries[d].review?.analysis);
+  const savedCount = 4 - pending.length;
   return <main className="tree-summary" aria-label="Las cuatro vistas del árbol">
     <style>{`.tree-summary{min-height:0;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:14px}.tree-summary-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.tree-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;flex:1;min-height:0}.tree-summary-card{background:white;border:1px solid #d5e3da;border-radius:16px;overflow:hidden;display:flex;flex-direction:column;min-width:0}.tree-summary-card header{display:flex;justify-content:space-between;align-items:center;padding:12px;gap:8px}.tree-summary-card h3{font-size:19px;margin:0}.tree-summary-photo{height:clamp(160px,32vh,340px);background:#e5ece7;position:relative;display:flex;justify-content:center;align-items:center}.tree-summary-photo svg{width:100%;height:100%}.tree-summary-info{padding:12px;display:flex;flex-direction:column;gap:9px;font-size:13px}.tree-summary-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;padding:0 12px 12px}.tree-summary .tree-summary-expanded{grid-template-columns:1fr;max-width:1000px;width:100%;margin:auto}.tree-summary-expanded .tree-summary-card{display:grid;grid-template-columns:minmax(0,1fr) 270px}.tree-summary-expanded .tree-summary-card header{grid-column:1/-1}.tree-summary-expanded .tree-summary-photo{height:min(53vh,520px);grid-row:2/4}.tree-summary-expanded .tree-summary-actions{align-items:flex-end}.tree-summary-note{font-size:12px;color:#4a6156}@media(max-width:1100px){.tree-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.tree-summary-photo{height:220px}}@media(max-width:600px){.tree-summary{padding:10px}.tree-summary-grid{grid-template-columns:1fr}.tree-summary-expanded .tree-summary-card{display:flex}.tree-summary-expanded .tree-summary-photo{height:40vh}}`}</style>
     <div className="tree-summary-top">
       <div><h2 ref={heading} tabIndex={-1} style={{ margin: 0, fontSize: 20 }}>{orbit ? "Explorar el árbol · 360° aproximado" : expanded ? DIRECTION_LABELS[expanded] : "Un árbol · cuatro vistas"}</h2>
-        <p style={{ fontSize: 13 }}>{loaded ? `${savedCount} de 4 vistas con análisis guardado` : "Cargando resultados guardados…"}</p></div>
+        <p style={{ fontSize: 13 }}>{!loaded ? "Cargando resultados guardados…" : unverified.length ? "Guardado de las cuatro vistas sin verificar" : `${savedCount} de 4 vistas con análisis guardado`}</p></div>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <label style={{ fontSize: 13 }}><input type="checkbox" checked={orbit ? orbitMarked : marked} onChange={e => orbit ? setOrbitMarked(e.target.checked) : setMarked(e.target.checked)} /> {orbit ? "Resaltar áreas seleccionadas" : "Mostrar selección"}</label>
         {!orbit ? <button disabled={!loaded || !DIRECTIONS.some(d => entries[d].src && entries[d].review?.savedAt && entries[d].review?.outline.length)} onClick={() => { setExpanded(null); setOrbitMarked(false); setOrbit(true); }}>Explorar 360°</button> : null}
         {expanded || orbit ? <button onClick={() => { setExpanded(null); setOrbit(false); }}>Ver las cuatro vistas</button> : null}
       </div>
     </div>
+    {loaded && unverified.length ? <p role="alert" className="tree-summary-note">No se pudo comprobar el guardado de {unverified.map(d => DIRECTION_LABELS[d]).join(", ")}. Un fallo de lectura no significa que el análisis esté vacío. Reintenta la lectura de esa vista.</p>
+      : loaded && pending.length ? <p role="status" className="tree-summary-note">Árbol incompleto. Pendientes: {pending.map(d => `${DIRECTION_LABELS[d]} (${session.views[d] ? "análisis sin guardar" : "sin foto"})`).join(", ")}. La exploración 360° es parcial.</p> : null}
     {orbit ? <TreeOrbit entries={entries} marked={orbitMarked} onOpenPhoto={d => { setOrbit(false); setExpanded(d); }} /> : <div className={`tree-summary-grid${expanded ? " tree-summary-expanded" : ""}`}>
-      {(expanded ? [expanded] : DIRECTIONS).map(direction => <SummaryCard key={direction}
+      {(expanded ? [expanded] : DIRECTIONS).map(direction => <SummaryCard key={`${direction}:${entries[direction].src}`}
         direction={direction} entry={entries[direction]} imageId={session.views[direction]} treeSampleId={session.treeSampleId}
         marked={marked} expanded={expanded !== null} onExpand={() => setExpanded(direction)}
         onEdit={() => onEdit(direction)} onRetry={() => setAttempt(n => n + 1)} />)}
@@ -86,7 +93,6 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
   const image = useRef<HTMLImageElement>(null);
   const [decoded, setDecoded] = useState(false);
   const a = entry.review?.savedAt ? entry.review.analysis : null;
-  useEffect(() => { setDecoded(false); setOverlay(""); setMaskError(""); }, [entry.src]);
   useEffect(() => {
     if (!decoded || !a || !entry.review || !image.current) return;
     const abort = new AbortController();
@@ -134,12 +140,12 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
         {imageId ? <BioClipEvidence ai={ai} src={decoded && overlay && !maskError ? entry.src : ""} width={size.width} height={size.height}
           reference={{ imageId, treeSampleId, direction }} /> : null}
         <GuidedGroupCoverage config={entry.review!.config} counts={a.counts} total={a.total} />
-      </> : <p>{imageId ? "La foto está guardada; falta confirmar su análisis en este flujo." : "Completa esta orientación para añadir su análisis."}</p>}
+      </> : <p>{entry.reviewFailed ? "No se pudo leer el análisis guardado. Reintenta antes de editar esta vista." : imageId ? "La foto está guardada; falta confirmar su análisis en este flujo." : "Completa esta orientación para añadir su análisis."}</p>}
       {entry.error || maskError ? <p role="alert" style={{ color: "#9c341f" }}>{entry.error || maskError}</p> : null}
     </div>
     <div className="tree-summary-actions" style={{ flexShrink: 0 }}>
       {!expanded && entry.src ? <button onClick={onExpand} aria-label={`Ampliar ${name}`}>Ampliar</button> : null}
-      <button className="g-primary" disabled={entry.loading} onClick={onEdit} aria-label={`${a ? "Revisar" : "Completar"} ${name}`}>{a ? "Revisar / editar" : "Completar vista"}</button>
+      <button className="g-primary" disabled={entry.loading || entry.reviewFailed} onClick={onEdit} aria-label={`${a ? "Revisar" : "Completar"} ${name}`}>{a ? "Revisar / editar" : "Completar vista"}</button>
       {entry.error ? <button onClick={onRetry}>Reintentar lectura</button> : null}
     </div>
   </article>;

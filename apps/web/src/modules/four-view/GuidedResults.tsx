@@ -12,6 +12,20 @@ export function savedViewLabel(view: SavedViewResult) {
   if (view.state === "saved") return `${view.coverage!.toFixed(1)}%`;
   return { missing: "Sin foto", pending: "Sin guardar", invalid: "Revisar guardado" }[view.state];
 }
+export function GuidedTreeStatus({ row, loading = false, error = false }: {
+  row?: GuidedTreeResult; loading?: boolean; error?: boolean;
+}) {
+  const verified = !loading && !error;
+  const complete = verified && row?.complete;
+  const pending = row ? DIRECTIONS.filter(d => row.views[d].state !== "saved") : [];
+  return <div className="space-y-1">
+    <span className={`inline-flex rounded px-3 py-1 text-sm ${complete ? "bg-emerald-100 text-emerald-900" : verified ? "bg-amber-50 text-amber-900" : "bg-stone-100 text-stone-700"}`}>
+      {error ? "Guardado sin verificar" : loading ? "Consultando guardado…" : row
+        ? `${row.savedCount}/4 vistas guardadas · ${complete ? "Completo" : "Pendiente"}` : "Sin capturas guardadas · Pendiente"}
+    </span>
+    {verified && pending.length ? <p className="text-xs text-amber-900">Pendientes: {pending.map(d => `${DIRECTION_LABELS[d]} (${savedViewLabel(row!.views[d]).toLowerCase()})`).join(", ")}</p> : null}
+  </div>;
+}
 export function GuidedProgress({ rows }: { rows: GuidedTreeResult[] }) {
   const progress = guidedProgress(rows);
   return <div className="grid grid-cols-2 gap-3 md:grid-cols-4" aria-label="Progreso de las capturas guiadas">
@@ -71,12 +85,11 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental
           <p className="text-sm">{row.project.name} · {row.site.name}</p>
           <a className="text-sm underline" href={`/jornada/${encodeURIComponent(row.event.id)}`}>{row.event.name} · {row.event.sampled_at.slice(0, 10)}</a>
           <a className="mt-2 block font-semibold underline" href={journeyHref(row.event.id)}>Abrir resumen de esta jornada</a>
-        </div><span className={`rounded-full px-3 py-1 text-sm ${row.complete ? "bg-emerald-100" : "bg-amber-50"}`}>
-          {row.savedCount}/4 vistas guardadas{row.complete ? " · Completo" : " · Pendiente"}</span></div>
+        </div><GuidedTreeStatus row={row} /></div>
         <dl className="my-4 grid grid-cols-2 gap-2 md:grid-cols-4">{DIRECTIONS.map(d => <div key={d} className="rounded-lg bg-stone-50 p-3">
           <dt className="text-sm">{DIRECTION_LABELS[d]}</dt><dd className="text-lg font-semibold">{savedViewLabel(row.views[d])}</dd>
         </div>)}</dl>
-        <div className="flex flex-wrap gap-3"><a className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }} href={guidedResultHref(row)}>Ver las 4 vistas y el 360°</a>
+        <div className="flex flex-wrap gap-3"><a className="rounded px-4 py-2 font-semibold text-white" style={{ background: "var(--ld-sidebar, #173D35)" }} href={guidedResultHref(row)}>{row.complete ? "Ver las 4 vistas y el 360°" : "Ver vistas guardadas y pendientes"}</a>
           <a className="rounded border px-4 py-2" href={ecologyHref(row.event.id,row.sampleId)}>Análisis de diversidad</a>
           {!row.complete ? <a className="rounded border px-4 py-2" href={guidedResultHref(row, false)}>Continuar captura</a> : null}</div>
         {row.lastSavedAt ? <p className="mt-3 text-xs text-stone-600">Último guardado: {new Date(row.lastSavedAt).toLocaleString("es-DO")}</p> : null}

@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "incremental": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2022",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "/tmp/lichendr-proxy-tests",
+    "allowImportingTsExtensions": false
+  },
+  "files": [
+    "src/types/heic-decode.d.ts",
+    "src/lib/vision-analysis-image.ts",
+    "src/lib/vision-analysis-image.test.ts",
+    "src/lib/vision-analysis-proxy.ts",
+    "src/lib/vision-analysis-proxy.test.ts"
+  ],
+  "include": []
+}

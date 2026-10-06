@@ -10,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { useSearchParams } from "next/navigation";
+import ContextTrail from "@/components/ContextTrail";
 import PageHeader from "@/components/PageHeader";
 import { GuidedCapture } from "./GuidedCapture";
 import { guidedServices } from "./guided-service";
@@ -1222,6 +1223,7 @@ export default function FourViewWorkflow() {
 
       <section className="rounded-lg border p-5" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)" }}>
         <h2 className="text-base font-semibold">Estás trabajando en</h2>
+        <ContextTrail className="mt-2" entries={contextEntries} />
         <dl className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {contextEntries.map((entry) => (
             <div key={entry.label}>

@@ -5,6 +5,12 @@ import { buildGuidedResults, latestResultSeries, type ResultSource } from "./gui
 
 const PAGE = 200;
 const unavailable = () => new Error("No se pudieron leer los análisis guardados. Tus fotos siguen guardadas; reintenta para ver los resultados.");
+export class SessionMissingError extends Error {
+  constructor() {
+    super("No hay una sesión activa.");
+    this.name = "SessionMissingError";
+  }
+}
 
 // Bounded, paginated read: never silently turn a database error/truncated page
 // into an empty jornada. No model calls, metrics RPCs or annotation mutations.
@@ -24,7 +30,8 @@ export async function readResultPages<T>(read: (from: number, to: number) => Pro
 export async function loadGuidedResults(db: SupabaseClient, eventId?: string, signal?: AbortSignal) {
   const { data: auth, error } = await db.auth.getUser();
   signal?.throwIfAborted();
-  if (error || !auth.user) throw new Error("No se pudo recuperar tu sesión. Abre tu jornada con la misma cuenta o navegador donde guardaste las fotos.");
+  if (error?.name === "AuthSessionMissingError" || !auth.user) throw new SessionMissingError();
+  if (error) throw new Error("No se pudo recuperar tu sesión. Reintenta para cargar tus datos.");
   const ownerId = auth.user.id;
   async function read<K extends keyof ResultSource>(table: string, fields: string, _kind: K,
     filter?: { column: string; ids: string[] }, own = false): Promise<ResultSource[K]> {

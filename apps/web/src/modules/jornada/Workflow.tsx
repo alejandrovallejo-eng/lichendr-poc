@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import ContextTrail from "@/components/ContextTrail";
 import PageHeader from "@/components/PageHeader";
 import { useGuidedResults } from "../four-view/use-guided-results";
 import { GuidedProgress } from "../four-view/GuidedResults";
@@ -252,6 +253,11 @@ export default function JornadaWorkflow({ eventId }: Props) {
         title="Árboles de esta jornada"
         subtitle={`${context.project.name} · ${context.site.name} · ${formatLocalDate(context.event.sampledAt)}`}
       />
+      <ContextTrail className="-mt-4 mb-4" entries={[
+        { label: "Proyecto", value: context.project.name },
+        { label: "Sitio", value: context.site.name },
+        { label: "Jornada", value: context.event.name },
+      ]} />
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}>
         <div><p className="font-semibold">Jornada {context.event.status === "completed" ? "cerrada" : "abierta"}</p>

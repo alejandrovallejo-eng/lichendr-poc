@@ -1,21 +1,34 @@
 "use client";
-import React from "react";
 import Link from "next/link";
-import navigation from "@/config/navigation";
-
+import { usePathname } from "next/navigation";
+import navigation, { isNavActive } from "@/config/navigation";
+import NavIcon from "./NavIcon";
 export default function MobileNavigation() {
+  const pathname = usePathname();
   return (
-    <nav className="flex gap-2 md:hidden overflow-x-auto py-2" style={{ background: "transparent" }}>
-      {navigation.map((n) => (
-        <Link
-          key={n.path}
-          href={n.path}
-          className="px-3 py-2 rounded-md"
-          style={{ background: "var(--ld-sidebar)", color: "white" }}
-        >
-          {n.label}
-        </Link>
-      ))}
-    </nav>
+    <details className="ld-mobile-nav" key={pathname}>
+      <summary>
+        <span>
+          <NavIcon name="folder" /> Explorar LichenDR
+        </span>
+        <span aria-hidden="true">⌄</span>
+      </summary>
+      <nav aria-label="Navegación móvil">
+        {navigation.map((item) => {
+          const active = isNavActive(pathname, item.path);
+          return (
+            <Link
+              key={item.path}
+              href={item.path}
+              aria-current={active ? "page" : undefined}
+              className={`ld-mobile-link${active ? " is-active" : ""}`}
+            >
+              <NavIcon name={item.icon} />
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
+    </details>
   );
 }

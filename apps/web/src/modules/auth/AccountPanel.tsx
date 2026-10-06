@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import PageHeader from "@/components/PageHeader";
 import { supabase } from "@/lib/supabase/client";
 import { authMessage, type AccountUser } from "./google-policy";
 
@@ -36,7 +37,7 @@ export default function AccountPanel() {
   }, []);
   const connected = user && !user.is_anonymous;
   return <section className="mx-auto max-w-2xl space-y-5">
-    <div><h1 className="text-2xl font-semibold">Mi cuenta</h1><p className="mt-2 text-sm">Vuelve a tus proyectos desde otro dispositivo con tu cuenta de Google.</p></div>
+    <PageHeader title="Mi cuenta" subtitle="Vuelve a tus proyectos desde otro dispositivo con tu cuenta de Google." />
     {message && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">{message}</p>}
     <div className="rounded-2xl border border-slate-200 bg-white p-6 space-y-4">
       {loading ? <p role="status">Comprobando tu cuenta…</p> : failed ? <p role="alert">No pudimos comprobar tu sesión. Recarga esta página; no hemos cerrado ni cambiado tu cuenta.</p> : <>

@@ -263,8 +263,8 @@ export default function AnalysisDashboard() {
   }
 
   return (
-    <main className="space-y-6" style={{ color: "var(--ld-text)" }}>
-      <header>
+    <div className="space-y-6" style={{ color: "var(--ld-text)" }}>
+      <header className="ld-page-header">
         <h1 className="text-2xl font-semibold">Análisis</h1>
         <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Cobertura observada de líquenes · Resultado descriptivo · Estimación provisional</p>
         <p className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-950">{SCIENTIFIC_NOTICE}</p>
@@ -419,6 +419,6 @@ export default function AnalysisDashboard() {
           </section>
         </>
       )}
-    </main>
+    </div>
   );
 }

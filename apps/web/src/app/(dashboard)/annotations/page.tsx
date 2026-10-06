@@ -1,11 +1,11 @@
-export const dynamic = "force-dynamic";
-import { Suspense } from "react";
-import AnnotationsEntry from "@/modules/annotations/AnnotationsEntry";
+import ConnectionNotice from "@/components/ConnectionNotice";
 
-export default function AnnotationsPage() {
-  return (
-    <Suspense fallback={<div className="rounded border p-4 text-sm" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>Cargando flujo de anotación...</div>}>
-      <AnnotationsEntry />
-    </Suspense>
-  );
+export const dynamic = "force-dynamic";
+
+export default async function Page() {
+  if (process.env.LICHENDR_PREVIEW_ONLY === "1" || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+    return <ConnectionNotice previewOnly={process.env.LICHENDR_PREVIEW_ONLY === "1"} />;
+  }
+  const { default: Content } = await import("./route-content");
+  return <Content />;
 }

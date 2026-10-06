@@ -3,6 +3,15 @@ import type { ManualMeasurementMode } from "./manual-flow";
 
 export type AnalyzeViewAction = "detect" | "confirm_corners" | "analyze_confirmed";
 
+export async function readStoredProxyResponse(response: Response): Promise<void> {
+  if (response.ok) return;
+  let payload: { error?: unknown } | null = null;
+  try { payload = await response.json(); } catch { /* A gateway may return HTML. */ }
+  throw new Error(typeof payload?.error === "string"
+    ? payload.error
+    : "La fotografía original sigue guardada. No se pudo preparar su copia de análisis; comprueba la conexión y reintenta.");
+}
+
 export function storedProxyRequest(imageId: string): { headers: { "Content-Type": string }; body: string } {
   return {
     headers: { "Content-Type": "application/json" },
@@ -42,11 +51,12 @@ export async function readStoredAnalysisResponse(response: Response): Promise<Vi
     const detail = error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
       ? (error as { message: string }).message
       : typeof error === "string" ? error : null;
-    const message = response.status === 503
+    const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+    const message = code === "proxy_signing_not_configured" && detail ? detail : (response.status === 503
       ? "La fotografía quedó guardada. La IA no está disponible en este momento; puedes reintentar sin volver a tomarla."
       : response.status === 413
         ? "La referencia de la fotografía fue rechazada por tamaño. La imagen original sigue guardada y puedes reintentar."
-        : detail ?? "No se pudo procesar la vista. La fotografía original sigue guardada para reintentar.";
+        : detail ?? "No se pudo procesar la vista. La fotografía original sigue guardada para reintentar.");
     throw new Error(message);
   }
   return body as VisionViewResult;

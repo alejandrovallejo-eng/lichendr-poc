@@ -46,7 +46,7 @@ export function createGuidedCloudStore(db: SupabaseClient): GuidedCloudStore {
         p_image_id: ref.imageId, p_tree_sample_id: ref.treeSampleId, p_direction: ref.direction,
         p_review: valid, p_expected_revision: expectedRevision,
       }).single();
-      if (error?.code === "40001") throw new Error("Esta foto cambió en otra pestaña. Tu borrador se conserva aquí; recarga para revisar la versión más reciente antes de guardar.");
+      if ((error?.code === "40001" || error?.code === "PT409")) throw new Error("Esta foto cambió en otra pestaña. Tu borrador se conserva aquí; recarga para revisar la versión más reciente antes de guardar.");
       if (error) throw unavailable();
       return parseCloudReview(data);
     },

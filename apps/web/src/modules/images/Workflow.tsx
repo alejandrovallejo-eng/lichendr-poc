@@ -436,10 +436,10 @@ export default function ImagesWorkflow() {
               className="rounded border px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
               style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}
             >
-              {isSavingBatch ? "Guardando..." : "Guardar imágenes en Supabase"}
+              {isSavingBatch ? "Guardando…" : "Guardar imágenes"}
             </button>
             <label className="inline-flex cursor-pointer items-center justify-center rounded border px-4 py-2" style={{ borderColor: "var(--ld-border)", background: "var(--ld-sand)", color: "var(--ld-text)" }}>
-              <span>{loadingFiles ? "Leyendo archivos..." : "Elegir imágenes"}</span>
+              <span>{loadingFiles ? "Leyendo archivos…" : "Elegir imágenes"}</span>
               <input type="file" accept=".jpg,.jpeg,.png,image/jpeg,image/png" multiple className="hidden" onChange={handleFileSelection} />
             </label>
           </div>

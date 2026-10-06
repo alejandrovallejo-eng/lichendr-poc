@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { ensureAnalysisProxy } from "@/lib/vision-analysis-proxy";
+import { analysisProxyFailure, ensureAnalysisProxy } from "@/lib/vision-analysis-proxy";
 
 const MAX_REFERENCE_BYTES = 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -65,10 +65,8 @@ export async function POST(request: NextRequest) {
       proxyWidth: proxy.manifest.proxyWidth,
       proxyHeight: proxy.manifest.proxyHeight,
     });
-  } catch {
-    return Response.json(
-      { error: "No se pudo preparar automáticamente la fotografía para la IA. El original sigue guardado." },
-      { status: 422 },
-    );
+  } catch (error) {
+    const failure = analysisProxyFailure(error);
+    return Response.json(failure.body, { status: failure.status });
   }
 }

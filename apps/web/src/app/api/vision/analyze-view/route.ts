@@ -3,6 +3,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { VISION_SERVICE_URL, visionAuthHeaders } from "@/lib/vision";
 import {
   ANALYSIS_PROXY_BUCKET,
+  analysisProxyFailure,
   ensureAnalysisProxy,
   validSignedStorageUrl,
   validateAnalysisSource,
@@ -86,11 +87,9 @@ export async function POST(request: NextRequest) {
   let proxy: Awaited<ReturnType<typeof ensureAnalysisProxy>>;
   try {
     proxy = await ensureAnalysisProxy(supabase, authData.user.id, imageId, image);
-  } catch {
-    return Response.json(
-      { error: "La fotografía original sigue guardada, pero no se pudo preparar automáticamente para la IA." },
-      { status: 422 },
-    );
+  } catch (error) {
+    const failure = analysisProxyFailure(error);
+    return Response.json(failure.body, { status: failure.status });
   }
   try {
     const response = await analyzeWithColdStartRetry();

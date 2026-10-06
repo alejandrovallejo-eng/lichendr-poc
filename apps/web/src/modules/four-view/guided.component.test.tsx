@@ -168,7 +168,7 @@ test("lichen-only analysis does not require bark and never calls unmatched pixel
     { version:1,tolerance:5,samples:[{x:0,y:0,rgb:[80,170,80],label:3}] },undefined,"lichen-only");
   assert.equal(result.lichen,1); assert.equal(result.total,2); assert.equal(result.counts[2],0); assert.equal(result.counts[1],1);
 });
-for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only lichen samples, North to East; AI unavailable=${aiUnavailable}`, async () => {
+for (const aiUnavailable of [false, true, "disabled"] as const) test(`wizard cloud save/restore, only lichen samples, North to East; AI unavailable=${aiUnavailable}`, async () => {
   localStorage.clear();
   const oldContext=HTMLCanvasElement.prototype.getContext, oldData=HTMLCanvasElement.prototype.toDataURL;
   HTMLCanvasElement.prototype.getContext = (() => ({ drawImage(){},getImageData(_x:number,_y:number,w:number,h:number){
@@ -191,7 +191,7 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
   const click=async(text:string)=>{await act(async()=>button(text).click());};
   const point=async(x:number,y:number)=>{await act(async()=>host.querySelector("svg")!.dispatchEvent(new MouseEvent("pointerdown",{bubbles:true,clientX:x,clientY:y})));};
   try {
-    await act(async()=>{root.render(createElement(GuidedCapture,{context:{projectId:"project",siteId:"site",eventId:"event",treeId:"tree"},contextLabel:"My tree",backHref:"/jornada",services,checkSamples:async()=>{calls++;if(aiUnavailable)throw new Error("Worker unavailable");return ai;}}));});
+    await act(async()=>{root.render(createElement(GuidedCapture,{context:{projectId:"project",siteId:"site",eventId:"event",treeId:"tree"},contextLabel:"My tree",backHref:"/jornada",services,capabilities:{segmentation:{enabled:true,configured:true},classification:{enabled:aiUnavailable!=="disabled",configured:true}},checkSamples:async()=>{calls++;if(aiUnavailable)throw new Error("Worker unavailable");return ai;}}));});
     await act(async()=>{host.querySelector("img")!.dispatchEvent(new Event("load",{bubbles:true}));});
     assert.deepEqual(photos,[image]);assert.equal(host.querySelectorAll("svg").length,1);assert.equal(calls,0);
     await click("Continuar");await click("Continuar");assert.match(host.textContent!,/Añade al menos tres puntos/);
@@ -208,9 +208,9 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     assert.ok(host.querySelector('[aria-label="Punto del color elegido"]'));
     await click("Aceptar este tono");assert.equal(button("Analizar selección").disabled,false);
     await click("Analizar selección");
-    for(let i=0;i<80 && !host.textContent!.includes(aiUnavailable?"Worker unavailable":"Revisa y guarda");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
-    if(aiUnavailable){assert.match(host.textContent!,/Sin revisión de IA/);await click("Continuar sin IA");}
-    assert.equal(calls,1);assert.match(host.textContent!,/100.0 %/);assert.equal(host.querySelectorAll("svg").length,1);
+    for(let i=0;i<80 && !host.textContent!.includes(aiUnavailable===true?"Worker unavailable":"Revisa y guarda");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
+    if(aiUnavailable===true){assert.match(host.textContent!,/Sin revisión de IA/);await click("Continuar sin IA");}
+    assert.equal(calls,aiUnavailable==="disabled"?0:1);assert.match(host.textContent!,/100.0 %/);assert.equal(host.querySelectorAll("svg").length,1);
     failSave=true;
     await click("Guardar y pasar a Este");assert.match(host.textContent!,/No avanzamos/);assert.match(host.textContent!,/Norte · 1 de 4/);
     failSave=false;
@@ -227,7 +227,7 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     localStorage.clear();
     await click("N ✓");
     assert.match(host.textContent!,/Esta vista ya tiene una revisión guardada/);
-    assert.match(host.textContent!,/Guardado en la nube/);
+    assert.match(host.textContent!,/Revisión confirmada en la nube/);
     assert.doesNotMatch(host.textContent!,/Recuperar borrador local distinto/);
     assert.equal(host.querySelectorAll("svg circle").length,0); // still on photo step
     await act(async()=>{host.querySelector("img")!.dispatchEvent(new Event("load",{bubbles:true}));});
@@ -236,7 +236,7 @@ for (const aiUnavailable of [false, true]) test(`wizard cloud save/restore, only
     assert.match(host.textContent!,/100.0 %/);
     await click("Atrás");await click("Atrás");
     assert.match(host.textContent!,/4 puntos/); // restored without local cache
-    assert.equal(calls,1); // restore never invokes AI
+    assert.equal(calls,aiUnavailable==="disabled"?0:1); // restore never invokes AI
   } finally { await act(async()=>root.unmount());host.remove();HTMLCanvasElement.prototype.getContext=oldContext;HTMLCanvasElement.prototype.toDataURL=oldData; }
 });
 
@@ -328,7 +328,7 @@ test("saving the last missing direction opens all four views; summary edit/save 
   const click=async(text:string)=>{const button=Array.from(host.querySelectorAll("button")).find(b=>b.textContent===text);assert.ok(button,text);await act(async()=>button.click());};
   const loadImage=async()=>{await act(async()=>host.querySelector("img")!.dispatchEvent(new Event("load",{bubbles:true})));for(let i=0;i<80;i++)await act(async()=>{await new Promise(r=>setTimeout(r,5));});};
   try {
-    await act(async()=>root.render(createElement(GuidedCapture,{context:{projectId:"p",siteId:"s",eventId:"e",treeId:"t"},contextLabel:"Project / Day / Tree",backHref:"/jornada/e",services,checkSamples:async()=>{aiCalls++;return {context:{imageId:"n",treeSampleId:"sample",direction:"N"},suggestions:[{regionId:"sample-0",ranking:[{label:"lichen"}]}]} as SuggestionResponse;}})));
+    await act(async()=>root.render(createElement(GuidedCapture,{context:{projectId:"p",siteId:"s",eventId:"e",treeId:"t"},contextLabel:"Project / Day / Tree",backHref:"/jornada/e",services,capabilities:{segmentation:{enabled:true,configured:true},classification:{enabled:true,configured:true}},checkSamples:async()=>{aiCalls++;return {context:{imageId:"n",treeSampleId:"sample",direction:"N"},suggestions:[{regionId:"sample-0",ranking:[{label:"lichen"}]}]} as SuggestionResponse;}})));
     await loadImage();await click("Continuar");await click("Continuar");
     for(let i=0;i<160 && host.textContent!.includes("Preparando selección");i++) await act(async()=>{await new Promise(r=>setTimeout(r,10));});
     await click("Analizar selección");

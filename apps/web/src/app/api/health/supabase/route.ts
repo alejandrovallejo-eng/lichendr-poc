@@ -1,4 +1,5 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { checkSupabaseConnection } from "@/lib/supabase/readiness.mjs";
 
 export const dynamic = "force-dynamic";
 
@@ -11,26 +12,26 @@ export async function GET() {
       JSON.stringify({ error: "Supabase environment not configured" }),
       {
         status: 500,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "Cache-Control": "private, no-store" },
       }
     );
   }
 
-  const supabase = await createSupabaseServerClient();
-  const { error } = await supabase.auth.getSession();
-
-  if (error) {
-    return new Response(
-      JSON.stringify({ error: "Supabase did not respond successfully" }),
-      {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      }
-    );
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { data } = await supabase.auth.getSession();
+    const result = await checkSupabaseConnection({
+      url: supabaseUrl,
+      key: supabaseKey,
+      accessToken: data.session?.access_token,
+    });
+    return Response.json(result, {
+      status: result.status === "unavailable" ? 502 : result.status === "degraded" ? 503 : 200,
+      headers: { "Cache-Control": "private, no-store" },
+    });
+  } catch {
+    return Response.json({ status: "unavailable", error: "Supabase check failed" }, {
+      status: 502, headers: { "Cache-Control": "private, no-store" },
+    });
   }
-
-  return new Response(JSON.stringify({ status: "ok", supabase: "reachable" }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
 }

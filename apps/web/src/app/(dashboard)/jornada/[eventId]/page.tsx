@@ -1,16 +1,15 @@
-import JornadaWorkflow from "@/modules/jornada/Workflow";
-
-export const dynamic = "force-dynamic";
+import ConnectionNotice from "@/components/ConnectionNotice";
 
 export const metadata = {
   title: "Árboles de la jornada · LichenDR",
 };
 
-export default async function JornadaPage({
-  params,
-}: {
-  params: Promise<{ eventId: string }>;
-}) {
-  const { eventId } = await params;
-  return <JornadaWorkflow eventId={eventId} />;
+export const dynamic = "force-dynamic";
+
+export default async function Page(props: { params: Promise<{ eventId: string }> }) {
+  if (process.env.LICHENDR_PREVIEW_ONLY === "1" || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+    return <ConnectionNotice previewOnly={process.env.LICHENDR_PREVIEW_ONLY === "1"} />;
+  }
+  const { default: Content } = await import("./route-content");
+  return <Content {...props} />;
 }

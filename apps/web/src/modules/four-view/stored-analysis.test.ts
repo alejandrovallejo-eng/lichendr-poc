@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readStoredAnalysisResponse, storedAnalysisRequest, storedProxyRequest } from "./stored-analysis.ts";
+import { readStoredAnalysisResponse, readStoredProxyResponse, storedAnalysisRequest, storedProxyRequest } from "./stored-analysis.ts";
 
 const imageId = "123e4567-e89b-42d3-a456-426614174000";
+
+test("shows preparation configuration errors and survives non-JSON gateway responses", async () => {
+  await assert.rejects(readStoredProxyResponse(Response.json({ error: "Falta configurar la conexión de IA del servidor." }, { status: 503 })), /Falta configurar/);
+  await assert.rejects(readStoredProxyResponse(new Response("<html>offline</html>", { status: 502 })), /original sigue guardada.*reintenta/);
+  await readStoredProxyResponse(Response.json({ status: "ready" }));
+});
 
 test("serializes only a small stored-image reference for analysis", () => {
   const request = storedAnalysisRequest(imageId);

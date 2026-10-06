@@ -727,7 +727,7 @@ export default function PrepareDayWorkflow() {
     <div>
       <PageHeader
         title="Preparar jornada"
-        subtitle="Proyecto, sitio y jornada en una sola pantalla. Los datos existentes se preservan."
+        subtitle="Elige o crea el proyecto, define el sitio y prepara la jornada. Después podrás registrar los árboles."
       />
 
       {loadingProjects ? (

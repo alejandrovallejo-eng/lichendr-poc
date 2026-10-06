@@ -1,5 +1,6 @@
 "use client";
 
+import EmptyState from "../../components/EmptyState";
 import { useState } from "react";
 import { DIRECTIONS, DIRECTION_LABELS } from "./types";
 import { filterGuidedResults, guidedProgress, guidedResultHref, type GuidedTreeResult, type ResultFilters, type SavedViewResult } from "./guided-results";
@@ -46,7 +47,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental
       </select>
     </label>;
   return <section className="space-y-5">
-    <header><h1 className="text-2xl font-bold">{environmental ? "Datos para la evaluación ambiental" : "Resultados por jornada"}</h1>
+    <header className="ld-page-header"><h1 className="text-2xl font-bold">{environmental ? "Datos para la evaluación ambiental" : "Resultados por jornada"}</h1>
       <p className="mt-1 text-sm">Elige una jornada para ver juntos sus árboles, cuatro vistas, cobertura y diversidad.</p>
       {environmental ? <p className="mt-2 rounded-lg bg-emerald-50 p-3 text-sm">Aquí se incluyen tus capturas guiadas. La calidad del aire todavía no está estimada; los datos guardados se muestran sin convertirlos en una clasificación ambiental.</p> : null}</header>
     <form action={resultPath} method="get" className="grid items-end gap-3 rounded-lg border p-4 md:grid-cols-4" style={{ borderColor: "var(--ld-border)" }}>
@@ -63,8 +64,7 @@ export function GuidedResultsView({ rows, filters = {}, onRefresh, environmental
     </div>
     <GuidedProgress rows={selected} />
     <p className="rounded-lg bg-amber-50 p-3 text-sm">Cobertura estimada por colores dentro del tronco delimitado en cada foto. No es cobertura de todo el árbol ni un índice de calidad del aire. BioCLIP revisa ejemplos, no valida toda la máscara. No se suman ni se promedian píxeles entre fotos.</p>
-    {selected.length === 0 ? <div className="rounded-lg border p-6"><p>No hay evaluaciones de árboles para esta selección.</p>
-      <a className="mt-2 inline-block underline" href="/preparar-jornada">Ir a preparar jornada</a></div> :
+    {selected.length === 0 ? <div className="rounded-lg border bg-white p-6"><EmptyState title="No hay evaluaciones de árboles para esta selección" icon="tree"><p>Prueba otra jornada en los filtros o prepara una nueva para registrar sus árboles y cuatro vistas.</p><a className="ld-text-link" href="/preparar-jornada">Ir a preparar jornada</a></EmptyState></div> :
       <div className="space-y-4">{selected.map(row => <article key={row.sampleId} className="rounded-xl border bg-white p-4" style={{ borderColor: "var(--ld-border)" }}>
         <div className="flex flex-wrap items-start justify-between gap-3"><div>
           <h2 className="text-lg font-bold">{row.tree.code}</h2>

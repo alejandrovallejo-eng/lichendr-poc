@@ -1,7 +1,15 @@
 # Deployment Guide
 
 This document describes how to deploy LichenDR to production:
-**Next.js on Vercel** + **Python/FastAPI + MobileSAM on Render**.
+**Next.js on Vercel** + **MobileSAM on Render** + **BioCLIP on private Cloud Run**.
+
+Local AI authentication, feature flags and real workflow verification are
+documented in [AI_SETUP.md](AI_SETUP.md).
+
+Database provisioning, real connection checks, migration state and local Auth
+callbacks are documented in [DATABASE_SETUP.md](DATABASE_SETUP.md). The local
+frontend now uses the existing hosted database with visual-preview mode disabled;
+this does not deploy the frontend changes to Vercel.
 
 ---
 
@@ -61,8 +69,10 @@ reach the browser.
 | SHA-256   | `6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f` |
 | Licence   | Apache 2.0 |
 
-The checkpoint is **not committed to Git**. It is downloaded automatically when the
-Docker container starts (see `services/vision/docker-entrypoint.sh`).
+The checkpoint is **not committed to Git**. It is downloaded automatically when
+the Docker image builds. The current ONNX runtime includes verified graphs
+in the image and does not download weights at startup; the optional Torch
+entrypoint still downloads the checkpoint when absent.
 
 **Verify after the first pull:**
 
@@ -97,8 +107,9 @@ Store the output somewhere safe (password manager). **Do not commit it.**
 
 ### Environment variables
 
-Set these in **Vercel → Project → Settings → Environment Variables**.
-Apply to Production, Preview and Development (or as appropriate).
+Set these in **Vercel → Project → Settings → Environment Variables**. Scope
+each value to the environment that owns its resource; do not share the Production
+Supabase URL/key with Preview.
 
 | Variable | Value |
 |----------|-------|
@@ -106,6 +117,27 @@ Apply to Production, Preview and Development (or as appropriate).
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Your Supabase publishable (anon) key |
 | `VISION_SERVICE_URL` | The Render service URL (see below), e.g. `https://lichendr-vision.onrender.com` |
 | `VISION_SERVICE_TOKEN` | The shared secret generated above |
+
+### Preview authentication
+
+The Supabase Production Auth allowlist contains the Production callback and one
+specific Vercel branch Preview callback. For authenticated review of PR #27, use
+the stable **Preview** link in the Vercel/GitHub PR comment. A commit-specific
+deployment URL has a different hostname; Supabase falls back to the Production
+Site URL when that hostname is not allowlisted. Check the callback host against
+**Authentication → URL Configuration** before using Google sign-in from another
+Preview URL. Do not add a broad `*.vercel.app` redirect pattern.
+
+Review each Preview scope before testing: historical branches may use different databases. The final Production uses the owner-selected working database `taqdmdghdqnczioxhajb`. The former Production database `nioqaweibbtwxwpipqpe` is preserved. This working environment contains real data and the shared vision
+service. Restrict tests to clearly marked records and avoid changing existing
+Production data. For ongoing team use, move Preview to a dedicated non-production
+Supabase project and a separately configured vision service before enabling
+general data-entry testing there.
+
+The current Supabase Free plan does not include scheduled project backups. Before
+relying on Production for team data, arrange a backup plan that covers both the
+database and private Storage objects, and test a restore. Database backups alone
+do not include Storage file bytes.
 
 > **`VISION_SERVICE_TOKEN` must NOT start with `NEXT_PUBLIC_`.** It is read
 > server-side only and is never included in the browser bundle.
@@ -185,81 +217,56 @@ service page (format: `https://lichendr-vision.onrender.com`). Set this as
 
 The Render Free plan **spins down** after ~15 minutes of inactivity. The next
 request will wake the service, but the first response may take 30–120 seconds
-(download checkpoint + load model). The Next.js analysis route checks readiness
+(load the model graphs). The Next.js analysis route checks readiness
 and performs one automatic retry before returning a recoverable error.
 
 ---
 
 ## Memory and timing measurements
 
-> These figures were measured on a Linux x86_64 host (Python 3.12, PyTorch 2.13 with CUDA
-> libraries installed — the CUDA runtime inflates RSS; a CPU-only Docker container will
-> be lower but the inference workload figures are representative).
+The older PyTorch/CUDA RSS measurements do not describe the current deployed
+runtime. Docker now exports the pinned MobileSAM checkpoint to FP32 ONNX at
+build time; the final runtime includes neither Torch nor Torchvision.
 
-Render Free provides approximately **512 MB RAM**.
+The build runs three real inference cycles on Linux and fails if the complete
+process peak exceeds 450 MiB. This is a regression check, not a guarantee for
+all input images or calibration workloads. Keep one worker and the existing
+serialization and input guards.
 
-| Metric | Measured value | Notes |
-|--------|---------------|-------|
-| Baseline RSS (Python + imports) | 10 MB | |
-| RSS after MobileSAM loaded | **776 MB** | Includes CUDA runtime overhead |
-| Peak RSS during inference | **1131 MB** | `prepare` (feature extraction) |
-| Model load time | 2.5 s | From `load_model()` call |
-| First `prepare` call | 2482 ms | Image encoding + feature extraction |
-| First `segment` call | 153 ms | |
-| Subsequent `prepare` calls | ~2491 ms | No warm-up effect for CPU |
-| Subsequent `segment` calls | ~143 ms | |
-| MobileSAM checkpoint size on disk | 38.8 MB | |
+See [services/vision/LOW_MEMORY.md](../services/vision/LOW_MEMORY.md) for numerical
+comparison with the original model, local memory measurements and reproduction
+commands. Measure the actual container and verify `/prepare` and `/segment`
+before selecting a hosting plan. `/ready` alone does not prove successful
+inference. Verify the application routes with the workflow command in
+[AI_SETUP.md](AI_SETUP.md).
 
-> **Important caveat**: The measurement above used PyTorch with CUDA libraries, which adds
-> ~700 MB of shared-library RSS that would not be present in a CPU-only image.
-> With the CPU-only Docker image, post-load RSS is estimated at **350–500 MB** and
-> peak inference RSS at **500–750 MB** — still at or above the Render Free limit.
+## Final application configuration
 
-### Render Free assessment: ⚠️ INSUFFICIENT
+From `apps/web`, use `npm run dev:full` locally. Production uses:
 
-Render Free provides ~512 MB RAM. Even with a CPU-only PyTorch build, the service is
-**likely to be killed by the OOM killer** during or shortly after the first inference.
+| Variable | Production value |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://taqdmdghdqnczioxhajb.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Existing publishable key for that project |
+| `LICHENDR_PREVIEW_ONLY` | absent or `0` |
+| `VISION_SERVICE_URL` | `https://lichendr-vision-preview.onrender.com` |
+| `VISION_SERVICE_TOKEN` | Existing Render signing/service secret, server only |
+| `NEXT_PUBLIC_MOBILESAM_ASSISTANCE` | absent or `1` |
+| `NEXT_PUBLIC_BIOCLIP_SUGGESTIONS` | `1` |
+| `BIOCLIP_WORKER_URL` | `https://lichendr-bioclip-preview-5ccbk3mcba-ue.a.run.app` |
+| `BIOCLIP_WORKER_TOKEN` | Existing private worker secret, server only |
+| `BIOCLIP_PREPROCESS_MODE` | `standard_center_crop` |
+| `BIOCLIP_GOOGLE_IAM` | `1` |
+| `BIOCLIP_GOOGLE_DEVELOPER_AUTH` | absent or `0` |
 
-### Recommended plans
+The existing Vercel/Google identity federation authorizes this project’s exact
+Preview and Production subjects. Do not copy local SDK credentials or make the
+worker public. The resource names retain `preview`; verify actual authorization
+and resource scopes rather than inferring isolation from those names.
 
-| Plan | RAM | Monthly cost | Assessment |
-|------|-----|-------------|------------|
-| Free | ~512 MB | $0 | ❌ Very likely OOM killed |
-| Starter | 512 MB guaranteed | $7 | ⚠️ Tight, may OOM on peak |
-| Standard | 2 GB | $25 | ✅ Comfortable headroom |
-
-**Do not select or pay for any plan without first measuring the actual Docker container.**
-
-### How to measure the actual CPU-only container
-
-```bash
-# Build the image (CPU-only PyTorch)
-docker build -t lichendr-vision services/vision/
-
-# Start with memory limit matching Render Free
-docker run --rm -d --name lichendr-vision-test \
-  -p 8000:8000 \
-  -e VISION_SERVICE_TOKEN=test-token-local \
-  --memory=512m \
-  lichendr-vision
-
-# Wait for /ready
-until curl -sf http://localhost:8000/ready; do sleep 2; done
-
-# Measure memory after model load
-docker stats --no-stream lichendr-vision-test
-
-# Run one inference (replace frame.jpg with a real photo)
-curl -s -X POST http://localhost:8000/analyze-view \
-  -H "Authorization: ******" \
-  -F "image=@frame.jpg" | python3 -m json.tool | head -10
-
-# Measure peak memory after inference
-docker stats --no-stream lichendr-vision-test
-
-# Image size
-docker image inspect lichendr-vision --format '{{.Size}}' | \
-  awk '{printf "%.0f MB\n", $1/1024/1024}'
-
-docker stop lichendr-vision-test
-```
+Environment changes require a new deployment. Verify the deployed commit,
+Supabase callback hostname, actual four-view workflow and authenticated
+exports, not just `/ready`. Use the owner-scoped TAR and recovery procedure in
+[BACKUPS.md](BACKUPS.md). The CI workflow runs offline tests and a production
+build without administrative credentials; integration checks require explicit
+execution against the configured application.

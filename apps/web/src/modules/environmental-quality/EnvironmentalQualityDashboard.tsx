@@ -477,8 +477,8 @@ export default function EnvironmentalQualityDashboard() {
   if (error) return <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>;
 
   return (
-    <main className="space-y-6">
-      <header>
+    <div className="space-y-6">
+      <header className="ld-page-header">
         <h1 className="text-2xl font-semibold">Indicador biológico relativo</h1>
         <p className="mt-1 text-sm" style={{ color: "var(--ld-text-secondary)" }}>Preparación científica y base de calibración · Fase 1</p>
         <p className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-950">{SCIENTIFIC_NOTICE}</p>
@@ -725,6 +725,6 @@ export default function EnvironmentalQualityDashboard() {
           <ul className="list-disc space-y-1 pl-5">{REFERENCES.map(([label, href]) => <li key={href}><a href={href} target="_blank" rel="noreferrer" className="font-semibold text-emerald-800 underline">{label}</a></li>)}</ul>
         </div>
       </details>
-    </main>
+    </div>
   );
 }

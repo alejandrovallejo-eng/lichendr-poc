@@ -6,8 +6,7 @@
  * authorized Preview and Production environments. Its historical resource names
  * retain "preview"; neither public access nor a service-account key is needed.
  */
-
-
+import { createDeveloperBioclipFetch } from "./bioclip-developer-auth";
 export const BIOCLIP_WORKER_URL = process.env.BIOCLIP_WORKER_URL ?? "";
 export const BIOCLIP_WORKER_TIMEOUT_MS = 120_000;
 
@@ -42,7 +41,11 @@ export function createBioclipFetch(
 ): typeof fetch {
   const fetchImpl = options.fetchImpl ?? fetch;
   const enabled = options.enabled ?? process.env.BIOCLIP_GOOGLE_IAM === "1";
-  if (!enabled) return fetchImpl;
+  if (!enabled) {
+    return process.env.BIOCLIP_GOOGLE_DEVELOPER_AUTH === "1" && !process.env.VERCEL_ENV
+      ? createDeveloperBioclipFetch({ workerUrl: options.workerUrl ?? BIOCLIP_WORKER_URL, fetchImpl })
+      : fetchImpl;
+  }
   const environment = options.environment ?? process.env.VERCEL_ENV;
   const workerUrl = options.workerUrl ?? BIOCLIP_WORKER_URL;
   let pendingToken: Promise<string> | undefined;

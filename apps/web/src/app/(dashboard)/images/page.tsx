@@ -1,12 +1,11 @@
-import { Suspense } from "react";
-import FourViewWorkflow from "@/modules/four-view/Workflow";
+import ConnectionNotice from "@/components/ConnectionNotice";
 
 export const dynamic = "force-dynamic";
 
-export default function ImagesPage() {
-  return (
-    <Suspense fallback={<div className="rounded border p-4 text-sm" style={{ background: "var(--ld-card)", borderColor: "var(--ld-border)", color: "var(--ld-text-secondary)" }}>Cargando flujo de imágenes...</div>}>
-      <FourViewWorkflow />
-    </Suspense>
-  );
+export default async function Page() {
+  if (process.env.LICHENDR_PREVIEW_ONLY === "1" || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+    return <ConnectionNotice previewOnly={process.env.LICHENDR_PREVIEW_ONLY === "1"} />;
+  }
+  const { default: Content } = await import("./route-content");
+  return <Content />;
 }

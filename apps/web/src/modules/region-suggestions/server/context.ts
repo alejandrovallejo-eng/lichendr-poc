@@ -16,6 +16,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ANALYSIS_PROXY_BUCKET,
+  analysisProxyFailure,
   ensureAnalysisProxy,
   validSignedStorageUrl,
   validateAnalysisSource,
@@ -142,11 +143,9 @@ async function ensureSeriesReady(
         image as AnalysisSourceImage,
       );
       proxies.set(currentImageId, prepared.manifest as AnalysisProxyManifest);
-    } catch {
-      return {
-        error: "Alguna fotografía de la serie no se pudo preparar para la asistencia.",
-        status: 422,
-      };
+    } catch (error) {
+      const failure = analysisProxyFailure(error);
+      return { error: failure.body.error, status: failure.status };
     }
   }
   return { proxies };

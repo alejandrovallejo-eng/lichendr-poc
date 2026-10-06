@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # dev-with-vision.sh — start Vision Service and Next.js together
 set -euo pipefail
+export VISION_RUNTIME="${VISION_RUNTIME:-onnx}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVICE_DIR="${REPO_ROOT}/services/vision"
 VENV_DIR="${SERVICE_DIR}/.venv"
+export MOBILESAM_ONNX_DIR="${MOBILESAM_ONNX_DIR:-${SERVICE_DIR}/onnx}"
 WEB_DIR="${REPO_ROOT}/apps/web"
 VISION_HOST="127.0.0.1"
 VISION_PORT="${VISION_PORT:-8000}"
@@ -282,7 +284,10 @@ main() {
     echo ""
 
     if [ -n "${NEXTJS_PID}" ] && [ -n "${VISION_PID}" ]; then
-        wait -n "${NEXTJS_PID}" "${VISION_PID}"
+        while kill -0 "${NEXTJS_PID}" 2>/dev/null && kill -0 "${VISION_PID}" 2>/dev/null; do
+            sleep "${SERVICE_WAIT_INTERVAL}"
+        done
+        if ! kill -0 "${NEXTJS_PID}" 2>/dev/null; then wait "${NEXTJS_PID}"; else wait "${VISION_PID}"; fi
     elif [ -n "${NEXTJS_PID}" ]; then
         wait "${NEXTJS_PID}"
     elif [ -n "${VISION_PID}" ]; then

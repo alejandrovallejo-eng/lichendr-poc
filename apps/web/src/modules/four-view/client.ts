@@ -19,7 +19,7 @@ import { orderFourViewTargets } from "./navigation";
 import { hasProvisionalGeometry, storedFrameClassification } from "./assistance";
 import type { CombinedTrunkEstimate, CornerPoint, Direction, TrunkViewEstimate, VisionViewResult } from "./types";
 import type { ManualMeasurementMode } from "./manual-flow";
-import { readStoredAnalysisResponse, storedAnalysisRequest, storedProxyRequest } from "./stored-analysis";
+import { readStoredAnalysisResponse, readStoredProxyResponse, storedAnalysisRequest, storedProxyRequest } from "./stored-analysis";
 
 export const FOUR_VIEW_ALGORITHM_VERSION = "four-view-0.2.2";
 export const FOUR_VIEW_TEMPLATE_VERSION = "LICHENDR-FRAME-0.2";
@@ -97,15 +97,16 @@ export async function analyzeStoredFourViewImage(
 }
 
 export async function prepareStoredFourViewImage(imageId: string): Promise<void> {
-  const response = await fetch("/api/vision/analysis-proxy", {
-    method: "POST",
-    ...storedProxyRequest(imageId),
-  });
-  if (!response.ok) {
-    throw new Error(
-      "La fotografía original quedó guardada, pero no se pudo preparar automáticamente para la IA.",
-    );
+  let response: Response;
+  try {
+    response = await fetch("/api/vision/analysis-proxy", {
+      method: "POST",
+      ...storedProxyRequest(imageId),
+    });
+  } catch {
+    throw new Error("La fotografía original sigue guardada. Comprueba la conexión y reintenta abrirla.");
   }
+  await readStoredProxyResponse(response);
 }
 
 function traceableSource(result: VisionViewResult): string {

@@ -11,3 +11,7 @@ prototype-streamlit/**/data/
 supabase/.temp/
 services/vision/.venv/
 services/vision/checkpoints/
+services/bioclip/.venv/
+services/vision/.venv-export/
+services/vision/onnx/
+apps/web/.test-build/

@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.component-tests.json",
+  "compilerOptions": { "rootDir": "./src", "allowJs": true },
+  "include": ["src/modules/exports/export.test.ts", "src/lib/analysis-capabilities.test.ts"]
+}

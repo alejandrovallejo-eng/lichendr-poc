@@ -1,11 +1,11 @@
-export const dynamic = "force-dynamic";
-import { Suspense } from "react";
-import AnalysisEntry from "@/modules/analysis/AnalysisEntry";
+import ConnectionNotice from "@/components/ConnectionNotice";
 
-export default function AnalysisPage() {
-  return (
-    <Suspense fallback={<div className="rounded border p-4 text-sm" style={{ borderColor: "var(--ld-border)" }}>Cargando análisis…</div>}>
-      <AnalysisEntry />
-    </Suspense>
-  );
+export const dynamic = "force-dynamic";
+
+export default async function Page() {
+  if (process.env.LICHENDR_PREVIEW_ONLY === "1" || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+    return <ConnectionNotice previewOnly={process.env.LICHENDR_PREVIEW_ONLY === "1"} />;
+  }
+  const { default: Content } = await import("./route-content");
+  return <Content />;
 }

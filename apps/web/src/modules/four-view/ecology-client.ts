@@ -8,7 +8,7 @@ import { guidedServices } from "./guided-service";
 import type { Direction } from "./types";
 type NormalizedCorner = { x: number; y: number };
 const db = supabase as SupabaseClient;
-const message = (code?: string) => code === "40001" ? "Otra pestaña guardó cambios. Cierra este editor y vuelve a abrir la vista para revisar la versión actual."
+const message = (code?: string) => (code === "40001" || code === "PT409") ? "Otra pestaña guardó cambios. Cierra este editor y vuelve a abrir la vista para revisar la versión actual."
   : code === "42501" || code === "22023" ? "La foto, el tronco o la jornada cambiaron. Vuelve a los resultados y abre la vista actual."
   : "No se pudo confirmar el guardado. Conserva esta pestaña abierta y reintenta.";
 export function parseEcologyRow(data: unknown): EcologyRow {
@@ -86,7 +86,7 @@ export const ecologyServices = {
   async renameMorph(morph:Morphospecies,name:string):Promise<Morphospecies>{
     const customName=normalizeMorphName(name);
     const {data,error}=await db.rpc("rename_jornada_morphospecies",{p_event_id:morph.event_id,p_id:morph.id,p_name:customName,p_expected_revision:morph.name_revision??1}).single();
-    if(error)throw new Error(error.code==="40001"?"El nombre cambió en otra pestaña. Vuelve a abrir los resultados para ver el nombre actual antes de editarlo."
+    if(error)throw new Error((error.code==="40001"||error.code==="PT409")?"El nombre cambió en otra pestaña. Vuelve a abrir los resultados para ver el nombre actual antes de editarlo."
       :error.code==="22023"?"Usa un nombre de hasta 80 caracteres, en una sola línea."
       :error.code==="42501"?"No tienes acceso para editar este catálogo.":"No se pudo confirmar el nombre. Conserva este texto y reintenta guardar.");
     const m=data as Morphospecies;

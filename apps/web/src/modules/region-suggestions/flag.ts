@@ -7,9 +7,11 @@
 export const REGION_SUGGESTIONS_FLAG = "NEXT_PUBLIC_BIOCLIP_SUGGESTIONS";
 
 export function regionSuggestionsEnabled(
-  environment: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+  environment?: Record<string, string | undefined>,
 ): boolean {
-  return environment[REGION_SUGGESTIONS_FLAG] === "1";
+  // Next.js only bundles literal NEXT_PUBLIC accesses in browser code.
+  return environment ? environment[REGION_SUGGESTIONS_FLAG] === "1"
+    : process.env.NEXT_PUBLIC_BIOCLIP_SUGGESTIONS === "1";
 }
 
 // The worker must also be configured server-side. Both conditions are required:

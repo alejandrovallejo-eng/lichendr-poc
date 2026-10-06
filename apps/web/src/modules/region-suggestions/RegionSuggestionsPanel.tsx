@@ -81,6 +81,8 @@ export interface RegionSuggestionsPanelProps {
   direction: string;
   imageId: string;
   file: File;
+  segmentationEnabled?: boolean;
+  classificationEnabled?: boolean;
 }
 
 interface GridState {
@@ -97,6 +99,8 @@ export function RegionSuggestionsPanel({
   direction,
   imageId,
   file,
+  segmentationEnabled = true,
+  classificationEnabled = true,
 }: RegionSuggestionsPanelProps) {
   // The owner is resolved from the session, never taken from a prop or a URL.
   const [ownerId, setOwnerId] = useState<string>("");
@@ -205,10 +209,19 @@ export function RegionSuggestionsPanel({
         identityRef.current = identity;
       }
       setOwnerId(data.user.id);
-      try { setTrunkOutline(parseTrunkOutline(window.localStorage.getItem(trunkStorageKey(identity)))); }
+      let restoredOutline: TrunkPoint[] | null = null;
+      try { restoredOutline = parseTrunkOutline(window.localStorage.getItem(trunkStorageKey(identity))); setTrunkOutline(restoredOutline); }
       catch { setTrunkOutline(null); }
       const saved = loadSavedBatch(identity);
-      if (!saved) return;
+      if (!saved) {
+        const image = previewRef.current;
+        if (restoredOutline && image?.naturalWidth && image.naturalHeight) {
+          const size = workingSize(image.naturalWidth, image.naturalHeight, MAX_WORKING_SIDE);
+          setGrid({ ...size, originalWidth: image.naturalWidth, originalHeight: image.naturalHeight });
+          setRoiRle(encodeMaskRle(rasterizeTrunk(restoredOutline, size.width, size.height), size.width, size.height));
+        }
+        return;
+      }
       const restored = restoreState(saved);
       setPhase(restored.phase);
       setRegions(restored.regions);
@@ -272,13 +285,6 @@ export function RegionSuggestionsPanel({
     return next;
   }, [grid]);
 
-  // Also restores a contour saved before the first model run (no regions yet).
-  useEffect(() => {
-    if (!trunkOutline) return;
-    const working = ensureGrid();
-    if (working) setRoiRle(encodeMaskRle(rasterizeTrunk(trunkOutline, working.width, working.height), working.width, working.height));
-  }, [trunkOutline, ensureGrid]);
-
   const confirmTrunk = useCallback((points: TrunkPoint[]) => {
     const working = ensureGrid();
     if (!working) { setOutlineNotice("La fotografía todavía está cargando. Vuelve a confirmar el contorno."); return false; }
@@ -308,6 +314,11 @@ export function RegionSuggestionsPanel({
       generation: number,
       controller: AbortController,
     ) => {
+      if (!classificationEnabled) {
+        setNotice("BioCLIP está desactivado. Las máscaras quedan disponibles para revisión manual.");
+        setPhase("review");
+        return;
+      }
       const usable = candidates.filter((region) => region.maskAreaPixels > 0);
       if (usable.length === 0) {
         setFailure(
@@ -409,14 +420,14 @@ export function RegionSuggestionsPanel({
         setPhase((current2) => nextPhase(current2, { type: "worker_failed" }));
       }
     },
-    [direction, imageId, ownerId, persist, treeSampleId],
+    [classificationEnabled, direction, imageId, ownerId, persist, treeSampleId],
   );
 
   // Explicit regeneration: MobileSAM proposes again and the previous proposals
   // are REPLACED. This is destructive by definition, so it is a separate action
   // from retrying a failed classification.
   const regenerate = useCallback(async () => {
-    if (!ownerId || !trunkOutline || outlineEditing) return;
+    if (!segmentationEnabled || !ownerId || !trunkOutline || outlineEditing) return;
     generationRef.current += 1;
     const generation = generationRef.current;
     abortRef.current?.abort();
@@ -510,7 +521,7 @@ export function RegionSuggestionsPanel({
     setPhase((current) => nextPhase(current, { type: "regions_found", count: proposed.length }));
     if (proposed.length === 0) return;
     await classify(proposed, workingGrid, generation, controller);
-  }, [classify, direction, imageId, ownerId, treeSampleId, trunkOutline, outlineEditing]);
+  }, [classify, direction, imageId, ownerId, treeSampleId, trunkOutline, outlineEditing, segmentationEnabled]);
 
   // Retry of the labelling step only. Nothing is resegmented, so edited masks,
   // the ROI and the decisions already taken survive untouched.
@@ -820,7 +831,7 @@ export function RegionSuggestionsPanel({
           <button
             type="button"
             onClick={() => regions.length ? setConfirmRegeneration(true) : void regenerate()}
-            disabled={busy || !ownerId || editingPixels || !trunkOutline}
+            disabled={!segmentationEnabled || busy || !ownerId || editingPixels || !trunkOutline}
             className="min-h-11 rounded-lg bg-emerald-800 px-4 py-2 font-semibold text-white hover:bg-emerald-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? "Procesando…" : regions.length ? "Volver a proponer regiones" : "Proponer regiones (MobileSAM)"}
@@ -828,7 +839,7 @@ export function RegionSuggestionsPanel({
           <button
             type="button"
             onClick={() => void retryClassification()}
-            disabled={busy || !ownerId || regions.length === 0 || outlineEditing}
+            disabled={!classificationEnabled || busy || !ownerId || regions.length === 0 || outlineEditing}
             className={CONTROL}
             title="Conserva las máscaras editadas, el área delimitada y tus decisiones. No vuelve a segmentar."
           >
@@ -836,6 +847,7 @@ export function RegionSuggestionsPanel({
           </button>
         </div>
       </header>
+      <p role="status" className="mt-3 text-sm">Segmentación: {segmentationEnabled ? "MobileSAM activado" : "manual"}. Etiquetas: {classificationEnabled ? "BioCLIP activado" : "revisión manual"}.</p>
 
       {confirmRegeneration ? (
         <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950" role="alert">
@@ -904,7 +916,7 @@ export function RegionSuggestionsPanel({
           >
             {/* Keep image + overlay in the SAME unstretched box: no letterboxing. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img ref={previewRef} src={previewUrl} alt={`Vista ${VIEW_NAMES[direction] ?? direction}`} className="block h-auto w-full" onLoad={() => { ensureGrid(); }} />
+            <img ref={previewRef} src={previewUrl} alt={`Vista ${VIEW_NAMES[direction] ?? direction}`} className="block h-auto w-full" onLoad={() => { const working = ensureGrid(); if (working && trunkOutline && !roiRle) setRoiRle(encodeMaskRle(rasterizeTrunk(trunkOutline, working.width, working.height), working.width, working.height)); }} />
             <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden />
             {trunkOutline ? <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden>
               <polygon points={trunkOutline.map(p => `${p.x * 1000},${p.y * 1000}`).join(" ")} fill="none" stroke="#0284c7" strokeWidth="2" vectorEffect="non-scaling-stroke" />

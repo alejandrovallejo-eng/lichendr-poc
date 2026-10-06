@@ -1,12 +1,11 @@
-import { Suspense } from "react";
-import ImagesWorkflow from "@/modules/images/Workflow";
+import ConnectionNotice from "@/components/ConnectionNotice";
 
 export const dynamic = "force-dynamic";
 
-export default function AdvancedImagesPage() {
-  return (
-    <Suspense fallback={<div className="rounded border p-4 text-sm">Cargando modo avanzado…</div>}>
-      <ImagesWorkflow />
-    </Suspense>
-  );
+export default async function Page() {
+  if (process.env.LICHENDR_PREVIEW_ONLY === "1" || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+    return <ConnectionNotice previewOnly={process.env.LICHENDR_PREVIEW_ONLY === "1"} />;
+  }
+  const { default: Content } = await import("./route-content");
+  return <Content />;
 }

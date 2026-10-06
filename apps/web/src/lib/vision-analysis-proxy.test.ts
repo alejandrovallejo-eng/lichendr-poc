@@ -5,6 +5,7 @@ import sharp from "sharp";
 import {
   ANALYSIS_PROXY_BUCKET,
   analysisProxyPaths,
+  analysisProxyFailure,
   ensureAnalysisProxy,
   type AnalysisSourceImage,
 } from "./vision-analysis-proxy";
@@ -12,6 +13,26 @@ import {
 const userId = "123e4567-e89b-42d3-a456-426614174000";
 const imageId = "223e4567-e89b-42d3-a456-426614174000";
 const sourcePath = `${userId}/project/event/original.jpg`;
+
+test("missing signing configuration fails before accessing private storage", async () => {
+  const previousToken = process.env.VISION_SERVICE_TOKEN;
+  delete process.env.VISION_SERVICE_TOKEN;
+  try {
+    await assert.rejects(ensureAnalysisProxy({} as SupabaseClient, userId, imageId, {
+      storage_bucket: ANALYSIS_PROXY_BUCKET, storage_path: sourcePath,
+      mime_type: "image/jpeg", file_size_bytes: 1234,
+    }), /proxy_signing_not_configured/);
+    const failure = analysisProxyFailure(new Error("proxy_signing_not_configured"));
+    assert.equal(failure.status, 503);
+    assert.match(failure.body.error, /Falta configurar/);
+    assert.equal(analysisProxyFailure(new Error("source_download_failed")).status, 503);
+    assert.equal(analysisProxyFailure(new Error("invalid_source")).status, 422);
+    assert.equal(analysisProxyFailure(new Error("private-url-or-secret")).body.error.includes("private-url-or-secret"), false);
+  } finally {
+    if (previousToken === undefined) delete process.env.VISION_SERVICE_TOKEN;
+    else process.env.VISION_SERVICE_TOKEN = previousToken;
+  }
+});
 
 class FakeStorage {
   readonly objects = new Map<string, { body: Blob; metadata?: Record<string, unknown> }>();

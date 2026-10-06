@@ -72,6 +72,8 @@ export async function ensureAnalysisProxy(
 ): Promise<{ manifest: AnalysisProxyManifest; reused: boolean }> {
   const mime = validateAnalysisSource(source, userId);
   if (!mime) throw new Error("invalid_source");
+  // Check configuration before downloading or decoding an original photograph.
+  signingSecret();
   const paths = analysisProxyPaths(userId, imageId);
   const existing = await loadExistingManifest(supabase, paths, imageId, source);
   if (existing) return { manifest: existing, reused: true };
@@ -166,9 +168,38 @@ function positiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
-function signManifest(manifest: Omit<AnalysisProxyManifest, "signature">) {
+function signingSecret() {
   const secret = process.env.VISION_SERVICE_TOKEN;
   if (!secret || secret.length < 32) throw new Error("proxy_signing_not_configured");
+  return secret;
+}
+
+export function analysisProxyFailure(error: unknown) {
+  const code = error instanceof Error ? error.message : "";
+  if (code === "proxy_signing_not_configured") {
+    return {
+      status: 503,
+      body: {
+        code,
+        error: "Falta configurar la conexión de IA del servidor. La fotografía original sigue guardada; podrás reintentar sin volver a subirla.",
+      },
+    };
+  }
+  if (["source_download_failed", "source_authorization_failed", "proxy_upload_failed"].includes(code)
+    || (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))) {
+    return {
+      status: 503,
+      body: { code: "image_preparation_unavailable", error: "No se pudo acceder a la copia de análisis. El original sigue guardado; comprueba la conexión y reintenta." },
+    };
+  }
+  return {
+    status: 422,
+    body: { code: "image_preparation_failed", error: "No se pudo preparar esta fotografía para el análisis. El original sigue guardado; verifica que sea JPEG, PNG o HEIC de hasta 20 MB." },
+  };
+}
+
+function signManifest(manifest: Omit<AnalysisProxyManifest, "signature">) {
+  const secret = signingSecret();
   return createHmac("sha256", secret).update(JSON.stringify(manifest)).digest("hex");
 }
 

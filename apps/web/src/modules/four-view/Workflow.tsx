@@ -72,7 +72,7 @@ import {
 } from "./capture-run";
 import { combineTrunkEstimates, correctTrunkEdges, summarizeCalibration } from "./science";
 import { RegionSuggestionsPanel } from "@/modules/region-suggestions/RegionSuggestionsPanel";
-import { regionSuggestionsEnabled } from "@/modules/region-suggestions/flag";
+import { useAnalysisCapabilities } from "@/modules/region-suggestions/use-analysis-capabilities";
 import {
   DIRECTIONS,
   DIRECTION_LABELS,
@@ -354,9 +354,8 @@ export default function FourViewWorkflow() {
   const [series, setSeries] = useState<CaptureSeriesRow | null>(null);
   // NEXT_PUBLIC_ flags are inlined at build time, so the variable is read
   // literally here instead of through a dynamic lookup.
-  const suggestionsEnabled = regionSuggestionsEnabled({
-    NEXT_PUBLIC_BIOCLIP_SUGGESTIONS: process.env.NEXT_PUBLIC_BIOCLIP_SUGGESTIONS,
-  });
+  const tools = useAnalysisCapabilities();
+  const suggestionsEnabled = tools.segmentation || tools.classification;
   const [contextConfirmed, setContextConfirmed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -1199,17 +1198,16 @@ export default function FourViewWorkflow() {
       initialSummary={searchParams?.get("mode") === "summary"}
       backHref={jornadaTreesDestination(eventId)} services={guidedServices} />;
     return <section className="mx-auto max-w-3xl rounded-2xl border bg-white p-6">
-      <h1 className="text-2xl font-semibold">Captura paso a paso</h1>
-      <p className="my-3">Confirma dónde trabajarás. Después completarás una foto a la vez: Norte, Este, Sur y Oeste.</p>
+      <PageHeader title="Captura paso a paso" subtitle="Confirma el árbol y la jornada. Después registrarás una fotografía por orientación: Norte, Este, Sur y Oeste." />
       <div className="grid gap-4 sm:grid-cols-2">
         <label>Proyecto<select className="mt-1 w-full rounded border p-3" value={projectId} onChange={e => {resetCapture();setProjectId(e.target.value);setSiteId("");setEventId("");setTreeId("");setSites([]);setEvents([]);setTrees([]);}}><option value="">Elige proyecto</option>{projects.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label>Sitio<select className="mt-1 w-full rounded border p-3" value={siteId} onChange={e => {resetCapture();setSiteId(e.target.value);setEventId("");setTreeId("");setEvents([]);setTrees([]);}}><option value="">Elige sitio</option>{sites.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label>Jornada<select className="mt-1 w-full rounded border p-3" value={eventId} onChange={e => {resetCapture();setEventId(e.target.value);}}><option value="">Elige jornada</option>{events.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label>Árbol<select className="mt-1 w-full rounded border p-3" value={treeId} onChange={e => {resetCapture();setTreeId(e.target.value);}}><option value="">Elige árbol</option>{trees.map(item=><option key={item.id} value={item.id}>{item.code}</option>)}</select></label>
+        <label>Sitio<select disabled={!projectId || sites.length === 0} className="mt-1 w-full rounded border p-3" value={siteId} onChange={e => {resetCapture();setSiteId(e.target.value);setEventId("");setTreeId("");setEvents([]);setTrees([]);}}><option value="">Elige sitio</option>{sites.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Jornada<select disabled={!siteId || events.length === 0} className="mt-1 w-full rounded border p-3" value={eventId} onChange={e => {resetCapture();setEventId(e.target.value);}}><option value="">Elige jornada</option>{events.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>Árbol<select disabled={!siteId || trees.length === 0} className="mt-1 w-full rounded border p-3" value={treeId} onChange={e => {resetCapture();setTreeId(e.target.value);}}><option value="">Elige árbol</option>{trees.map(item=><option key={item.id} value={item.id}>{item.code}</option>)}</select></label>
       </div>
       {contextMismatchError ? <p role="alert" className="my-3 text-red-800">{contextMismatchError} <Link href="/preparar-jornada" className="underline">Volver a preparar jornada</Link></p> : null}
       <button className="mt-5 rounded-lg bg-emerald-800 px-5 py-3 text-white disabled:opacity-40" disabled={!projectId||!siteId||!eventId||!treeId||!!contextMismatchError} onClick={()=>setContextConfirmed(true)}>Empezar con Norte</button>
-      <p className="mt-3 text-sm"><Link href="/preparar-jornada" className="underline">Crear o preparar una jornada</Link></p>
+      <p className="mt-3 text-sm">¿Todavía no tienes una jornada o un árbol? <Link href="/preparar-jornada" className="underline">Crear o preparar una jornada</Link></p>
     </section>;
   }
 
@@ -1649,6 +1647,8 @@ export default function FourViewWorkflow() {
                     direction={direction}
                     imageId={slot.view.image_id}
                     file={slot.file}
+                    segmentationEnabled={tools.segmentation}
+                    classificationEnabled={tools.classification}
                   />
                 );
               })}

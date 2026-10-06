@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { DIRECTIONS, DIRECTION_LABELS, type Direction } from "./types";
 import type { GuidedContext, GuidedSession, GuidedServices } from "./guided-flow";
 import { analysisRecord, checkLichenSamples, guidedKey, parseGuidedReview, type GuidedReview } from "./guided-flow";
@@ -12,6 +12,8 @@ import { TreeSummary } from "./TreeSummary";
 import { ExperimentalComparison } from "./ExperimentalComparison";
 import { BioClipEvidence } from "./BioClipEvidence";
 import { GuidedColorControls, GuidedGroupCoverage, GuidedToneMarker, proposalDisplayPixels, useGuidedColorPicker } from "./GuidedColorPicker";
+import type { AnalysisCapabilities } from "../../lib/analysis-capabilities";
+import { useAnalysisCapabilities } from "../region-suggestions/use-analysis-capabilities";
 
 const fresh = (): GuidedReview => ({ version: 1, outline: [], config: initialColorConfig(), analysis: null, savedAt: null });
 const STEPS = ["Foto", "Tronco", "Colores", "Análisis", "Guardar"];
@@ -24,12 +26,14 @@ interface Props {
   services: GuidedServices;
   checkSamples?: typeof checkLichenSamples;
   initialSummary?: boolean;
+  capabilities?: AnalysisCapabilities;
 }
 const message = (e: unknown) => e instanceof Error ? e.message : "No se pudo completar este paso. Reintenta.";
 
 // One mounted photograph and one active step. Never render four editors or
 // launch legacy four-view calibration behind this screen.
-export function GuidedCapture({ context, contextLabel, treeLabel, backHref, services, checkSamples = checkLichenSamples, initialSummary = false }: Props) {
+export function GuidedCapture({ context, contextLabel, treeLabel, backHref, services, checkSamples = checkLichenSamples, initialSummary = false, capabilities }: Props) {
+  const tools = useAnalysisCapabilities(capabilities);
   const [session, setSession] = useState<GuidedSession | null>(null);
   const [direction, setDirection] = useState<Direction>("N");
   const [step, setStep] = useState(0);
@@ -37,8 +41,6 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const [src, setSrc] = useState("");
   const [pixels, setPixels] = useState<Pixels | null>(null);
   const [result, setResult] = useState<ColorResult | null>(null);
-  const [overlay, setOverlay] = useState("");
-  const [proposalOverlay, setProposalOverlay] = useState("");
   const [showOverlay, setShowOverlay] = useState(true);
   const [compareOriginal, setCompareOriginal] = useState(false);
   const [experimental, setExperimental] = useState(false);
@@ -65,7 +67,8 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const latestReview = useRef(review);
   const imageId = session?.views[direction];
   const key = session?.treeSampleId && imageId ? guidedKey(session.ownerId, session.treeSampleId, direction, imageId) : null;
-  const currentKey = useRef(key); currentKey.current = key;
+  const currentKey = useRef(key);
+  useLayoutEffect(() => { currentKey.current = key; }, [key]);
   const name = DIRECTION_LABELS[direction];
   const contextId = `${context.projectId}:${context.siteId}:${context.eventId}:${context.treeId}`;
 
@@ -93,7 +96,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       setSaved(data.savedViews ?? {});
       setBusy("");
     }).catch(e => { if (active) { setError(message(e)); setBusy(""); } });
-    return () => { active = false; generation.current++; controller.current?.abort(); if (draftTimer.current) clearTimeout(draftTimer.current); };
+    return () => { active = false; controller.current?.abort(); if (draftTimer.current) clearTimeout(draftTimer.current); };
     // The parent keys this component by the complete context.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contextId, services]);
@@ -103,10 +106,16 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     let active = true, objectUrl = "";
     const current = ++generation.current;
     controller.current?.abort();
-    setBusy("Abriendo la fotografía y su revisión…"); setError(""); setPixels(null); setSrc(""); setResult(null); setOverlay("");
-    cloudWriter.current = null; lastCloud.current = ""; setRecovery(null); setCloudStatus("");
+    cloudWriter.current = null; lastCloud.current = "";
     const reference = { ownerId: session.ownerId, treeSampleId: session.treeSampleId, direction, imageId };
-    Promise.all([services.photo(session.ownerId, imageId), services.cloud.read(reference)]).then(([blob, remote]) => {
+    // Start the external photo/review load after cancelling the previous one.
+    Promise.resolve().then(() => {
+      if (!active) return null;
+      setBusy("Abriendo la fotografía y su revisión…"); setError(""); setPixels(null); setSrc(""); setResult(null); setRecovery(null); setCloudStatus("");
+      return Promise.all([services.photo(session.ownerId, imageId), services.cloud.read(reference)]);
+    }).then(values => {
+      if (!values) return;
+      const [blob, remote] = values;
       if (!active || generation.current !== current) return;
       let local: GuidedReview | null = null;
       try { local = parseGuidedReview(localStorage.getItem(key)); } catch { /* Cloud does not depend on local storage. */ }
@@ -115,7 +124,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       lastCloud.current = remote ? reviewFingerprint(remote.review) : "";
       latestReview.current = restored; setReview(restored);
       setSaved(prev => ({ ...prev, [direction]: Boolean(remote?.review.savedAt) }));
-      setCloudStatus(remote ? "Guardado en la nube ✓" : local ? "Borrador local pendiente de sincronizar" : "");
+      setCloudStatus(remote ? remote.review.savedAt ? "Revisión confirmada en la nube ✓" : "Borrador sincronizado en la nube ✓" : local ? "Borrador local pendiente de sincronizar" : "");
       if (remote && local && reviewFingerprint(local) !== reviewFingerprint(remote.review)) {
         setRecovery(local);
         try { localStorage.setItem(`${key}:recovery`, JSON.stringify(local)); } catch { /* Retained in memory. */ }
@@ -148,7 +157,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       if (review.savedAt) setStep(4);
     }).catch(e => { if (!abort.signal.aborted) setError(message(e)); });
     return () => abort.abort();
-  }, [pixels, review.analysis, review.outline, review.config, review.savedAt, result, direction]);
+  }, [pixels, review, result, direction]);
 
   const persist = (next: GuidedReview) => {
     if (!key) throw new Error("La fotografía debe terminar de guardarse primero.");
@@ -164,7 +173,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       const row = await writer(next);
       if (currentKey.current === targetKey) {
         lastCloud.current = reviewFingerprint(row.review);
-        if (reviewFingerprint(latestReview.current) === lastCloud.current) setCloudStatus("Guardado en la nube ✓");
+        if (reviewFingerprint(latestReview.current) === lastCloud.current) setCloudStatus(row.review.savedAt ? "Revisión confirmada en la nube ✓" : "Borrador sincronizado en la nube ✓");
       }
       return row;
     } catch (e) {
@@ -183,23 +192,23 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
   const picker = useGuidedColorPicker(pixels, review.outline, review.config, step === 2 && !finished,
     config => edit(review.outline, config));
   const displayed = step === 2 ? picker.accepted : result;
-  useEffect(() => {
-    if (!displayed || !pixels) { setOverlay(""); return; }
+  const overlay = useMemo(() => {
+    if (!displayed || !pixels) return "";
     const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
-    const ctx = canvas.getContext("2d"); if (!ctx) return;
+    const ctx = canvas.getContext("2d"); if (!ctx) return "";
     const data = ctx.createImageData(pixels.width, pixels.height);
     displayed.labels.forEach((code, i) => {
       if (code >= 3) data.data.set([...OVERLAY_RGB[code - 1], 125], i * 4);
     });
-    ctx.putImageData(data, 0, 0); setOverlay(canvas.toDataURL());
+    ctx.putImageData(data, 0, 0); return canvas.toDataURL();
   }, [displayed, pixels]);
-  useEffect(() => {
-    if (!picker.proposal || !pixels) { setProposalOverlay(""); return; }
+  const proposalOverlay = useMemo(() => {
+    if (!picker.proposal || !pixels) return "";
     const canvas = document.createElement("canvas"); canvas.width = pixels.width; canvas.height = pixels.height;
-    const ctx = canvas.getContext("2d"); if (!ctx) return;
+    const ctx = canvas.getContext("2d"); if (!ctx) return "";
     const data = ctx.createImageData(pixels.width, pixels.height);
     data.data.set(proposalDisplayPixels(picker.proposal.mask, pixels.width, pixels.height));
-    ctx.putImageData(data, 0, 0); setProposalOverlay(canvas.toDataURL());
+    ctx.putImageData(data, 0, 0); return canvas.toDataURL();
   }, [picker.proposal, pixels]);
   const openView = (d: Direction) => {
     if (d === direction && !finished) return;
@@ -256,7 +265,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
     controller.current?.abort(); const abort = new AbortController(); controller.current = abort;
     // 150 s cold start + 120 s inference fit inside the route's 300 s budget.
     const timeout = setTimeout(() => abort.abort(), 285_000);
-    setStep(3); setBusy("Calculando cobertura y consultando BioCLIP…"); setError(""); setResult(null);
+    setStep(3); setBusy("Calculando cobertura de tu selección…"); setError(""); setResult(null);
     try {
       const colors = await classifyTrunkColors(pixels.rgba, pixels.width, pixels.height, review.outline, review.config, abort.signal, "lichen-only");
       if (current !== generation.current) return;
@@ -266,6 +275,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
       setReview(partial); persist(partial);
       await sync(partial);
       if (current !== generation.current) return;
+      if (!tools.classification) { setStep(4); return; }
       setBusy("Preparando la IA y revisando tus ejemplos. El primer análisis puede tardar unos dos minutos…");
       const ai = await checkSamples({ imageId, treeSampleId: session.treeSampleId, direction }, review.outline, review.config, pixels.width, pixels.height, abort.signal, experimental);
       if (current !== generation.current) return;
@@ -371,7 +381,9 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
         {step === 0 ? <><p>Una fotografía por orientación. Empezamos con {name.toLowerCase()}.</p><label className="g-upload">{imageId ? "Reemplazar fotografía" : "Elegir fotografía"}<input aria-label={`Subir foto de ${name}`} type="file" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif" className="g-hidden" disabled={!!busy || !session || session.completed} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file); }} /></label>{imageId ? <p style={{ fontSize: 13 }}>Original guardado ✓</p> : null}{saved[direction] ? <p>Esta vista ya tiene una revisión guardada.</p> : null}</> : null}
         {step === 1 ? <><p>Toca puntos alrededor del tronco, incluyendo los líquenes. El fondo queda fuera.</p><p style={{ fontSize: 13 }}>Arrastra un punto para ajustar el borde.</p><button disabled={!!busy || !review.outline.length} onClick={() => edit(review.outline.slice(0,-1), initialColorConfig())}>Deshacer punto</button><p style={{ fontSize: 12 }}>{review.outline.length} puntos · mínimo 3</p></> : null}
         {step === 2 ? <GuidedColorControls picker={picker} config={review.config} onFocusPhoto={() => { setCompareOriginal(false); setShowOverlay(true); photo.current?.focus(); }} /> : null}
-        {step === 2 ? <details style={{ fontSize: 12 }}><summary>Opciones de IA</summary><label style={{ display: "block", marginTop: 8 }}><input type="checkbox" checked={experimental} disabled={!!busy} onChange={e => setExperimental(e.target.checked)} /> Añadir segunda opinión de IA</label><p>Revisión adicional en prueba para distinguir musgo, algas y otros hongos. Tu selección se conserva.</p></details> : null}
+        {step === 2 && tools.classification ? <details style={{ fontSize: 12 }}><summary>Opciones de IA</summary><label style={{ display: "block", marginTop: 8 }}><input type="checkbox" checked={experimental} disabled={!!busy} onChange={e => setExperimental(e.target.checked)} /> Añadir segunda opinión de IA</label><p>Revisión adicional en prueba para distinguir musgo, algas y otros hongos. Tu selección se conserva.</p></details> : null}
+        {step === 2 ? <p role="status" style={{ fontSize: 12 }}>{tools.loading ? "Comprobando herramientas…" : tools.classification ? "Revisión con BioCLIP activada. La cobertura se calcula con tus colores." : "Revisión manual: la cobertura y el guardado funcionan sin BioCLIP."}</p> : null}
+        {tools.error ? <><p role="status" style={{ fontSize: 12 }}>{tools.error}</p><button disabled={!!busy} onClick={tools.retry}>Comprobar IA de nuevo</button></> : null}
         {step >= 3 && a ? <><p style={{ fontSize: 13 }}>Cobertura estimada por tus colores</p><p style={{ fontSize: 36, fontWeight: 750 }}>{percent} %</p><p style={{ fontSize: 13 }}>{(100*(a.total-a.lichen)/a.total).toFixed(1)} % sin seleccionar.</p><label style={{ fontSize: 13 }}><input type="checkbox" checked={showOverlay} onChange={e=>setShowOverlay(e.target.checked)} /> Mostrar selección</label>{a.ai ? <p style={{ fontSize: 13 }}>Revisión de IA: {matching}/{a.ai.suggestions.length} ejemplos sugieren liquen. {matching < a.ai.suggestions.length ? "Hay diferencias: revisa las zonas resaltadas." : "Revisa las zonas resaltadas antes de guardar."}</p> : <p style={{ fontSize: 13 }}>Sin revisión de IA.</p>}<p style={{ fontSize: 11 }}>El porcentaje corresponde al área que seleccionaste dentro del contorno.</p></> : null}
         {step >= 3 && a ? <GuidedGroupCoverage config={review.config} counts={a.counts} total={a.total} /> : null}
         {step >= 3 && a && session && imageId ? <BioClipEvidence ai={a.ai} src={src} width={photoWidth} height={photoHeight}
@@ -388,7 +400,7 @@ export function GuidedCapture({ context, contextLabel, treeLabel, backHref, serv
         }}>Cancelar consulta de IA</button> : null}
         {error ? <p role="alert" style={{ color: "#a0331e", fontSize: 13 }}>{error}</p> : null}
         {!busy && error && imageId && !pixels ? <button onClick={()=>setLoadAttempt(n=>n+1)}>Reintentar abrir foto</button> : null}
-        {step === 3 && !busy && error ? <button onClick={()=>void analyse()}>Reintentar IA</button> : null}
+        {step === 3 && !busy && error && tools.classification ? <button onClick={()=>void analyse()}>Reintentar IA</button> : null}
       </aside>
     </main>}
     <footer>

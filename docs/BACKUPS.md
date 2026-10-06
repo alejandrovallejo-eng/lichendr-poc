@@ -95,6 +95,12 @@ en los archivos de configuración de las dos copias locales del proyecto ni una
 sesión de Supabase CLI. Esto no demuestra que no existan en un gestor de
 contraseñas o en otra ubicación.
 
+El 6 de octubre se comprobó acceso administrativo a la API y Storage mediante
+una clave ya existente del Dashboard, exclusivamente para la copia de proyecto
+autorizada entre dos cuentas. Se retiró su archivo temporal después de verificar
+la copia. Sigue pendiente la conexión PostgreSQL y una recuperación completa
+aislada; no está habilitado un respaldo administrativo programado.
+
 Se preparó `/Users/alejandro/.lichendr/backup-admin.env`, fuera del repositorio,
 con permisos `600`. Contiene los parámetros públicos del **Session pooler** del
 proyecto `taqdmdghdqnczioxhajb`; `PGPASSWORD` y `SUPABASE_ADMIN_KEY` están vacíos.

@@ -25,7 +25,9 @@ Publicado y comprobado en Production el 6 de octubre de 2026, con el commit
 | CI remoto | [GitHub Actions](https://github.com/alejandrovallejo-eng/lichendr-poc/actions/runs/37476012831): 439 pruebas sin fallos ni omisiones y compilación correcta | Correcto |
 | Validación de la web publicada | `npm run check:workflow -- --production`: MobileSAM, BioCLIP privado mediante identidad Vercel/Google, cuatro vistas, concurrencia, cierre, CSV/JSON, aislamiento y recuperación real verificados | Correcto |
 | Entrada con Google en Production | Cuenta permanente recuperada mediante Google, callback exacto al dominio final y proyecto previo visible | Correcto |
-| Recuperación del trabajo de la sesión local | La sesión local anónima y la cuenta Google existente pertenecen a dos usuarios distintos. Supabase rechaza el vínculo con `identity_already_exists`; la sesión y el proyecto originales se conservaron. Requiere elegir entre copiar el proyecto a la cuenta permanente o vincular otra identidad disponible | Pendiente de decisión del propietario |
+| Recuperación del trabajo de la sesión local | El propietario autorizó copiar el proyecto a su cuenta Google existente. Copia con identificadores nuevos: originales, relaciones, dos revisiones y cuatro archivos verificados; el proyecto anónimo original y el proyecto previo de la cuenta Google permanecen intactos | Correcto |
+| Interfaz de la copia | Dos fotos privadas abiertas en Production a 1536×2048, contornos y revisiones conservados; Norte 20.7 %, Este 6.8 %, Sur/Oeste sin foto | Correcto |
+| Respaldo de la cuenta permanente | TAR descargado desde Production: dos proyectos, 20 tablas y ocho archivos con integridad verificada; registros copiados y proyecto previo coinciden con sus comprobaciones | Correcto |
 | Copia administrativa programada | Requiere credenciales PostgreSQL/Storage y recuperación en un destino aislado | Pendiente de acceso administrativo |
 
 El recorrido real creó únicamente identidades y registros temporales. Sus vistas,
@@ -42,6 +44,13 @@ La recuperación mediante sesión de usuario tiene restricciones para historial
 inactivo y recrea revisiones de concurrencia ecológicas mediante RPC. La copia
 manual de una cuenta no sustituye un respaldo administrativo programado. Ver
 [BACKUPS.md](BACKUPS.md).
+
+La copia entre las dos cuentas fue una operación administrativa puntual,
+expresamente autorizada, con un plan privado, verificación previa de ambas
+identidades y rutas nuevas. No modificó las políticas ni incorporó una clave
+administrativa a Next.js. La clave existente se usó temporalmente y el archivo
+temporal se retiró al finalizar. No se ofrece una fusión automática de cuentas;
+la copia y el original son proyectos independientes.
 
 ## Repetir las comprobaciones
 

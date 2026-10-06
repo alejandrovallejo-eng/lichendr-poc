@@ -87,3 +87,38 @@ no confundir una copia descargada manualmente con un respaldo programado del
 servicio. Definir también retención y destino seguro para esas copias.
 
 Referencia: [copias de Supabase](https://supabase.com/docs/guides/platform/backups).
+
+## Acceso administrativo pendiente
+
+La revisión del 5 de octubre de 2026 no encontró credenciales administrativas
+en los archivos de configuración de las dos copias locales del proyecto ni una
+sesión de Supabase CLI. Esto no demuestra que no existan en un gestor de
+contraseñas o en otra ubicación.
+
+Se preparó `/Users/alejandro/.lichendr/backup-admin.env`, fuera del repositorio,
+con permisos `600`. Contiene los parámetros públicos del **Session pooler** del
+proyecto `taqdmdghdqnczioxhajb`; `PGPASSWORD` y `SUPABASE_ADMIN_KEY` están vacíos.
+El archivo no se carga en Next.js y no activa ninguna automatización.
+
+Para completar el acceso, el propietario puede guardar localmente:
+
+1. La contraseña actual de PostgreSQL, correspondiente a **Connect → Direct →
+   Session pooler**. La conexión de Google a la aplicación no proporciona esta
+   contraseña. Si no puede recuperarla, debe completar personalmente el cambio
+   en **Database → Settings**, comprobando qué otras conexiones la usan.
+2. Una clave administrativa **existente** del mismo proyecto, desde **Settings →
+   API Keys**, para descargar los archivos privados de todas las cuentas.
+   La clave pública usada por la interfaz no tiene esos permisos.
+
+No pegar estos valores en mensajes, no incluirlos en comandos del historial ni
+añadirlos a variables `NEXT_PUBLIC_*`. La creación de nuevas credenciales o la
+concesión de acceso adicional requiere autorización específica.
+
+Después de disponer del acceso hay que implementar y comprobar el respaldo de
+roles, esquema, datos Auth/aplicación, historial de migraciones, archivos y
+configuración; definir destino y retención; y probar la restauración en un
+proyecto aislado. Solo entonces se puede habilitar una programación y describirla
+como respaldo administrativo operativo.
+
+Referencias: [conexión y recuperación con Supabase CLI](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore),
+[claves públicas y administrativas](https://supabase.com/docs/guides/getting-started/api-keys).

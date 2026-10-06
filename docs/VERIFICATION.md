@@ -24,7 +24,8 @@ Publicado y comprobado en Production el 6 de octubre de 2026, con el commit
 | Publicación del código | GitHub CLI autorizado por el propietario; `v1-modular` publicado, compilación Production y dominio final Ready | Correcto |
 | CI remoto | [GitHub Actions](https://github.com/alejandrovallejo-eng/lichendr-poc/actions/runs/37476012831): 439 pruebas sin fallos ni omisiones y compilación correcta | Correcto |
 | Validación de la web publicada | `npm run check:workflow -- --production`: MobileSAM, BioCLIP privado mediante identidad Vercel/Google, cuatro vistas, concurrencia, cierre, CSV/JSON, aislamiento y recuperación real verificados | Correcto |
-| Acceso del usuario desde el dominio final | La interfaz local muestra una sesión anónima con un proyecto; hay que vincular esa sesión a la cuenta de Google que elija su propietario antes de recuperar el trabajo desde otro dominio | Pendiente de elección y vínculo |
+| Entrada con Google en Production | Cuenta permanente recuperada mediante Google, callback exacto al dominio final y proyecto previo visible | Correcto |
+| Recuperación del trabajo de la sesión local | La sesión local anónima y la cuenta Google existente pertenecen a dos usuarios distintos. Supabase rechaza el vínculo con `identity_already_exists`; la sesión y el proyecto originales se conservaron. Requiere elegir entre copiar el proyecto a la cuenta permanente o vincular otra identidad disponible | Pendiente de decisión del propietario |
 | Copia administrativa programada | Requiere credenciales PostgreSQL/Storage y recuperación en un destino aislado | Pendiente de acceso administrativo |
 
 El recorrido real creó únicamente identidades y registros temporales. Sus vistas,

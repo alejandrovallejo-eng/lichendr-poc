@@ -13,6 +13,27 @@ this does not deploy the frontend changes to Vercel.
 
 ---
 
+## Director / presentation access
+
+Use the stable Production link with `/demo`:
+`https://temporary-flying-nickel-213j01n.vercel.app/demo`.
+The example opens without Google or Vercel authentication. It shows four
+explicitly repeated copies of one demonstration photo and recorded colour /
+BioCLIP evidence, with an approximate 360° montage. It does not expose the
+owner's private `dd` project or its location, account IDs, EXIF or signed URLs.
+
+“Crear mi copia editable” creates a separate project in the visitor's own
+Supabase session using existing RLS policies and RPCs. It copies the descriptive
+colour review without claiming the recorded BioCLIP response is a fresh model
+run. The normal workflow can analyse the visitor's images again. Google sign-in
+from “Mi cuenta” lets the visitor retain that workspace across devices.
+
+Verify the public page and the editable copy after release. The disposable live
+check `node scripts/check-demo.mjs` verifies four saved reviews, eight private
+objects, cross-owner isolation and compensation after a partial failure.
+
+---
+
 ## Architecture
 
 ```

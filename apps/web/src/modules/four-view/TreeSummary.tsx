@@ -15,8 +15,8 @@ const detail = (e: unknown) => e instanceof Error ? e.message : "No se pudo abri
 
 // Only private storage reads and saved review reads. No upload, write, proxy
 // preparation or AI request is allowed in this results screen.
-export function TreeSummary({ session, services, onEdit }: {
-  session: GuidedSession; services: GuidedServices; onEdit: (direction: Direction) => void;
+export function TreeSummary({ session, services, onEdit, readOnly = false }: {
+  session: GuidedSession; services: GuidedServices; onEdit: (direction: Direction) => void; readOnly?: boolean;
 }) {
   const [entries, setEntries] = useState<Record<Direction, Entry>>(() => Object.fromEntries(DIRECTIONS.map(d => [d, { ...empty(), loading: Boolean(session.views[d]) }])) as Record<Direction, Entry>);
   const [attempt, setAttempt] = useState(0);
@@ -75,7 +75,7 @@ export function TreeSummary({ session, services, onEdit }: {
     {orbit ? <TreeOrbit entries={entries} marked={orbitMarked} onOpenPhoto={d => { setOrbit(false); setExpanded(d); }} /> : <div className={`tree-summary-grid${expanded ? " tree-summary-expanded" : ""}`}>
       {(expanded ? [expanded] : DIRECTIONS).map(direction => <SummaryCard key={`${direction}:${entries[direction].src}`}
         direction={direction} entry={entries[direction]} imageId={session.views[direction]} treeSampleId={session.treeSampleId}
-        marked={marked} expanded={expanded !== null} onExpand={() => setExpanded(direction)}
+        marked={marked} expanded={expanded !== null} readOnly={readOnly} onExpand={() => setExpanded(direction)}
         onEdit={() => onEdit(direction)} onRetry={() => setAttempt(n => n + 1)} />)}
     </div>}
     <p className="tree-summary-note">Cobertura estimada del tronco en cada foto.</p>
@@ -83,9 +83,9 @@ export function TreeSummary({ session, services, onEdit }: {
   </main>;
 }
 
-function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded, onExpand, onEdit, onRetry }: {
+function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded, readOnly, onExpand, onEdit, onRetry }: {
   direction: Direction; entry: Entry; imageId?: string; treeSampleId: string; marked: boolean; expanded: boolean;
-  onExpand: () => void; onEdit: () => void; onRetry: () => void;
+  readOnly: boolean; onExpand: () => void; onEdit: () => void; onRetry: () => void;
 }) {
   const [overlay, setOverlay] = useState("");
   const [maskError, setMaskError] = useState("");
@@ -145,7 +145,7 @@ function SummaryCard({ direction, entry, imageId, treeSampleId, marked, expanded
     </div>
     <div className="tree-summary-actions" style={{ flexShrink: 0 }}>
       {!expanded && entry.src ? <button onClick={onExpand} aria-label={`Ampliar ${name}`}>Ampliar</button> : null}
-      <button className="g-primary" disabled={entry.loading || entry.reviewFailed} onClick={onEdit} aria-label={`${a ? "Revisar" : "Completar"} ${name}`}>{a ? "Revisar / editar" : "Completar vista"}</button>
+      {!readOnly ? <button className="g-primary" disabled={entry.loading || entry.reviewFailed} onClick={onEdit} aria-label={`${a ? "Revisar" : "Completar"} ${name}`}>{a ? "Revisar / editar" : "Completar vista"}</button> : null}
       {entry.error ? <button onClick={onRetry}>Reintentar lectura</button> : null}
     </div>
   </article>;

@@ -12,7 +12,7 @@ export default function WorkflowGuide() {
           )
         ? 3
         : 0;
-  if (path === "/" || path === "/cuenta" || path === "/vision-lab") return null;
+  if (path === "/" || path === "/cuenta" || path === "/vision-lab" || path === "/demo") return null;
   return (
     <aside
       className="ld-workflow-guide"

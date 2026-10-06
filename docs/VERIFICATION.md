@@ -1,6 +1,8 @@
 # Verificación de la integración final
 
 Comprobado localmente el 5 de octubre de 2026, con el código de `1e26fb1`.
+Publicado y comprobado en Production el 6 de octubre de 2026, con el commit
+`dbb8e6f`, despliegue Vercel `2Mo3MetTxDE7bpgQYk5T14DwYMPg`.
 
 | Recorrido | Evidencia | Estado |
 |---|---|---|
@@ -18,9 +20,11 @@ Comprobado localmente el 5 de octubre de 2026, con el código de `1e26fb1`.
 | Recuperación | Proyecto temporal recuperado: 20 tablas, 8 archivos, revisiones y SHA-256; proxies reconstruidos al reabrir sin perder revisiones | Correcto |
 | Datos del usuario | Copia de 20 tablas y 4 archivos existentes, descargada desde la interfaz y comprobada con el verificador local | Correcto |
 | Móvil | Navegación, exportación y resultados a 390×844; ancho del documento 390, sin desbordamiento horizontal | Correcto |
-| Configuración alojada | Vercel Production usa la base elegida `taqdmdghdqnczioxhajb`; callback exacto y Site URL finales guardados; base anterior conservada | Preparada para nuevo despliegue |
-| Publicación del código | Commit local listo; el envío requiere autenticación de escritura de GitHub en esta Mac | Pendiente de autorización |
-| Validación de la web publicada | Mismo recorrido con `npm run check:workflow -- --production` | Pendiente de publicación |
+| Configuración alojada | Vercel Production usa la base elegida `taqdmdghdqnczioxhajb`; callback exacto y Site URL finales guardados; base anterior conservada | Publicada |
+| Publicación del código | GitHub CLI autorizado por el propietario; `v1-modular` publicado, compilación Production y dominio final Ready | Correcto |
+| CI remoto | [GitHub Actions](https://github.com/alejandrovallejo-eng/lichendr-poc/actions/runs/37476012831): 439 pruebas sin fallos ni omisiones y compilación correcta | Correcto |
+| Validación de la web publicada | `npm run check:workflow -- --production`: MobileSAM, BioCLIP privado mediante identidad Vercel/Google, cuatro vistas, concurrencia, cierre, CSV/JSON, aislamiento y recuperación real verificados | Correcto |
+| Acceso del usuario desde el dominio final | La interfaz local muestra una sesión anónima con un proyecto; hay que vincular esa sesión a la cuenta de Google que elija su propietario antes de recuperar el trabajo desde otro dominio | Pendiente de elección y vínculo |
 | Copia administrativa programada | Requiere credenciales PostgreSQL/Storage y recuperación en un destino aislado | Pendiente de acceso administrativo |
 
 El recorrido real creó únicamente identidades y registros temporales. Sus vistas,

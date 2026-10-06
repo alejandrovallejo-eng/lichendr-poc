@@ -101,7 +101,8 @@ Store the output somewhere safe (password manager). **Do not commit it.**
 
 | Setting | Value |
 |---------|-------|
-| Production Branch | `v1-modular` |
+| Source branch | `v1-modular` |
+| Production Branch currently configured | `production-paused` (manual release) |
 | Root Directory | `apps/web` |
 | Framework Preset | Next.js |
 
@@ -144,8 +145,16 @@ do not include Storage file bytes.
 
 ### Redeployment and verification
 
-1. After saving the environment variables, trigger a new deployment from the
-   Vercel dashboard or by pushing to `v1-modular`.
+1. Push to `v1-modular` to run GitHub Actions and build Preview. The hosted
+   project's Production Branch is currently `production-paused`; a push to
+   `v1-modular` does not publish Production. Once checks pass, open that exact
+   deployment in Vercel, choose **Redeploy → Production**, leave existing build
+   cache unchecked, and confirm Redeploy. This rebuilds with the Production
+   variables and assigns the final domain.
+   Do not simply reassign a Preview deployment's domain: its compiled variables
+   may differ. Vercel rejects setting `v1-modular` as Production Branch while
+   branch-specific Preview BioCLIP variables use that same branch. Keep this
+   manual release path until Preview branch configuration is separated.
 2. Once deployed, visit `https://<your-vercel-domain>/api/vision/health` from
    a browser. You should receive `{"status":"ok","model_loaded":true,...}`.
    If the vision service is still warming up you may get `model_loaded: false`

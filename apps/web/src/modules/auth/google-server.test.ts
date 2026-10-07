@@ -99,6 +99,21 @@ test("callback cannot be redirected offsite by next parameter", async () => {
   const response = await finishGoogle(callback("original", "code=valid&next=https://evil.example"));
   assert.equal(response.headers.get("location"), `${origin}/cuenta?status=connected`);
 });
+test("Google returns only to the allowlisted path recorded in an HTTP-only cookie", async () => {
+  const begin = new NextRequest(`${origin}/auth/google`, { method: "POST", headers: { origin }, body: new URLSearchParams({ action: "connect", returnTo: "/demo" }) });
+  const response = await startGoogle(begin);
+  assert.equal(response.cookies.get("lichen-google-return")?.value, "/demo");
+  assert.equal(response.cookies.get("lichen-google-return")?.httpOnly, true);
+  const finish = await finishGoogle(new NextRequest(`${origin}/auth/callback?code=valid&next=https://evil.example`, { headers: { cookie: "lichen-google-intent=original; lichen-google-return=/demo; sb-session=old-session" } }));
+  assert.equal(finish.headers.get("location"), `${origin}/demo`);
+  assert.equal(finish.cookies.get("lichen-google-return")?.maxAge, 0);
+});
+test("offsite and encoded redirects in the return cookie are ignored", async () => {
+  for (const returnTo of ["https://evil.example", "//evil.example", "/%2f%2fevil.example", "/demo?next=evil"]) {
+    const finish = await finishGoogle(new NextRequest(`${origin}/auth/callback?code=valid`, { headers: { cookie: `lichen-google-intent=original; lichen-google-return=${returnTo}; sb-session=old-session` } }));
+    assert.equal(finish.headers.get("location"), `${origin}/cuenta?status=connected`);
+  }
+});
 test("session changed in another tab blocks a new-browser callback", async () => {
   const response = await finishGoogle(callback("signin"));
   assert.match(response.headers.get("location")!, /status=protect/); assert.deepEqual(calls, []);

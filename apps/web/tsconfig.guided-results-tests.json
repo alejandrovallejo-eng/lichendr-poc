@@ -8,6 +8,7 @@
     "src/modules/four-view/guided.component.test.tsx",
     "src/modules/four-view/accepted-colors.test.tsx",
     "src/modules/region-suggestions/trunk-colors.test.ts",
-    "src/modules/demo/demo.test.tsx"
+    "src/modules/demo/demo.test.tsx",
+    "src/modules/review/review.test.tsx"
   ]
 }

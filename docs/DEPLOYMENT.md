@@ -22,15 +22,28 @@ explicitly repeated copies of one demonstration photo and recorded colour /
 BioCLIP evidence, with an approximate 360° montage. It does not expose the
 owner's private `dd` project or its location, account IDs, EXIF or signed URLs.
 
-“Crear mi copia editable” creates a separate project in the visitor's own
-Supabase session using existing RLS policies and RPCs. It copies the descriptive
-colour review without claiming the recorded BioCLIP response is a fresh model
-run. The normal workflow can analyse the visitor's images again. Google sign-in
-from “Mi cuenta” lets the visitor retain that workspace across devices.
+“Probar con mi Google” requires a permanent Google account and creates a separate
+review space owned by the visitor. The page discloses that LichenDR's administrator
+can consult photos and results uploaded to that project. It copies the descriptive
+colour review without attributing the recorded BioCLIP response to a fresh model
+run. The normal workflow can analyse the visitor's own images again. Private
+projects created through the existing flow stay private.
+
+Install `202610060001_shared_review_projects.sql` before publishing this flow.
+Its singleton review setting pins the previously verified administrator account.
+It adds a project-scoped, read-only review RPC and Storage reads for registered
+originals / proxies only. Existing table RLS, writes, AI access and user exports
+stay owner-scoped. The administrator opens `/compartidos` from their Google account
+and uses “Actualizar cargas”; contributors revoke access from “Mi cuenta”.
+No recipient email, bearer invitation or administrative key is needed in the app.
 
 Verify the public page and the editable copy after release. The disposable live
 check `node scripts/check-demo.mjs` verifies four saved reviews, eight private
 objects, cross-owner isolation and compensation after a partial failure.
+`npm run test:sharing-db` runs all migrations on PostgreSQL (PGlite) and verifies
+Google restrictions, idempotency, read scope, writes, Storage and revocation with
+four distinct test identities. Production activation still needs a live
+contributor / reviewer verification after installing the migration.
 
 ---
 

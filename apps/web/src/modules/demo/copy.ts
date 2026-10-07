@@ -9,7 +9,7 @@ export function demoCopyUrl(copy: DemoCopy) {
 }
 /** Uses only the visitor's session and existing owner-scoped RPCs. No admin key. */
 export async function createDemoCopy(db: SupabaseClient, template: DemoTemplate, photo: Blob,
-  progress: (text: string) => void = () => {}): Promise<DemoCopy> {
+  progress: (text: string) => void = () => {}, shared = false): Promise<DemoCopy> {
   const user = await db.auth.getUser();
   if (user.error || !user.data.user) throw new Error("No se pudo abrir tu sesión. Reintenta.");
   const ownerId = user.data.user.id;
@@ -23,7 +23,9 @@ export async function createDemoCopy(db: SupabaseClient, template: DemoTemplate,
     checked(await db.from(table).insert(row).select("id").single(), "guardar el ejemplo").id as string;
   try {
     progress("Preparando tu proyecto de ejemplo…");
-    projectId = await insert("projects", { owner_id: ownerId, name: DEMO_PROJECT_NAME, description: DEMO_NOTICE });
+    projectId = shared
+      ? checked(await db.rpc("create_review_project", { p_name: DEMO_PROJECT_NAME, p_request_key: crypto.randomUUID() }).single<{ id: string }>(), "crear el espacio compartido").id
+      : await insert("projects", { owner_id: ownerId, name: DEMO_PROJECT_NAME, description: DEMO_NOTICE });
     const siteId = await insert("sites", { project_id: projectId, name: "Sitio de demostración", location_source: "unknown", notes: DEMO_NOTICE });
     const eventId = await insert("sampling_events", { site_id: siteId, name: "Jornada de demostración", sampled_at: new Date().toISOString(), notes: DEMO_NOTICE });
     const treeId = await insert("trees", { site_id: siteId, code: "EJEMPLO-001", notes: DEMO_NOTICE });

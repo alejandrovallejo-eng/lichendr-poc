@@ -17,6 +17,7 @@ export type NavItem = {
 };
 export const navigation: NavItem[] = [
   { label: "Inicio", path: "/", group: "Tu espacio", icon: "home" },
+  { label: "Espacios compartidos", path: "/compartidos", group: "Tu espacio", icon: "folder" },
   {
     label: "Preparar jornada",
     path: "/preparar-jornada",

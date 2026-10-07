@@ -1,13 +1,16 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextRequest, NextResponse } from "next/server";
-import { googleAction, linkedUserMatches } from "./google-policy";
+import { googleAction, linkedUserMatches, googleReturnPath } from "./google-policy";
 
 const INTENT = "lichen-google-intent";
+const RETURN = "lichen-google-return";
 const intentOptions = { httpOnly: true, secure: true, sameSite: "lax" as const, path: "/auth", maxAge: 600 };
 
 function accountResponse(request: NextRequest, status: string) {
   const target = new URL("/cuenta", request.url);
   target.searchParams.set("status", status);
+  const returnTo = googleReturnPath(request.cookies.get(RETURN)?.value);
+  if (returnTo) target.searchParams.set("returnTo", returnTo);
   const response = NextResponse.redirect(target, 303);
   response.headers.set("Cache-Control", "private, no-store");
   response.headers.set("Referrer-Policy", "no-referrer");
@@ -42,7 +45,9 @@ export async function startGoogle(request: NextRequest, factory = createServerCl
     const { data, error } = await client.auth.getUser();
     if (error && error.name !== "AuthSessionMissingError") return accountResponse(request, "failed");
     const user = data.user;
-    const action = String((await request.formData()).get("action") || "connect");
+    const form = await request.formData();
+    const action = String(form.get("action") || "connect");
+    const returnTo = googleReturnPath(form.get("returnTo"));
     let projectCount: number | null = null;
     if (user?.is_anonymous && action === "recover") {
       const result = await client.from("projects").select("id", { count: "exact", head: true }).eq("owner_id", user.id);
@@ -70,6 +75,7 @@ export async function startGoogle(request: NextRequest, factory = createServerCl
     response.headers.set("Referrer-Policy", "no-referrer");
     commit(response);
     response.cookies.set(INTENT, choice === "link" ? user!.id : user ? `recover:${user.id}` : "signin", intentOptions);
+    response.cookies.set(RETURN, returnTo ?? "", { ...intentOptions, maxAge: returnTo ? intentOptions.maxAge : 0 });
     return response;
   } catch {
     return accountResponse(request, "failed");
@@ -81,6 +87,7 @@ export async function finishGoogle(request: NextRequest, factory = createServerC
   const fail = (status: string) => {
     const response = accountResponse(request, status);
     response.cookies.set(INTENT, "", { ...intentOptions, maxAge: 0 });
+    response.cookies.set(RETURN, "", { ...intentOptions, maxAge: 0 });
     return response;
   };
   if (!expected) return fail("expired");
@@ -110,9 +117,13 @@ export async function finishGoogle(request: NextRequest, factory = createServerC
     }
     const { data, error } = await client.auth.exchangeCodeForSession(code);
     if (error || !linkedUserMatches(recovering ? "signin" : expected, data.user)) return fail("failed");
-    const response = accountResponse(request, "connected");
+    const returnTo = googleReturnPath(request.cookies.get(RETURN)?.value);
+    const response = returnTo ? NextResponse.redirect(new URL(returnTo, request.url), 303) : accountResponse(request, "connected");
+    response.headers.set("Cache-Control", "private, no-store");
+    response.headers.set("Referrer-Policy", "no-referrer");
     commit(response);
     response.cookies.set(INTENT, "", { ...intentOptions, maxAge: 0 });
+    response.cookies.set(RETURN, "", { ...intentOptions, maxAge: 0 });
     return response;
   } catch {
     return fail("failed");

@@ -1,4 +1,7 @@
 export type AccountUser = { id: string; is_anonymous?: boolean; email?: string; identities?: { provider: string }[] };
+export function googleReturnPath(value: unknown): "/demo" | "/compartidos" | null {
+  return value === "/demo" || value === "/compartidos" ? value : null;
+}
 
 export function googleAction(user: AccountUser | null, action: string, projectCount: number | null) {
   if (user && !user.is_anonymous) return "connected";

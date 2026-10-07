@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import PageHeader from "@/components/PageHeader";
 import { supabase } from "@/lib/supabase/client";
-import { authMessage, type AccountUser } from "./google-policy";
+import { authMessage, googleReturnPath, type AccountUser } from "./google-policy";
+import ReviewAccess from "../review/ReviewAccess";
 
 export default function AccountPanel() {
   const [user, setUser] = useState<AccountUser | null>(null);
@@ -12,6 +13,7 @@ export default function AccountPanel() {
   const [count, setCount] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [returnTo, setReturnTo] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -21,6 +23,7 @@ export default function AccountPanel() {
         if (result.error && result.error.name !== "AuthSessionMissingError") throw result.error;
         if (!active) return;
         setUser(result.data.user);
+        setReturnTo(googleReturnPath(new URL(window.location.href).searchParams.get("returnTo")));
         const verifiedGoogle = result.data.user && !result.data.user.is_anonymous && result.data.user.identities?.some(identity => identity.provider === "google");
         setMessage(authMessage(status === "connected" && !verifiedGoogle ? null : status));
         if (result.data.user) {
@@ -46,14 +49,18 @@ export default function AccountPanel() {
         {count !== null && <p className="text-sm">Proyectos disponibles en esta cuenta: <strong>{count}</strong></p>}
         {!connected && <form method="post" action="/auth/google" onSubmit={() => setBusy(true)}>
           <input type="hidden" name="action" value="connect" />
+          {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
           <button disabled={busy} className="w-full rounded-xl bg-emerald-800 px-5 py-3 font-semibold text-white disabled:opacity-50">{busy ? "Abriendo Google…" : user ? "Vincular mis proyectos con Google" : "Entrar con Google"}</button>
         </form>}
         {!connected && user && <p className="text-sm text-slate-600">Usa la cuenta con la que quieras recuperar este trabajo. No se eliminan, duplican ni transfieren tus proyectos.</p>}
-        {!connected && user && count === 0 && <details className="text-sm"><summary className="cursor-pointer">Ya tengo una cuenta de LichenDR en otro dispositivo</summary><p className="my-3">Esta sesión no contiene proyectos guardados. Puedes entrar a tu cuenta existente. Guarda primero cualquier edición pendiente.</p><form method="post" action="/auth/google" onSubmit={() => setBusy(true)}><input type="hidden" name="action" value="recover" /><button disabled={busy} className="rounded-lg border px-4 py-2">Recuperar mi cuenta de Google</button></form></details>}
+        {!connected && user && count === 0 && <details className="text-sm"><summary className="cursor-pointer">Ya tengo una cuenta de LichenDR en otro dispositivo</summary><p className="my-3">Esta sesión no contiene proyectos guardados. Puedes entrar a tu cuenta existente. Guarda primero cualquier edición pendiente.</p><form method="post" action="/auth/google" onSubmit={() => setBusy(true)}><input type="hidden" name="action" value="recover" />{returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}<button disabled={busy} className="rounded-lg border px-4 py-2">Recuperar mi cuenta de Google</button></form></details>}
         <Link href="/projects" className="inline-block font-medium text-emerald-800 underline">Ver mis proyectos</Link>
+        {returnTo ? <Link href={returnTo} className="ld-text-link">Continuar después de conectar Google</Link> : null}
+        {connected ? <Link href="/compartidos" className="ld-text-link">Ver cargas compartidas conmigo</Link> : null}
         {connected && <details className="text-sm text-slate-500"><summary className="cursor-pointer">Identificador de mi cuenta</summary><p className="mt-2 break-all font-mono">{user.id}</p></details>}
       </>}
     </div>
+    {connected && user ? <ReviewAccess ownerId={user.id} /> : null}
     <p className="text-sm text-slate-600">Entrar con Google protege el acceso, pero no sustituye una copia de seguridad. Guarda tus cambios antes de salir y conserva exportaciones de tu trabajo importante.</p>
   </section>;
 }

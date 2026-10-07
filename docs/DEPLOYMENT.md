@@ -42,8 +42,19 @@ check `node scripts/check-demo.mjs` verifies four saved reviews, eight private
 objects, cross-owner isolation and compensation after a partial failure.
 `npm run test:sharing-db` runs all migrations on PostgreSQL (PGlite) and verifies
 Google restrictions, idempotency, read scope, writes, Storage and revocation with
-four distinct test identities. Production activation still needs a live
-contributor / reviewer verification after installing the migration.
+four distinct test identities.
+
+Production release verified on 2026-10-06: application commit `c893b97`,
+deployment `EzjevYGqbMjBUKgpDzq2cuYiUD5C`. The public homepage, `/demo`,
+`/compartidos` and `/cuenta` return HTTP 200 without a Vercel session. Google
+OAuth uses this domain's callback and retains the allowlisted demo return path.
+A copy created through the production Google session has four saved reviews and
+eight original/proxy files verified by SHA-256. The eight installed review
+functions match the tested migration; scientific table policies remain private.
+The production workflow check also passed MobileSAM, BioCLIP for all four views,
+saved results, conflict protection, closure, export and backup restoration.
+Peer access and revocation are covered by the PostgreSQL role tests above;
+the director's actual Google sign-in has not been performed on their behalf.
 
 ---
 

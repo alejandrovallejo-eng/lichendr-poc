@@ -25,7 +25,9 @@ solamente los callbacks locales exactos a la lista de retornos de Auth:
 - `http://localhost:3000/auth/callback`
 - `http://127.0.0.1:3000/auth/callback`
 
-El Site URL y los callbacks alojados existentes se conservaron. Completar una
+El 7 de octubre de 2026 se configuró `https://lichendr.vercel.app` como Site URL
+y se añadió su callback exacto `https://lichendr.vercel.app/auth/callback`.
+Los callbacks alojados anteriores y los locales se conservaron. Completar una
 entrada con Google todavía requiere que el usuario elija su cuenta. Una sesión
 anónima conserva datos en la nube, pero depende de ese navegador; la pantalla
 `/cuenta` permite vincularla o recuperar una cuenta existente cuando está vacía.

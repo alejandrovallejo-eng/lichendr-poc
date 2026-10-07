@@ -17,7 +17,7 @@ const args=process.argv.slice(2), production=args.includes('--production');
 const imageAt=args.indexOf('--image');
 if(imageAt>=0&&(!args[imageAt+1]||args[imageAt+1].startsWith('--')))throw new Error('--image requiere una ruta de archivo.');
 if(args.some((a,i)=>a!=='--production'&&a!=='--image'&&i!==imageAt+1)) throw new Error('Uso: npm run check:workflow -- [--image /ruta/arbol.jpg] [--production]');
-const base=production?'https://temporary-flying-nickel-213j01n.vercel.app':'http://127.0.0.1:3000';
+const base=production?'https://lichendr.vercel.app':'http://127.0.0.1:3000';
 const directory=await mkdtemp(join(tmpdir(),'lichendr-workflow-'));
 const compilation=spawnSync(process.execPath,[resolve('node_modules/typescript/bin/tsc'),'--noEmit','false','--incremental','false','--module','commonjs','--moduleResolution','node','--target','es2022','--esModuleInterop','true','--skipLibCheck','true','--allowJs','true','--rootDir','src','--outDir',directory,'src/modules/exports/backup.ts','src/modules/exports/views.ts','src/modules/four-view/guided-cloud.ts','src/modules/region-suggestions/trunk-colors.ts','src/modules/jornada/closure-client.ts'],{stdio:'inherit'});
 if(compilation.status!==0)throw new Error('workflow_compilation_failed');

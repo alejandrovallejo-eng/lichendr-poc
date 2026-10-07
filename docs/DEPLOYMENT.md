@@ -16,7 +16,21 @@ this does not deploy the frontend changes to Vercel.
 ## Director / presentation access
 
 Use the stable Production link with `/demo`:
-`https://temporary-flying-nickel-213j01n.vercel.app/demo`.
+`https://lichendr.vercel.app/demo`.
+The free `lichendr.vercel.app` domain is connected to the existing Production
+deployment. The former `temporary-flying-nickel-213j01n.vercel.app` domain
+remains connected for existing links. Supabase Site URL is
+`https://lichendr.vercel.app`; its exact `/auth/callback` is allowlisted alongside
+the previous callbacks. A new hostname requires Google sign-in again; the same
+Google identity retains its existing projects.
+
+Domain change verified on 2026-10-07: both domains serve the same public demo;
+`/`, `/demo`, `/cuenta` and `/compartidos` return HTTP 200 on the new domain.
+The existing administrator completed Google sign-in and returned to `/demo`
+on the new host with four projects available. The authenticated vision
+capabilities endpoint reports segmentation and classification enabled/configured;
+the same endpoint remains HTTP 401 without a session.
+
 The example opens without Google or Vercel authentication. It shows four
 explicitly repeated copies of one demonstration photo and recorded colour /
 BioCLIP evidence, with an approximate 360° montage. It does not expose the
